@@ -64,6 +64,7 @@ import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTa
 import { artifactPanelTab, artifactTabId, artifactTabsForSession, upsertArtifactTab, type ArtifactTab } from "./artifact-tabs";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsView } from "./artifacts/ArtifactsView";
+import { SubscriptionsView } from "./subscriptions/SubscriptionsView";
 import { setArtifactOpener, useArtifactTitles } from "@/lib/artifact-store";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
@@ -113,10 +114,12 @@ import { getProjectDisplayName } from "@/lib/project-display";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 /** A page covering the chat area, named by `?view=`. */
-type WorkspaceView = "tasks" | "scheduled" | "artifacts" | null;
+type WorkspaceView = "tasks" | "scheduled" | "artifacts" | "subscriptions" | null;
 
 function parseWorkspaceView(value: string | null | undefined): WorkspaceView {
-  return value === "tasks" || value === "scheduled" || value === "artifacts" ? value : null;
+  return value === "tasks" || value === "scheduled" || value === "artifacts" || value === "subscriptions"
+    ? value
+    : null;
 }
 type AutoNameStatus =
   | { kind: "idle" }
@@ -204,6 +207,7 @@ export function AppShell() {
   const tasksOpen = workspaceView === "tasks";
   const scheduledOpen = workspaceView === "scheduled";
   const artifactsOpen = workspaceView === "artifacts";
+  const subscriptionsOpen = workspaceView === "subscriptions";
   const pageOpen = workspaceView !== null;
   // Read by restoreWorkspaceContext and handleSelectSession; those identities
   // must not change when a page opens.
@@ -834,6 +838,37 @@ export function AppShell() {
   const projectPickerStartCwd = isChatWorkspaceActive
     ? null
     : selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
+
+  // Subscriptions are collected by the server even while no page shows them, so
+  // the sidebar asks for "anything I have not shown yet" on a slow timer. The
+  // page itself clears it (POST /api/subscriptions/seen).
+  const [subscriptionsUnread, setSubscriptionsUnread] = useState(0);
+  useEffect(() => {
+    if (subscriptionsOpen || !projectPickerStartCwd) {
+      setSubscriptionsUnread(0);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(
+          `/api/subscriptions/status?cwd=${encodeURIComponent(projectPickerStartCwd)}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) return;
+        const body = await response.json() as { unread?: unknown };
+        if (!cancelled) setSubscriptionsUnread(typeof body.unread === "number" ? body.unread : 0);
+      } catch {
+        // A failed poll must never disturb the rest of the app.
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectPickerStartCwd, subscriptionsOpen]);
   // Until the server tells us the hidden chat cwd, an invalid URL cwd cannot
   // be classified. Keep it out of the error card rather than risk showing the
   // internal Chat workspace path during the first paint.
@@ -1391,6 +1426,7 @@ export function AppShell() {
   const handleOpenTasks = useCallback(() => openWorkspaceView("tasks"), [openWorkspaceView]);
   const handleOpenScheduled = useCallback(() => openWorkspaceView("scheduled"), [openWorkspaceView]);
   const handleOpenArtifacts = useCallback(() => openWorkspaceView("artifacts"), [openWorkspaceView]);
+  const handleOpenSubscriptions = useCallback(() => openWorkspaceView("subscriptions"), [openWorkspaceView]);
 
   // Validated and allow-listed like any project pick, which /api/models needs for the new folder.
   const handleBrowseScheduledFolder = useCallback(
@@ -1971,6 +2007,9 @@ export function AppShell() {
         scheduledOpen={scheduledOpen}
         onOpenArtifacts={handleOpenArtifacts}
         artifactsOpen={artifactsOpen}
+        onOpenSubscriptions={handleOpenSubscriptions}
+        subscriptionsOpen={subscriptionsOpen}
+        subscriptionsUnread={subscriptionsUnread}
         onChatWorkspaceCwdChange={setChatWorkspaceCwd}
       />
     </>
@@ -2984,6 +3023,10 @@ export function AppShell() {
             }}
             onContinueInNewChat={handleContinueArtifact}
           />
+        )}
+        {subscriptionsOpen && (
+          // Same workspace the Scheduled page uses: the one the sidebar is on.
+          <SubscriptionsView cwd={projectPickerStartCwd} />
         )}
       </div>
         </div>

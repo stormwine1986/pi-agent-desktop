@@ -46,6 +46,7 @@ import { orderChatFamilies, toggleId } from "@/lib/chat-groups";
 import { ArchivedProjectsSection } from "./ArchivedProjectsSection";
 import { ScheduledSidebarRow } from "./scheduled/ScheduledSidebarRow";
 import { ArtifactsSidebarRow } from "./artifacts/ArtifactsSidebarRow";
+import { SubscriptionsSidebarRow } from "./subscriptions/SubscriptionsSidebarRow";
 import { TasksSidebarRow } from "./tasks/TasksSidebarRow";
 import { isScheduledRunSession } from "@/hooks/useScheduledTasks";
 import { prefetchSessionData } from "@/lib/session-data-cache";
@@ -97,6 +98,11 @@ interface Props {
   /** Opens the Artifacts page; the row under Scheduled is absent without it. */
   onOpenArtifacts?: () => void;
   artifactsOpen?: boolean;
+  /** Opens the Subscriptions page; the row under Artifacts is absent without it. */
+  onOpenSubscriptions?: () => void;
+  subscriptionsOpen?: boolean;
+  /** Events recorded since the Subscriptions page was last shown. */
+  subscriptionsUnread?: number;
   onOpenTasks?: () => void;
   tasksOpen?: boolean;
 }
@@ -299,7 +305,7 @@ function readIdSetPref(key: Parameters<typeof getPrefJson>[0]): Set<string> {
     : new Set();
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onChatWorkspaceCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false, onOpenArtifacts, artifactsOpen = false, onOpenTasks, tasksOpen = false }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onChatWorkspaceCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false, onOpenArtifacts, artifactsOpen = false, onOpenSubscriptions, subscriptionsOpen = false, subscriptionsUnread = 0, onOpenTasks, tasksOpen = false }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [chatWorkspaceCwd, setChatWorkspaceCwd] = useState<string | null>(null);
@@ -1885,6 +1891,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         {onOpenTasks && <TasksSidebarRow active={tasksOpen} runningCount={runningSessionIds.size} onOpen={onOpenTasks} />}
         {onOpenScheduled && <ScheduledSidebarRow active={scheduledOpen} onOpen={onOpenScheduled} />}
         {onOpenArtifacts && <ArtifactsSidebarRow active={artifactsOpen} onOpen={onOpenArtifacts} />}
+        {onOpenSubscriptions && <SubscriptionsSidebarRow active={subscriptionsOpen} unread={subscriptionsUnread} onOpen={onOpenSubscriptions} />}
       </div>
 {/* Session search — keeps the original sidebar search styling and
           narrows the project tree to matching titles / first messages. Enter is
