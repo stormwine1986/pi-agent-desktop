@@ -1,7 +1,6 @@
 import { parseSseEvents } from "../sse-events";
 import {
   readSubscriptionConfig,
-  normalizeAction,
   streamUrlWithCid,
   type SubscriptionAction,
   type SubscriptionSource,
@@ -147,7 +146,7 @@ class WorkspaceRunner {
         types: splitParam(source.params.types),
         entityTypes: splitParam(source.params.entityTypes),
         workspaceId: source.params.workspaceId ?? null,
-        action: normalizeAction(source.action),
+        action: source.action,
         filter: source.filter,
         filterError: compiled.ok ? null : compiled.error,
         connection: "connecting",

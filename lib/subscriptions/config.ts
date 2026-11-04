@@ -16,7 +16,7 @@ import { load as loadYaml } from "js-yaml";
  *       url: http://localhost:3000/entity/events/stream
  *       params: { entityTypes: MR,OR, types: entity.created, workspaceId: ws_x }
  *       filter: 'aggregateType == "MR" && payload.toState == "DEFINED"'
- *       action: 新建任务
+ *       action: new-task          # notify | new-task
  */
 export type SubscriptionAction = "notify" | "new-task";
 
@@ -73,13 +73,18 @@ function paramValue(value: unknown): string | null {
   return null;
 }
 
-export function normalizeAction(value: unknown): SubscriptionAction {
-  if (typeof value !== "string") return "notify";
+/**
+ * Only the two documented words are accepted. Anything else is an error the
+ * page shows, rather than a silent fallback — a typo must not quietly turn
+ * "start a task" into "just record it".
+ */
+export function normalizeAction(value: unknown): SubscriptionAction | null {
+  if (value === undefined || value === null) return "notify";
+  if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "new-task" || normalized === "newtask" || normalized === "task" || value.trim() === "新建任务") {
-    return "new-task";
-  }
-  return "notify";
+  if (normalized === "notify") return "notify";
+  if (normalized === "new-task") return "new-task";
+  return null;
 }
 
 /** Absolute http(s) only, and never a fragment (it would not reach the server). */
@@ -162,6 +167,11 @@ export function parseSource(raw: unknown, index: number): ParsedSource {
     return { error: `${name}: prompt must be a string` };
   }
 
+  const action = normalizeAction(raw.action);
+  if (action === null) {
+    return { error: `${name}: action must be notify or new-task (got ${JSON.stringify(raw.action)})` };
+  }
+
   const headers: Record<string, string> = {};
   if (raw.headers !== undefined) {
     if (!isRecord(raw.headers)) return { error: `${name}: headers must be a mapping` };
@@ -184,7 +194,7 @@ export function parseSource(raw: unknown, index: number): ParsedSource {
       url: withParams(normalizedUrl.url, params),
       params,
       filter: typeof raw.filter === "string" ? raw.filter.trim() : "",
-      action: normalizeAction(raw.action),
+      action,
       prompt: typeof raw.prompt === "string" ? raw.prompt.trim() : "",
       apiKey,
       headers,
