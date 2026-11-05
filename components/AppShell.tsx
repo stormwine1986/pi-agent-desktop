@@ -18,6 +18,13 @@ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { clearDraft } from "@/lib/draft-store";
 import { TabBar, type Tab } from "./TabBar";
 import { LazyTerminalPanel as TerminalPanel, preloadTerminalPanel } from "./LazyTerminalPanel";
+import { ViewsPanel } from "./ViewsPanel";
+
+/** One to-do tab per workspace; the id is stable so reopening focuses it. */
+interface ViewsTabState {
+  id: string;
+  cwd: string;
+}
 
 // Heavy, rarely-used surfaces are code-split out of the main bundle. The
 // config modals may never be opened at all; FileViewer drags in markdown +
@@ -48,6 +55,7 @@ import { DomContextMenuHost } from "./DomContextMenuHost";
 import { getFileName } from "@/lib/file-paths";
 import { isPathInside } from "@/lib/file-links";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
+import type { EntityContextRef } from "@/lib/entity-context";
 import { PRODUCT_NAME } from "@/lib/branding";
 import { isImeComposing } from "@/lib/ime";
 import {
@@ -64,7 +72,6 @@ import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTa
 import { artifactPanelTab, artifactTabId, artifactTabsForSession, upsertArtifactTab, type ArtifactTab } from "./artifact-tabs";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsView } from "./artifacts/ArtifactsView";
-import { SubscriptionsView } from "./subscriptions/SubscriptionsView";
 import { setArtifactOpener, useArtifactTitles } from "@/lib/artifact-store";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
@@ -114,10 +121,10 @@ import { getProjectDisplayName } from "@/lib/project-display";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 /** A page covering the chat area, named by `?view=`. */
-type WorkspaceView = "tasks" | "scheduled" | "artifacts" | "subscriptions" | null;
+type WorkspaceView = "tasks" | "scheduled" | "artifacts" | null;
 
 function parseWorkspaceView(value: string | null | undefined): WorkspaceView {
-  return value === "tasks" || value === "scheduled" || value === "artifacts" || value === "subscriptions"
+  return value === "tasks" || value === "scheduled" || value === "artifacts"
     ? value
     : null;
 }
@@ -207,7 +214,6 @@ export function AppShell() {
   const tasksOpen = workspaceView === "tasks";
   const scheduledOpen = workspaceView === "scheduled";
   const artifactsOpen = workspaceView === "artifacts";
-  const subscriptionsOpen = workspaceView === "subscriptions";
   const pageOpen = workspaceView !== null;
   // Read by restoreWorkspaceContext and handleSelectSession; those identities
   // must not change when a page opens.
@@ -732,6 +738,9 @@ export function AppShell() {
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   const [artifactTabs, setArtifactTabs] = useState<ArtifactTab[]>([]);
+  // To-do views (`.pi/views.yaml`): one tab per workspace, opened from the
+  // project menu the same way a terminal is.
+  const [viewsTabs, setViewsTabs] = useState<ViewsTabState[]>([]);
   // artifactPanelTab reads each tab's newest title; this re-renders when one changes.
   useArtifactTitles(artifactTabs);
   const panelTabs: Tab[] = useMemo(() => [...fileTabs, ...terminalTabs.map((tab) => ({
@@ -740,8 +749,14 @@ export function AppShell() {
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
-  })), ...artifactTabs.map(artifactPanelTab)], [fileTabs, terminalTabs, artifactTabs]);
+  })), ...artifactTabs.map(artifactPanelTab), ...viewsTabs.map((tab) => ({
+    id: tab.id,
+    label: "待办",
+    filePath: tab.cwd,
+    kind: "views" as const,
+  }))], [fileTabs, terminalTabs, artifactTabs, viewsTabs]);
   const activeArtifactTab = artifactTabs.find((tab) => tab.id === activeFileTabId) ?? null;
+  const activeViewsTab = viewsTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const handleRightPanelToggle = useCallback(() => {
     if (isMobile) {
       setSidebarOpen(false);
@@ -813,7 +828,12 @@ export function AppShell() {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
   }, [isMobile]);
-
+  // A to-do row becomes a reference chip in the composer: the entity itself is
+  // not copied into the message, only its server/workspace/key.
+  const handleBringEntityToChat = useCallback((ref: EntityContextRef) => {
+    chatInputRef.current?.addEntityRef(ref);
+    if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
+  }, [isMobile]);
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const activeProjectKeyRef = useRef<string | null>(null);
@@ -839,36 +859,6 @@ export function AppShell() {
     ? null
     : selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
 
-  // Subscriptions are collected by the server even while no page shows them, so
-  // the sidebar asks for "anything I have not shown yet" on a slow timer. The
-  // page itself clears it (POST /api/subscriptions/seen).
-  const [subscriptionsUnread, setSubscriptionsUnread] = useState(0);
-  useEffect(() => {
-    if (subscriptionsOpen || !projectPickerStartCwd) {
-      setSubscriptionsUnread(0);
-      return;
-    }
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const response = await fetch(
-          `/api/subscriptions/status?cwd=${encodeURIComponent(projectPickerStartCwd)}`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) return;
-        const body = await response.json() as { unread?: unknown };
-        if (!cancelled) setSubscriptionsUnread(typeof body.unread === "number" ? body.unread : 0);
-      } catch {
-        // A failed poll must never disturb the rest of the app.
-      }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), 15_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [projectPickerStartCwd, subscriptionsOpen]);
   // Until the server tells us the hidden chat cwd, an invalid URL cwd cannot
   // be classified. Keep it out of the error card rather than risk showing the
   // internal Chat workspace path during the first paint.
@@ -1426,7 +1416,6 @@ export function AppShell() {
   const handleOpenTasks = useCallback(() => openWorkspaceView("tasks"), [openWorkspaceView]);
   const handleOpenScheduled = useCallback(() => openWorkspaceView("scheduled"), [openWorkspaceView]);
   const handleOpenArtifacts = useCallback(() => openWorkspaceView("artifacts"), [openWorkspaceView]);
-  const handleOpenSubscriptions = useCallback(() => openWorkspaceView("subscriptions"), [openWorkspaceView]);
 
   // Validated and allow-listed like any project pick, which /api/models needs for the new folder.
   const handleBrowseScheduledFolder = useCallback(
@@ -1729,6 +1718,16 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isChatWorkspaceActive, terminalTabs, isMobile]);
 
+  /** Opens (or focuses) the workspace's to-do tab in the right panel. */
+  const handleOpenViews = useCallback((cwd: string) => {
+    if (isChatWorkspaceActive) return;
+    const id = `views:${cwd}`;
+    setViewsTabs((tabs) => (tabs.some((tab) => tab.id === id) ? tabs : [...tabs, { id, cwd }]));
+    setActiveFileTabId(id);
+    setRightPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [isChatWorkspaceActive, isMobile]);
+
   // Message cards open artifacts through lib/artifact-store. An automatic open
   // (a streamed artifact just finished) is skipped on mobile, where the panel
   // would cover the reply that is still being read.
@@ -1760,7 +1759,7 @@ export function AppShell() {
     const remaining = terminalTabs.filter((item) => item.id !== tab.id);
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
     setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? null);
-    if (!replacement && !remaining.length && !fileTabs.length && !artifactTabs.length) setRightPanelOpen(false);
+    if (!replacement && !remaining.length && !fileTabs.length && !artifactTabs.length && !viewsTabs.length) setRightPanelOpen(false);
   };
 
   const handleCloseFileTab = useCallback((tabId: string) => {
@@ -1775,9 +1774,16 @@ export function AppShell() {
       setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
       return;
     }
+    if (viewsTabs.some((tab) => tab.id === tabId)) {
+      const remaining = viewsTabs.filter((tab) => tab.id !== tabId);
+      setViewsTabs(remaining);
+      setActiveFileTabId((cur) => cur !== tabId ? cur : remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? artifactTabs.at(-1)?.id ?? null);
+      if (!remaining.length && !fileTabs.length && !terminalTabs.length && !artifactTabs.length) setRightPanelOpen(false);
+      return;
+    }
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0 && terminalTabs.length === 0 && artifactTabs.length === 0) setRightPanelOpen(false);
+      if (next.length === 0 && terminalTabs.length === 0 && artifactTabs.length === 0 && viewsTabs.length === 0) setRightPanelOpen(false);
       return next;
     });
     setActiveFileTabId((cur) => {
@@ -1785,7 +1791,7 @@ export function AppShell() {
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? artifactTabs.at(-1)?.id ?? null;
     });
-  }, [fileTabs, terminalTabs, artifactTabs]);
+  }, [fileTabs, terminalTabs, artifactTabs, viewsTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1917,7 +1923,10 @@ export function AppShell() {
   }
   const panelHasViewer = Boolean(activeFileTabId && panelTabs.some((tab) => tab.id === activeFileTabId));
   const fileTreeAutoCollapsed = fileTreeNarrow && panelHasViewer && !fileTreeNarrowOverride;
-  const fileTreeShown = fileTreeOpen && !fileTreeAutoCollapsed;
+  // A to-do view fills the panel on its own: the project tree is about files,
+  // and keeping it beside a table only eats width. It comes back untouched
+  // when another tab is selected.
+  const fileTreeShown = fileTreeOpen && !fileTreeAutoCollapsed && !activeViewsTab;
   const handleFileTreeToggle = () => {
     if (fileTreeShown) {
       setFileTreeOpen(false);
@@ -1998,6 +2007,7 @@ export function AppShell() {
         onProjectsChange={handleProjectsChange}
         headerControls={sidebarHeaderControls}
         onOpenTerminal={handleOpenTerminal}
+        onOpenViews={handleOpenViews}
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
@@ -2007,9 +2017,6 @@ export function AppShell() {
         scheduledOpen={scheduledOpen}
         onOpenArtifacts={handleOpenArtifacts}
         artifactsOpen={artifactsOpen}
-        onOpenSubscriptions={handleOpenSubscriptions}
-        subscriptionsOpen={subscriptionsOpen}
-        subscriptionsUnread={subscriptionsUnread}
         onChatWorkspaceCwdChange={setChatWorkspaceCwd}
       />
     </>
@@ -3024,10 +3031,6 @@ export function AppShell() {
             onContinueInNewChat={handleContinueArtifact}
           />
         )}
-        {subscriptionsOpen && (
-          // Same workspace the Scheduled page uses: the one the sidebar is on.
-          <SubscriptionsView cwd={projectPickerStartCwd} />
-        )}
       </div>
         </div>
       </div>
@@ -3187,7 +3190,7 @@ export function AppShell() {
               onNewTerminal={visibleProjectCwd ? () => handleOpenTerminal(visibleProjectCwd) : undefined}
             />
           </div>
-          {workbenchCwd && (
+          {workbenchCwd && !activeViewsTab && (
             <button
               type="button"
               className={`file-workbench-icon-button file-tree-toggle${fileTreeShown ? " is-active" : ""}`}
@@ -3248,6 +3251,8 @@ export function AppShell() {
               title={activeArtifactTab.title}
               versionRequest={activeArtifactTab.versionRequest}
             />
+          ) : activeViewsTab ? (
+            <ViewsPanel cwd={activeViewsTab.cwd} onBringToChat={handleBringEntityToChat} />
           ) : activeFileTab?.filePath ? (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}

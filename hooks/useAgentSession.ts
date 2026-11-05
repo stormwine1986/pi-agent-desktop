@@ -12,6 +12,7 @@ import type {
   UserMessage,
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
+import { noteToolFinished } from "@/lib/entity-activity";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { attachmentAwareTitle } from "@/lib/chat-attachments";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
@@ -1814,6 +1815,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         if (isNestedToolExecutionEvent(event)) break;
+        noteToolFinished(typeof event.toolName === "string" ? event.toolName : "");
         const id = event.toolCallId as string;
         setActiveToolResults((prev) => {
           if (!prev.has(id)) return prev;

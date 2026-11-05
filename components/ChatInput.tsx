@@ -40,6 +40,11 @@ import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
 import { ContextUsageRing } from "./ContextUsageRing";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
+import {
+  entityRefId,
+  formatEntityContextBlock,
+  type EntityContextRef,
+} from "@/lib/entity-context";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector } from "./ModelSelector";
 import {
@@ -180,6 +185,8 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
   /** Chats only: read text files into chips that travel inside the next message. */
   addTextFiles: (files: File[]) => Promise<ChatAttachmentRejection[]>;
+  /** Carry one entity (from a to-do view) into the next message as a reference. */
+  addEntityRef: (ref: EntityContextRef) => void;
   focus: () => void;
   rekeyDraft: (previousKey: string, nextKey: string) => void;
   restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: string) => void;
@@ -876,6 +883,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   ));
   const attachedFilesRef = useRef(attachedFiles);
   attachedFilesRef.current = attachedFiles;
+  // Entities carried in from the to-do views. They travel as a pointer block in
+  // the next message, not as a copy of the row that was clicked.
+  const [entityRefs, setEntityRefs] = useState<EntityContextRef[]>([]);
+  const entityRefsRef = useRef(entityRefs);
+  entityRefsRef.current = entityRefs;
   const projectLabel = getProjectLabel(projectPath, projectOptions);
   const trimmedValue = value.trimStart();
   const bashMode = !chatOnly && attachedImages.length === 0 && trimmedValue.startsWith("!");
@@ -1158,6 +1170,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       return rejected;
     },
+    addEntityRef(ref: EntityContextRef) {
+      addEntityRef(ref);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
     focus() {
       textareaRef.current?.focus();
     },
@@ -1237,6 +1253,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setAttachedFiles(next);
   }, []);
 
+  const clearEntityRefs = useCallback(() => {
+    entityRefsRef.current = [];
+    setEntityRefs([]);
+  }, []);
+
+  /** Same entity from the same server is one chip, however many times the row is clicked. */
+  const addEntityRef = useCallback((ref: EntityContextRef) => {
+    const id = entityRefId(ref);
+    if (entityRefsRef.current.some((item) => entityRefId(item) === id)) return;
+    const next = [...entityRefsRef.current, ref];
+    entityRefsRef.current = next;
+    setEntityRefs(next);
+  }, []);
+
+  const removeEntityRef = useCallback((id: string) => {
+    const next = entityRefsRef.current.filter((item) => entityRefId(item) !== id);
+    entityRefsRef.current = next;
+    setEntityRefs(next);
+  }, []);
+
   const clearInput = useCallback(() => {
     valueRef.current = "";
     setValue("");
@@ -1247,10 +1283,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
     clearAttachedFiles();
+    clearEntityRefs();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearAttachedFiles, clearImages, draftKey, setHashQuery]);
+  }, [clearAttachedFiles, clearEntityRefs, clearImages, draftKey, setHashQuery]);
 
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
@@ -1368,7 +1405,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const resolvedMessage = composeMessageWithAttachedFiles(
       await resolveSessionReferences(msg, sessionMentionTargetsRef.current),
       attachedFilesRef.current,
-    );
+    ) + formatEntityContextBlock(entityRefsRef.current);
     onSend(resolvedMessage, attachedImages.length ? attachedImages : undefined);
     clearInput();
   }, [value, attachedImages, workspaceUnavailable, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock, sessionMentionTargetsRef]);
@@ -2328,6 +2365,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   className="composer-file-chip-remove"
                   onClick={() => removeAttachedFile(file.id)}
                   aria-label={t("chat.removeAttachment", { name: file.name })}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {entityRefs.length > 0 && (
+          <div className="composer-file-chips" style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            {entityRefs.map((ref) => (
+              <span
+                key={entityRefId(ref)}
+                className="composer-file-chip"
+                title={`${ref.key}${ref.name ? ` · ${ref.name}` : ""}${ref.state ? ` · ${ref.state}` : ""}\n来自 ${ref.server} / ${ref.workspace}`}
+                style={{ borderColor: "var(--accent)" }}
+              >
+                <span className="composer-file-chip-name">
+                  {ref.key}
+                  {ref.name ? ` ${ref.name}` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="composer-file-chip-remove"
+                  onClick={() => removeEntityRef(entityRefId(ref))}
+                  aria-label={t("chat.removeAttachment", { name: ref.key })}
                 >
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
                     <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />

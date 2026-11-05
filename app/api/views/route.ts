@@ -1,0 +1,169 @@
+import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { NextResponse } from "next/server";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
+import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * Rows for the to-do views declared by `.pi/views.yaml`.
+ *
+ * Each view is answered on its own: one broken DQL or one unreachable server
+ * must not blank the panel, and the panel needs the reason per view — an empty
+ * table would read as "nothing to do", which is exactly the failure this
+ * feature cannot afford.
+ */
+/** The identity of one row's entity, so the panel can hand the row to a conversation. */
+interface RowEntity {
+  key: string;
+  name: string;
+  state: string;
+}
+
+interface ViewRows {
+  title: string;
+  /** Data channel and space the view reads from, needed to hand a row to a conversation. */
+  server: string;
+  workspace: string;
+  columns: string[];
+  rows: string[][];
+  /** Aligned with `rows`: the entity behind each row, independent of which columns were configured. */
+  entities: RowEntity[];
+  /** Whether the panel may announce new rows for this view. */
+  notify: boolean;
+  error: string | null;
+}
+
+/** `created_by` → `createdBy` and back, so a column name works whichever the server uses. */
+function aliases(column: string): string[] {
+  const camel = column.replace(/_([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
+  const snake = column.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+  return [column, camel, snake].filter((name, index, all) => all.indexOf(name) === index);
+}
+
+function cell(item: unknown, column: string): string {
+  if (typeof item !== "object" || item === null) return "";
+  const record = item as Record<string, unknown>;
+  const fields = typeof record.fields === "object" && record.fields !== null
+    ? (record.fields as Record<string, unknown>)
+    : undefined;
+
+  let value: unknown;
+  for (const name of aliases(column)) {
+    if (record[name] !== undefined) {
+      value = record[name];
+      break;
+    }
+    if (fields?.[name] !== undefined) {
+      value = fields[name];
+      break;
+    }
+  }
+
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+async function runView(agentDir: string, cwd: string, view: ViewDefinition): Promise<ViewRows> {
+  const empty = {
+    title: view.title,
+    server: view.server,
+    workspace: view.workspace,
+    columns: view.columns,
+    rows: [],
+    entities: [],
+    notify: view.notify,
+    error: null,
+  };
+  // The error has to name the query that failed: the panel shows it as-is, and
+  // "which DQL is this?" is the first question a broken view raises.
+  const withQuery = (reason: string) => `${reason}\nDQL：${view.dql}`;
+  const target = resolveMcpTarget(agentDir, cwd, view.server);
+  if (!target.ok) return { ...empty, error: withQuery(target.error) };
+
+  const args: Record<string, unknown> = {
+    workspaceId: view.workspace,
+    query: view.dql,
+    limit: view.pageSize,
+  };
+  if (view.orderBy) {
+    args.orderBy = view.orderBy;
+    args.order = view.order;
+  }
+
+  const result = await callMcpTool(target.target, "list", args);
+  if (!result.ok) return { ...empty, error: withQuery(result.error) };
+
+  const payload = result.value as { items?: unknown };
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  if (!Array.isArray(payload?.items)) {
+    return { ...empty, error: withQuery("list 的返回里没有 items 数组") };
+  }
+
+  return {
+    title: view.title,
+    server: view.server,
+    workspace: view.workspace,
+    columns: view.columns,
+    rows: items.map((item) => view.columns.map((column) => cell(item, column))),
+    entities: items.map((item) => {
+      const record = (typeof item === "object" && item !== null ? item : {}) as Record<string, unknown>;
+      return {
+        key: record.key === undefined || record.key === null ? "" : String(record.key),
+        name: record.name === undefined || record.name === null ? "" : String(record.name),
+        state: record.state === undefined || record.state === null ? "" : String(record.state),
+      };
+    }),
+    notify: view.notify,
+    error: null,
+  };
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const rawCwd = url.searchParams.get("cwd");
+  if (!rawCwd) return NextResponse.json({ error: "cwd is required" }, { status: 400 });
+
+  const cwd = resolve(rawCwd);
+  let stats;
+  try {
+    stats = await stat(cwd);
+  } catch {
+    return NextResponse.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
+  }
+  if (!stats.isDirectory()) return NextResponse.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
+
+  // The yaml decides which hosts get contacted and which workspace is read, so
+  // it is read under the same allow-list as any other workspace file.
+  const allowedRoots = await getAllowedFileRoots();
+  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+    return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  }
+
+  const config = readViewsConfig(cwd);
+  if (!config.exists) {
+    return NextResponse.json({ path: config.path, exists: false, error: null, views: [] });
+  }
+  if (config.error) {
+    return NextResponse.json({ path: config.path, exists: true, error: config.error, views: [] });
+  }
+
+  const agentDir = getAgentDir();
+  const views = await Promise.all(
+    config.views.map(async (entry): Promise<ViewRows> => {
+      // A view that failed validation still occupies its slot in the panel: the
+      // user needs to see which entry is broken.
+      if (!entry.view) {
+        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, error: entry.error ?? "配置无效" };
+      }
+      return runView(agentDir, cwd, entry.view);
+    }),
+  );
+
+  return NextResponse.json({ path: config.path, exists: true, error: null, views });
+}

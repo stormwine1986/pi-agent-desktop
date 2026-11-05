@@ -242,6 +242,7 @@ interface ProjectContextMenuProps {
   onShowNewWorktree: () => void;
   onBackToActions: () => void;
   onOpenTerminal?: () => void;
+  onOpenViews?: () => void;
   onReveal: () => void;
   /** The project sits in the Archive group: the menu is Restore + Reveal. */
   archived?: boolean;
@@ -263,7 +264,7 @@ export function ProjectContextMenuPanel({
   menuRef, projectRoot, pos, anchor, view, branchMenu, branchLoading, selectedCwd, switchingBranch,
   fetching, worktreeBusy, worktreeError, confirmRemove, newBranch,
   canReveal, revealLabel, projectRevealError, t,
-  onShowBranches, onShowWorktrees, onShowNewWorktree, onBackToActions, onOpenTerminal, onReveal, archived = false, onArchive, onRestore,
+  onShowBranches, onShowWorktrees, onShowNewWorktree, onBackToActions, onOpenTerminal, onOpenViews, onReveal, archived = false, onArchive, onRestore,
   onSwitchBranch, onFetch, onSelectWorktree, onRequestRemove, onConfirmRemove, onCancelRemove,
   onNewBranchChange, onCreateWorktree,
   onClose = () => {},
@@ -323,6 +324,11 @@ export function ProjectContextMenuPanel({
         {onOpenTerminal && (
           <button type="button" role="menuitem" onClick={onOpenTerminal}>
             {t("sidebar.openTerminalHere")}
+          </button>
+        )}
+        {onOpenViews && (
+          <button type="button" role="menuitem" onClick={onOpenViews}>
+            {t("sidebar.openViews")}
           </button>
         )}
         {canReveal && (
