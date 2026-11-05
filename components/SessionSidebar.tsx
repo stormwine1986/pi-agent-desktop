@@ -46,7 +46,6 @@ import { orderChatFamilies, toggleId } from "@/lib/chat-groups";
 import { ArchivedProjectsSection } from "./ArchivedProjectsSection";
 import { ScheduledSidebarRow } from "./scheduled/ScheduledSidebarRow";
 import { ArtifactsSidebarRow } from "./artifacts/ArtifactsSidebarRow";
-import { SubscriptionsSidebarRow } from "./subscriptions/SubscriptionsSidebarRow";
 import { TasksSidebarRow } from "./tasks/TasksSidebarRow";
 import { isScheduledRunSession } from "@/hooks/useScheduledTasks";
 import { prefetchSessionData } from "@/lib/session-data-cache";
@@ -85,6 +84,7 @@ interface Props {
   ) => void;
   onChatWorkspaceCwdChange?: (cwd: string | null) => void;
   onOpenTerminal?: (cwd: string) => void;
+  onOpenViews?: (cwd: string) => void;
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
@@ -98,11 +98,6 @@ interface Props {
   /** Opens the Artifacts page; the row under Scheduled is absent without it. */
   onOpenArtifacts?: () => void;
   artifactsOpen?: boolean;
-  /** Opens the Subscriptions page; the row under Artifacts is absent without it. */
-  onOpenSubscriptions?: () => void;
-  subscriptionsOpen?: boolean;
-  /** Events recorded since the Subscriptions page was last shown. */
-  subscriptionsUnread?: number;
   onOpenTasks?: () => void;
   tasksOpen?: boolean;
 }
@@ -305,7 +300,7 @@ function readIdSetPref(key: Parameters<typeof getPrefJson>[0]): Set<string> {
     : new Set();
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onChatWorkspaceCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false, onOpenArtifacts, artifactsOpen = false, onOpenSubscriptions, subscriptionsOpen = false, subscriptionsUnread = 0, onOpenTasks, tasksOpen = false }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onChatWorkspaceCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenViews, onOpenScheduled, scheduledOpen = false, onOpenArtifacts, artifactsOpen = false, onOpenTasks, tasksOpen = false }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [chatWorkspaceCwd, setChatWorkspaceCwd] = useState<string | null>(null);
@@ -814,7 +809,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       };
       for (const id of completedWithNotifications) {
         void notifyDesktop({
-          title: "Pi Agent",
+          title: "Entity Assistant",
           body: `Finished: ${sessionName(id)}`,
         });
       }
@@ -1891,7 +1886,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         {onOpenTasks && <TasksSidebarRow active={tasksOpen} runningCount={runningSessionIds.size} onOpen={onOpenTasks} />}
         {onOpenScheduled && <ScheduledSidebarRow active={scheduledOpen} onOpen={onOpenScheduled} />}
         {onOpenArtifacts && <ArtifactsSidebarRow active={artifactsOpen} onOpen={onOpenArtifacts} />}
-        {onOpenSubscriptions && <SubscriptionsSidebarRow active={subscriptionsOpen} unread={subscriptionsUnread} onOpen={onOpenSubscriptions} />}
       </div>
 {/* Session search — keeps the original sidebar search styling and
           narrows the project tree to matching titles / first messages. Enter is
@@ -2217,6 +2211,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             const cwd = projectMenu.root;
             closeProjectMenu();
             onOpenTerminal(cwd);
+          } : undefined}
+          onOpenViews={onOpenViews ? () => {
+            const cwd = projectMenu.root;
+            closeProjectMenu();
+            onOpenViews(cwd);
           } : undefined}
           onReveal={() => void revealProjectInFileManager(projectMenu.root)}
           archived={projectMenu.archived === true}
