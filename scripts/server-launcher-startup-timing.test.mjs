@@ -36,19 +36,27 @@ test("the launcher logs the first request, its response and event-loop stalls", 
   await writeFile(join(dir, "server.js"), fakeServer);
 
   const result = spawnSync(process.execPath, [join(dir, "desktop-server.cjs")], {
-    env: { ...process.env, PI_WEB_PARENT_PID: String(process.pid) },
+    env: {
+      ...process.env,
+      PI_WEB_PARENT_PID: String(process.pid),
+      PI_DESKTOP_SPAWN_EPOCH_MS: String(Date.now()),
+    },
     encoding: "utf8",
     timeout: 15_000,
   });
   assert.equal(result.status, 0, result.stderr);
   const log = result.stderr;
 
-  assert.match(log, /\[Pi Agent\] launcher started \+\d+\.\ds \(node v/);
-  assert.match(log, /\[Pi Agent\] first connection accepted \+\d+\.\ds/);
+  assert.match(log, /\[Entity Assistant\] launcher started \+\d+\.\ds \(node v/);
+  // segment 1: process creation up to the launcher's first line
+  assert.match(log, /\[Entity Assistant\] launcher reached \d+ ms after the shell spawned it/);
+  // segment 2: loading Next + the pi SDK, before anything listens
+  assert.match(log, /\[Entity Assistant\] next bootstrap took \d+ ms/);
+  assert.match(log, /\[Entity Assistant\] first connection accepted \+\d+\.\ds/);
   // The query string is dropped: it may carry tokens.
-  assert.match(log, /\[Pi Agent\] first request GET \/api\/desktop\/identity received \+\d+\.\ds\n/);
-  assert.match(log, /\[Pi Agent\] first response 204 sent after \d+ ms/);
-  assert.match(log, /\[Pi Agent\] event loop blocked for \d+ ms \(ended \+\d+\.\ds\)/);
+  assert.match(log, /\[Entity Assistant\] first request GET \/api\/desktop\/identity received \+\d+\.\ds\n/);
+  assert.match(log, /\[Entity Assistant\] first response 204 sent after \d+ ms/);
+  assert.match(log, /\[Entity Assistant\] event loop blocked for \d+ ms \(ended \+\d+\.\ds\)/);
   // Only the first request is reported.
   assert.equal(log.match(/first request/g).length, 1);
 });

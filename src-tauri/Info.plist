@@ -8,10 +8,10 @@
       <true/>
     </dict>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>Pi Agent 需要访问您的桌面文件夹,以便在添加项目时选择其中的目录。Pi Agent needs access to your Desktop folder to pick a project directory.</string>
+    <string>Entity Assistant 需要访问您的桌面文件夹,以便在添加项目时选择其中的目录。Entity Assistant needs access to your Desktop folder to pick a project directory.</string>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>Pi Agent 需要访问您的文稿文件夹,以便在添加项目时选择其中的目录。Pi Agent needs access to your Documents folder to pick a project directory.</string>
+    <string>Entity Assistant 需要访问您的文稿文件夹,以便在添加项目时选择其中的目录。Entity Assistant needs access to your Documents folder to pick a project directory.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>Pi Agent 需要访问您的下载文件夹,以便在添加项目时选择其中的目录。Pi Agent needs access to your Downloads folder to pick a project directory.</string>
+    <string>Entity Assistant 需要访问您的下载文件夹,以便在添加项目时选择其中的目录。Entity Assistant needs access to your Downloads folder to pick a project directory.</string>
   </dict>
 </plist>

@@ -39,7 +39,7 @@ const resourcesDir = join(rootDir, "src-tauri", "resources");
 const serverDir = join(resourcesDir, "server");
 
 const NODE_CANDIDATES = [
-  join(resourcesDir, "Pi Agent Server.app", "Contents", "MacOS", "node"),
+  join(resourcesDir, "Entity Assistant Server.app", "Contents", "MacOS", "node"),
   join(resourcesDir, "node", "node"),
   join(resourcesDir, "node", "node.exe"),
 ];

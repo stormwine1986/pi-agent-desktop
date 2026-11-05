@@ -37,11 +37,17 @@ use shell::{
     schedule_reveal_deadline, set_close_quits, show_main_window_cmd, window_painted, CloseQuits,
     DesktopApiToken, DesktopServer, AUTOSTART_ARG, WINDOW_LABEL,
 };
+#[cfg(feature = "custom-protocol")]
+use shell::{close_splash, show_splash};
 #[cfg(target_os = "linux")]
 use shell::{build_linux_tray, show_main_window};
 
 const DESKTOP_API_TOKEN_ENV: &str = "PI_DESKTOP_API_TOKEN";
 const DESKTOP_INSTANCE_ID_ENV: &str = "PI_DESKTOP_INSTANCE_ID";
+/// Milliseconds since the Unix epoch at the moment the shell asked for the
+/// server process. The launcher subtracts it so server.log shows what the user
+/// spends looking at nothing: process creation and antivirus scanning.
+const SPAWN_EPOCH_ENV: &str = "PI_DESKTOP_SPAWN_EPOCH_MS";
 const DESKTOP_INSTANCE_ID_HEADER: &str = "x-pi-desktop-instance";
 #[cfg(not(feature = "custom-protocol"))]
 const DEV_SERVER_URL: &str = "http://127.0.0.1:30141";
@@ -425,7 +431,7 @@ fn login_shell_path() -> Option<String> {
 
 #[cfg(all(feature = "custom-protocol", target_os = "macos"))]
 fn bundled_node_path(resource_dir: &Path) -> PathBuf {
-    resource_dir.join("resources/Pi Agent Server.app/Contents/MacOS/node")
+    resource_dir.join("resources/Entity Assistant Server.app/Contents/MacOS/node")
 }
 
 #[cfg(all(feature = "custom-protocol", target_os = "windows"))]
@@ -673,7 +679,7 @@ fn wait_for_server(
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             return Err(io::Error::other(format!(
-                "Pi Agent server exited early with {status}; see {}",
+                "Entity Assistant server exited early with {status}; see {}",
                 log_path.display()
             )));
         }
@@ -689,7 +695,7 @@ fn wait_for_server(
                 // EADDRINUSE while another process is answering on the same port.
                 if let Some(status) = child.try_wait()? {
                     return Err(io::Error::other(format!(
-                        "Pi Agent server exited during startup with {status}; see {}",
+                        "Entity Assistant server exited during startup with {status}; see {}",
                         log_path.display()
                     )));
                 }
@@ -703,7 +709,7 @@ fn wait_for_server(
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!(
-            "Pi Agent server did not start within {} seconds ({attempts} probes, last: {last_failure}); see {}",
+            "Entity Assistant server did not start within {} seconds ({attempts} probes, last: {last_failure}); see {}",
             timeout.as_secs(),
             log_path.display()
         ),
@@ -732,7 +738,7 @@ fn start_packaged_server(
     app: &tauri::AppHandle,
     desktop_api_token: &str,
     desktop_instance_id: &str,
-) -> Result<(Url, DesktopServer), Box<dyn std::error::Error>> {
+) -> Result<SpawnedServer, Box<dyn std::error::Error>> {
     let resource_dir = child_process_compatible_path(&app.path().resource_dir()?);
     let node_path = bundled_node_path(&resource_dir);
     if !node_path.is_file() {
@@ -796,27 +802,80 @@ fn start_packaged_server(
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
+    if let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        command.env(SPAWN_EPOCH_ENV, since_epoch.as_millis().to_string());
+    }
+
     let mut child = command.spawn()?;
 
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    // Startup timing, segment 1 of 3: the shell has handed off to Node. The
+    // launcher logs segment 2 (how long Node took to run its first line) and
+    // segment 3 (first connection / request / response), so a slow start can be
+    // attributed without guessing.
+    desktop_log(
+        app,
+        &format!(
+            "startup timing: server process spawned (pid {}) at +{}ms",
+            child.id(),
+            since_process_start_ms()
+        ),
+    );
+
+    Ok(SpawnedServer {
+        child,
+        port,
+        log_path,
+    })
+}
+
+/// A packaged server that has been started but whose readiness has not been
+/// waited for yet.
+#[cfg(feature = "custom-protocol")]
+struct SpawnedServer {
+    child: Child,
+    port: u16,
+    log_path: std::path::PathBuf,
+}
+
+/// Waits for the spawned server to answer and hands back the running server.
+///
+/// Split from `spawn_packaged_server` so the caller can put something on screen
+/// while Node boots: creating the splash window costs ~1.4s of main-thread time
+/// on Windows (measured), and doing that before the spawn pushed the server's
+/// start from +134ms to +2216ms — slower than having no splash at all.
+#[cfg(feature = "custom-protocol")]
+fn await_packaged_server(
+    app: &tauri::AppHandle,
+    mut spawn: SpawnedServer,
+    desktop_instance_id: &str,
+) -> Result<(Url, DesktopServer), Box<dyn std::error::Error>> {
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spawn.port);
     let timeout = if launched_at_login() {
         SERVER_START_TIMEOUT_AT_LOGIN
     } else {
         SERVER_START_TIMEOUT
     };
-    if let Err(error) = wait_for_server(&mut child, address, desktop_instance_id, &log_path, timeout)
-    {
+    if let Err(error) = wait_for_server(
+        &mut spawn.child,
+        address,
+        desktop_instance_id,
+        &spawn.log_path,
+        timeout,
+    ) {
         desktop_log(
             app,
-            &format!("server start failed: {error}\nserver.log tail:\n{}", server_log_tail(&log_path)),
+            &format!(
+                "server start failed: {error}\nserver.log tail:\n{}",
+                server_log_tail(&spawn.log_path)
+            ),
         );
-        let server = DesktopServer::running(child);
+        let server = DesktopServer::running(spawn.child);
         server.stop();
         return Err(error.into());
     }
 
-    let url = format!("http://127.0.0.1:{port}").parse()?;
-    Ok((url, DesktopServer::running(child)))
+    let url = format!("http://127.0.0.1:{}", spawn.port).parse()?;
+    Ok((url, DesktopServer::running(spawn.child)))
 }
 
 #[cfg(all(test, feature = "custom-protocol"))]
@@ -971,13 +1030,13 @@ mod tests {
     #[test]
     fn simplifies_verbatim_windows_path_before_launching_node() {
         let path = Path::new(
-            r"\\?\C:\Users\毕良霞\AppData\Local\Pi Agent\resources\server\desktop-server.cjs",
+            r"\\?\C:\Users\毕良霞\AppData\Local\Entity Assistant\resources\server\desktop-server.cjs",
         );
 
         assert_eq!(
             child_process_compatible_path(path),
             PathBuf::from(
-                r"C:\Users\毕良霞\AppData\Local\Pi Agent\resources\server\desktop-server.cjs"
+                r"C:\Users\毕良霞\AppData\Local\Entity Assistant\resources\server\desktop-server.cjs"
             )
         );
     }
@@ -985,7 +1044,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn leaves_non_windows_path_unchanged() {
-        let path = Path::new("/Applications/Pi Agent.app/Contents/Resources/server");
+        let path = Path::new("/Applications/Entity Assistant.app/Contents/Resources/server");
         assert_eq!(child_process_compatible_path(path), PathBuf::from(path));
     }
 
@@ -1015,9 +1074,9 @@ fn report_startup_failure(app: &AppHandle, error: &str) {
     let handle = app.clone();
     app.dialog()
         .message(format!(
-            "Pi Agent could not start its background service.\n\n{error}\n\nOpening the app again retries."
+            "Entity Assistant could not start its background service.\n\n{error}\n\nOpening the app again retries."
         ))
-        .title("Pi Agent")
+        .title("Entity Assistant")
         .kind(MessageDialogKind::Error)
         .show(move |_| handle.exit(1));
 }
@@ -1265,7 +1324,7 @@ pub fn run() {
             };
             let Some(action) = action else { return };
             if let Err(error) = app.emit("pi-agent-menu-action", action) {
-                eprintln!("Pi Agent menu action failed: {error}");
+                eprintln!("Entity Assistant menu action failed: {error}");
             }
         })
         .manage(CloseQuits(Mutex::new(false)))
@@ -1313,8 +1372,18 @@ pub fn run() {
             }
 
             #[cfg(feature = "custom-protocol")]
-            let started =
-                start_packaged_server(app.handle(), &server_api_token, &server_instance_id);
+            let started = {
+                // Spawn first, decorate second: the splash costs ~1.4s of
+                // main-thread time, and Node boots in parallel with it.
+                let spawned =
+                    start_packaged_server(app.handle(), &server_api_token, &server_instance_id);
+                if !launched_at_login() {
+                    show_splash(app.handle());
+                }
+                spawned.and_then(|spawn| {
+                    await_packaged_server(app.handle(), spawn, &server_instance_id)
+                })
+            };
             #[cfg(not(feature = "custom-protocol"))]
             let started = start_development_server(app.handle());
             // Returning the error from setup makes Tauri panic, which Windows
@@ -1322,6 +1391,10 @@ pub fn run() {
             let (url, server) = match started {
                 Ok(started) => started,
                 Err(error) => {
+                    // Take the splash down first: the failure report opens a
+                    // window of its own and must not be buried under it.
+                    #[cfg(feature = "custom-protocol")]
+                    close_splash(app.handle());
                     report_startup_failure(app.handle(), &error.to_string());
                     return Ok(());
                 }
@@ -1395,7 +1468,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("failed to build Pi Agent desktop app");
+        .expect("failed to build Entity Assistant desktop app");
 
     app.run(|app_handle, event| match event {
         // The main window is being replaced after its WebView died; the

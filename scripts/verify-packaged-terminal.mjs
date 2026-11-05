@@ -5,7 +5,7 @@ import { resolve, join } from "node:path";
 
 // Exercise the actual packaged runtime: source-tree tests cannot detect omitted workers.
 const resources = resolve(process.argv[2] || "src-tauri/resources");
-const node = ["node/node.exe", "node/node", "Pi Agent Server.app/Contents/MacOS/node"]
+const node = ["node/node.exe", "node/node", "Entity Assistant Server.app/Contents/MacOS/node"]
   .map((file) => join(resources, file)).find(existsSync);
 assert.ok(node, "Bundled Node runtime is required");
 const program = `

@@ -34,7 +34,7 @@ export async function GET() {
 }
 
 /** Starter content written when custom.css is first created. */
-const STARTER_CSS = `/* Pi Agent custom stylesheet.
+const STARTER_CSS = `/* Entity Assistant custom stylesheet.
  * Loaded last, so these rules win the cascade.
  * Reload the window (Ctrl+R / Cmd+R) to apply edits.
  *

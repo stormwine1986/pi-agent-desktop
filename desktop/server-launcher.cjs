@@ -36,7 +36,7 @@ try {
     nodeModule.enableCompileCache(cacheDir);
   }
 } catch (cacheError) {
-  console.error("[Pi Agent] compile cache unavailable:", cacheError);
+  console.error("[Entity Assistant] compile cache unavailable:", cacheError);
 }
 
 // Startup diagnostics (#157). On some Windows logins the shell's identity
@@ -46,7 +46,17 @@ try {
 // (module loading, antivirus scanning). Observation only, and only for the
 // first few minutes; times are seconds since this Node process started.
 const sinceStart = () => `+${process.uptime().toFixed(1)}s`;
-console.error(`[Pi Agent] launcher started ${sinceStart()} (node ${process.version})`);
+console.error(`[Entity Assistant] launcher started ${sinceStart()} (node ${process.version})`);
+
+// The shell stamps the moment it asked for this process; the gap is what the
+// user spends looking at nothing — process creation plus whatever an antivirus
+// does to a freshly installed node.exe. Absent when the launcher runs by hand.
+const shellSpawnedAt = Number.parseInt(process.env.PI_DESKTOP_SPAWN_EPOCH_MS ?? "", 10);
+if (Number.isFinite(shellSpawnedAt) && shellSpawnedAt > 0) {
+  console.error(
+    `[Entity Assistant] launcher reached ${Date.now() - shellSpawnedAt} ms after the shell spawned it (${sinceStart()})`,
+  );
+}
 {
   const STALL_TICK_MS = 250;
   const STALL_REPORT_MS = 2_000;
@@ -58,7 +68,7 @@ console.error(`[Pi Agent] launcher started ${sinceStart()} (node ${process.versi
     const gap = now - lastTick - STALL_TICK_MS;
     lastTick = now;
     if (gap >= STALL_REPORT_MS) {
-      console.error(`[Pi Agent] event loop blocked for ${gap} ms (ended ${sinceStart()})`);
+      console.error(`[Entity Assistant] event loop blocked for ${gap} ms (ended ${sinceStart()})`);
     }
     if (now > watchUntil) clearInterval(stallWatch);
   }, STALL_TICK_MS);
@@ -72,16 +82,16 @@ console.error(`[Pi Agent] launcher started ${sinceStart()} (node ${process.versi
   http.Server.prototype.emit = function emitWithStartupTiming(event, ...args) {
     if (event === "connection" && !sawConnection) {
       sawConnection = true;
-      console.error(`[Pi Agent] first connection accepted ${sinceStart()}`);
+      console.error(`[Entity Assistant] first connection accepted ${sinceStart()}`);
     } else if (event === "request" && !sawRequest) {
       sawRequest = true;
       const [request, response] = args;
       const received = Date.now();
       const label = `${request?.method ?? "?"} ${String(request?.url ?? "?").split("?")[0]}`;
-      console.error(`[Pi Agent] first request ${label} received ${sinceStart()}`);
+      console.error(`[Entity Assistant] first request ${label} received ${sinceStart()}`);
       response?.once?.("finish", () => {
         console.error(
-          `[Pi Agent] first response ${response.statusCode} sent after ${Date.now() - received} ms (${sinceStart()})`,
+          `[Entity Assistant] first response ${response.statusCode} sent after ${Date.now() - received} ms (${sinceStart()})`,
         );
       });
     }
@@ -99,14 +109,14 @@ const expectedParentPid = Number.parseInt(process.env.PI_WEB_PARENT_PID ?? "", 1
 // or is force-terminated by macOS.
 const parentWatchdog = setInterval(() => {
   if (!Number.isInteger(expectedParentPid) || process.ppid === 1) {
-    console.error("[Pi Agent] desktop shell is gone (orphaned); server exiting");
+    console.error("[Entity Assistant] desktop shell is gone (orphaned); server exiting");
     process.exit(0);
   }
 
   try {
     process.kill(expectedParentPid, 0);
   } catch {
-    console.error(`[Pi Agent] desktop shell (pid ${expectedParentPid}) is gone; server exiting`);
+    console.error(`[Entity Assistant] desktop shell (pid ${expectedParentPid}) is gone; server exiting`);
     process.exit(0);
   }
 }, 1_000);
@@ -114,10 +124,10 @@ parentWatchdog.unref();
 
 // Observation only: neither listener changes how the process dies.
 process.on("uncaughtExceptionMonitor", (error, origin) => {
-  console.error(`[Pi Agent] ${origin}:`, error);
+  console.error(`[Entity Assistant] ${origin}:`, error);
 });
 process.on("exit", (code) => {
-  console.error(`[Pi Agent] server process exit (code ${code})`);
+  console.error(`[Entity Assistant] server process exit (code ${code})`);
 });
 
 // ABI-mismatch tourniquet: wrap process.dlopen so a native module compiled
@@ -146,7 +156,7 @@ if (typeof process.dlopen === "function") {
         const compiledAbi = match[1];
         const runtimeAbi = secondMatch ? secondMatch[1] : String(process.versions.modules);
         const enhanced = new Error(
-          `[Pi Agent] Native module ABI mismatch: ${filename}\n` +
+          `[Entity Assistant] Native module ABI mismatch: ${filename}\n` +
             `  compiled for NODE_MODULE_VERSION ${compiledAbi}, runtime is NODE_MODULE_VERSION ${runtimeAbi} (Node ${process.version}).\n` +
             `  The desktop bundles Node ${process.version} but ~/.pi/agent/npm is shared with the CLI, which may\n` +
             `  have compiled this .node under a different Node major.\n` +
@@ -183,14 +193,14 @@ try {
       if (!entry.isDirectory()) continue;
       fs.rmSync(path.join(nestedScopeDir, entry.name), { recursive: true, force: true });
       console.error(
-        `[Pi Agent] removed stale ${pkg.name}/node_modules/@earendil-works/${entry.name} ` +
+        `[Entity Assistant] removed stale ${pkg.name}/node_modules/@earendil-works/${entry.name} ` +
           `left behind by an overwrite install (see issue #72)`,
       );
     }
   }
 } catch (cleanupError) {
   // Cleanup must never keep the server from starting.
-  console.error("[Pi Agent] stale-dependency cleanup failed:", cleanupError);
+  console.error("[Entity Assistant] stale-dependency cleanup failed:", cleanupError);
 }
 
 // #149 self-heal: the packaged build ships no `route-cache`, but at runtime
@@ -219,15 +229,22 @@ try {
       fs.rmSync(path.join(nextDir, "server", "route-cache"), { recursive: true, force: true });
       fs.writeFileSync(markerPath, buildId);
       console.error(
-        `[Pi Agent] cleared route cache for build ${buildId} (previous: ${recorded ?? "none"}; see issue #149)`,
+        `[Entity Assistant] cleared route cache for build ${buildId} (previous: ${recorded ?? "none"}; see issue #149)`,
       );
     }
   }
 } catch (cacheError) {
   // Cleanup must never keep the server from starting.
-  console.error("[Pi Agent] route-cache cleanup failed:", cacheError);
+  console.error("[Entity Assistant] route-cache cleanup failed:", cacheError);
 }
 
-// The standalone Next.js entrypoint is CommonJS.
+// The standalone Next.js entrypoint is CommonJS. Timed on its own: loading the
+// few hundred modules Next and the pi SDK need is the slow part a warm compile
+// cache speeds up, and it would otherwise be invisible between "launcher
+// started" and "first connection accepted".
+const nextBootstrapStarted = Date.now();
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./server.js");
+console.error(
+  `[Entity Assistant] next bootstrap took ${Date.now() - nextBootstrapStarted} ms (${sinceStart()})`,
+);

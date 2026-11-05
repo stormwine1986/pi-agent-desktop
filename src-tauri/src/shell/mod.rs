@@ -2,6 +2,7 @@ mod macos_menu;
 mod platform_tray;
 pub mod popup;
 mod server;
+mod splash;
 mod webview_recovery;
 mod window;
 #[cfg(target_os = "macos")]
@@ -27,6 +28,7 @@ pub use platform_tray::build_linux_tray;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use platform_tray::build_platform_tray;
 pub use server::{CloseQuits, DesktopApiToken, DesktopServer};
+pub use splash::{close_splash, show_splash};
 pub use webview_recovery::{is_rebuilding_main_window, on_main_window_destroyed};
 pub use window::{build_window, launched_at_login, AUTOSTART_ARG};
 
@@ -84,6 +86,9 @@ pub fn schedule_reveal_after_page_load(app: &AppHandle) {
 
 pub fn show_main_window(app: &AppHandle) {
     MAIN_WINDOW_REVEALED.store(true, Ordering::SeqCst);
+    // The real window is about to draw: take the "starting up" panel down
+    // before it, not after, so the two never overlap.
+    close_splash(app);
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         #[cfg(target_os = "macos")]
         if window_appkit::show_hidden_window_masked(app, &window) {

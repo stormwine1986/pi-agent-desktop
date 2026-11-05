@@ -39,7 +39,7 @@ test("rejects Base64 that is not a Minisign public key", () => {
 
 test("injects the updater key without losing existing configuration", () => {
   const config = {
-    productName: "Pi Agent",
+    productName: "Entity Assistant",
     plugins: {
       updater: {
         endpoints: ["https://example.com/latest.json"],
@@ -49,7 +49,7 @@ test("injects the updater key without losing existing configuration", () => {
   };
 
   assert.deepEqual(injectUpdaterPublicKey(config, encodedPublicKey), {
-    productName: "Pi Agent",
+    productName: "Entity Assistant",
     plugins: {
       updater: {
         endpoints: ["https://example.com/latest.json"],

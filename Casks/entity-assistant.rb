@@ -1,9 +1,9 @@
-cask "pi-agent" do
+cask "entity-assistant" do
   version "0.8.1"
   sha256 "c96d1ccd2b16a000db812eda76c9657a452b9df7797f688ebd8e5eb84fb6d7a5"
 
-  url "https://github.com/abcwyc/pi-agent-desktop/releases/download/v#{version}/Pi.Agent_#{version}_aarch64.dmg"
-  name "Pi Agent"
+  url "https://github.com/abcwyc/pi-agent-desktop/releases/download/v#{version}/Entity.Assistant_#{version}_aarch64.dmg"
+  name "Entity Assistant"
   desc "Local AI agent desktop app built on pi"
   homepage "https://github.com/abcwyc/pi-agent-desktop"
 
@@ -19,7 +19,7 @@ cask "pi-agent" do
   # Homebrew's own floor, so a bare `depends_on :macos` is the whole requirement.
   depends_on :macos
 
-  app "Pi Agent.app"
+  app "Entity Assistant.app"
 
   # Sessions, models and credentials live in ~/.pi and are shared with the pi
   # CLI, so they are deliberately not part of zap.

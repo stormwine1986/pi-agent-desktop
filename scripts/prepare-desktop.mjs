@@ -12,7 +12,7 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const desktopBuildDir = join(rootDir, ".next-desktop");
 const standaloneDir = join(desktopBuildDir, "standalone");
 const serverResourcesDir = join(rootDir, "src-tauri", "resources", "server");
-const serverHelperDir = join(rootDir, "src-tauri", "resources", "Pi Agent Server.app");
+const serverHelperDir = join(rootDir, "src-tauri", "resources", "Entity Assistant Server.app");
 const nodeResourcesDir = join(rootDir, "src-tauri", "resources", "node");
 
 async function runNextBuild() {
@@ -230,7 +230,6 @@ async function bundleNodeRuntime() {
   const triple = desktopTargetTriple();
   await rm(serverHelperDir, { recursive: true, force: true });
   await rm(nodeResourcesDir, { recursive: true, force: true });
-
   let binaryPath;
   if (process.platform === "darwin") {
     // Wrap Node in an LSBackgroundOnly .app so it does not appear in the Dock.
@@ -296,6 +295,14 @@ if (overlong.length > 0) {
 }
 
 const { binaryPath: nodeBinary, triple } = await bundleNodeRuntime();
+
+// `tauri build` copies `src-tauri/resources` into `target/release/resources`
+// file by file, never deleting what an earlier build left behind. Stale
+// hashed chunks therefore pile up in the installer — the to-do view work alone
+// left 496 dead files there — so the copy is forced to start from empty. The
+// bundler re-creates this directory on every build.
+const staleBundleResources = join(rootDir, "src-tauri", "target", "release", "resources");
+await rm(staleBundleResources, { recursive: true, force: true });
 
 console.log(`Desktop server staged at ${serverResourcesDir}`);
 console.log(`Node runtime staged at ${nodeBinary} (${triple})`);

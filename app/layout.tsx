@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
-import { Noto_Sans_Mono } from "next/font/google";
 import { PwaRegistration } from "@/components/PwaRegistration";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import { FONT_INIT_SCRIPT } from "@/lib/font-preferences";
 import "katex/dist/katex.min.css";
+// Vendored Noto Sans Mono: keeps the build off fonts.googleapis.com. See the
+// header of that file for why it replaces `next/font/google`.
+import "./fonts/noto-sans-mono/noto.css";
 import "./globals.css";
 import "./settings.css";
 // Fork-local restyle layer — must come after the upstream stylesheets so its
@@ -12,12 +14,6 @@ import "./native-theme.css";
 import { PRODUCT_NAME } from "@/lib/branding";
 
 const CUSTOM_CSS_ACTIVATE_SCRIPT = `(function(){var l=document.querySelector("link[data-custom-css]");if(!l)return;var a=function(){l.media="all"};l.addEventListener("load",a);l.addEventListener("error",a);if(l.sheet)a()})();`;
-
-const notoSansMono = Noto_Sans_Mono({
-  subsets: ["latin", "cyrillic"],
-  variable: "--font-noto-mono",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: PRODUCT_NAME,
@@ -67,7 +63,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" translate="no" className={`${notoSansMono.variable} notranslate`} suppressHydrationWarning>
+    <html lang="en" translate="no" className="notranslate" suppressHydrationWarning>
       <head>
         <meta name="google" content="notranslate" />
         {/* Optional user stylesheet: <agentDir>/desktop/custom.css served by

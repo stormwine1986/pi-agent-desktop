@@ -387,7 +387,7 @@ export async function setCloseQuitsNative(quit: boolean): Promise<void> {
   await invoke("set_close_quits", { quit });
 }
 
-/** Whether the OS currently launches Pi Agent at login (false in a browser). */
+/** Whether the OS currently launches Entity Assistant at login (false in a browser). */
 export async function isAutostartEnabledNative(): Promise<boolean> {
   if (!isTauriDesktop()) return false;
   const { isEnabled } = await import("@tauri-apps/plugin-autostart");

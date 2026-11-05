@@ -115,6 +115,6 @@ export function isPermissionError(error: unknown): boolean {
 export function directoryPermissionMessage(directory: string): string {
   return (
     `No permission to access "${directory}". ` +
-    `无法访问 "${directory}":没有权限。请在 macOS「系统设置 → 隐私与安全性」中允许 Pi Agent 访问,或检查文件夹读写权限后重试。`
+    `无法访问 "${directory}":没有权限。请在 macOS「系统设置 → 隐私与安全性」中允许 Entity Assistant 访问,或检查文件夹读写权限后重试。`
   );
 }

@@ -14,9 +14,9 @@ use tauri::Manager;
 use super::{quit_application, show_main_window};
 
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_SHOW_LABEL: &str = "Show Pi Agent";
+const LINUX_TRAY_SHOW_LABEL: &str = "Show Entity Assistant";
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_QUIT_LABEL: &str = "Quit Pi Agent";
+const LINUX_TRAY_QUIT_LABEL: &str = "Quit Entity Assistant";
 
 #[cfg(target_os = "linux")]
 struct LinuxTray {
@@ -31,7 +31,7 @@ impl ksni::Tray for LinuxTray {
     }
 
     fn title(&self) -> String {
-        "Pi Agent".into()
+        "Entity Assistant".into()
     }
 
     fn icon_name(&self) -> String {
@@ -44,7 +44,7 @@ impl ksni::Tray for LinuxTray {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "Pi Agent".into(),
+            title: "Entity Assistant".into(),
             ..Default::default()
         }
     }
@@ -121,7 +121,7 @@ pub fn build_linux_tray(app: &tauri::App) -> Result<(), std::io::Error> {
 
     std::thread::spawn(move || {
         if let Err(error) = service.run() {
-            eprintln!("Pi Agent Linux tray stopped: {error}");
+            eprintln!("Entity Assistant Linux tray stopped: {error}");
         }
     });
     Ok(())
@@ -133,8 +133,8 @@ pub fn build_linux_tray(app: &tauri::App) -> Result<(), std::io::Error> {
 // hidden on close.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn build_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let show_item = MenuItem::with_id(app, "show", "Show Pi Agent", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit Pi Agent", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "Show Entity Assistant", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit Entity Assistant", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
     let icon = app
         .default_window_icon()
@@ -144,7 +144,7 @@ pub fn build_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::E
     let _tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .tooltip("Pi Agent")
+        .tooltip("Entity Assistant")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => quit_application(app),
