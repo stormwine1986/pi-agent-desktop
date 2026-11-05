@@ -69,3 +69,6 @@ e2e_*.mjs
 
 # Built phone shell for the relay entry host (npm run relay:shell)
 /relay-shell/dist/
+
+# Local WorkBuddy workspace data (memory, blobs) — never committed.
+.workbuddy-ai/
