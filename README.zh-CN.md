@@ -1,4 +1,4 @@
-# Pi Agent
+# Entity Assistant
 
 [English](./README.md) | **简体中文**
 
@@ -15,49 +15,49 @@
 - 预览源码、Diff、Markdown、图片、音频、PDF 和 DOCX 等文件。
 - 支持深色模式、会话自动命名、完成提示音和运行状态恢复。
 - 每周检查三个组成项目的稳定 GitHub Release，并在发现更新时提醒用户。
-- 通过一个升级按钮安装完整、签名的 Pi Agent 新版本并自动重启。
+- 通过一个升级按钮安装完整、签名的 Entity Assistant 新版本并自动重启。
 
-![Pi Agent 浅色模式界面](./docs/screenshots/pi-agent-light.webp)
+![Entity Assistant 浅色模式界面](./docs/screenshots/pi-agent-light.webp)
 
-![Pi Agent 深色模式界面](./docs/screenshots/pi-agent-dark.webp)
+![Entity Assistant 深色模式界面](./docs/screenshots/pi-agent-dark.webp)
 
-**[⬇️ 下载 Pi Agent（macOS / Windows）](https://github.com/abcwyc/pi-agent-desktop/releases)**
+**[⬇️ 下载 Entity Assistant（macOS / Windows）](https://github.com/stormwine1986/pi-agent-desktop/releases)**
 
-项目仓库：[abcwyc/pi-agent-desktop](https://github.com/abcwyc/pi-agent-desktop)
+项目仓库：[stormwine1986/pi-agent-desktop](https://github.com/stormwine1986/pi-agent-desktop)
 
 ## 安装与使用
 
 ### 安装桌面 App
 
-发布版本可从 [GitHub Releases](https://github.com/abcwyc/pi-agent-desktop/releases) 下载：
+发布版本可从 [GitHub Releases](https://github.com/stormwine1986/pi-agent-desktop/releases) 下载：
 
 - Apple Silicon Mac：下载 `aarch64.dmg`，打开后将 App 拖入 `Applications`。正式 Release 不构建 Intel Mac 版本。
 - 使用 [Homebrew](https://brew.sh) 的 Apple Silicon Mac：从本仓库的 tap 安装。tap 通过仓库地址添加，第一条命令只需执行一次：
 
   ```bash
-  brew tap abcwyc/pi-agent-desktop https://github.com/abcwyc/pi-agent-desktop
-  brew install --cask pi-agent
+  brew tap stormwine1986/pi-agent-desktop https://github.com/stormwine1986/pi-agent-desktop
+  brew install --cask entity-assistant
   ```
 
-  App 会在设置中自行升级，所以 `brew upgrade` 默认不会处理它，除非加上 `--greedy`。`brew uninstall --cask --zap pi-agent` 会删除 App 及其窗口状态，但不会删除与 pi CLI 共用的 `~/.pi`。
+  App 会在设置中自行升级，所以 `brew upgrade` 默认不会处理它，除非加上 `--greedy`。`brew uninstall --cask --zap entity-assistant` 会删除 App 及其窗口状态，但不会删除与 pi CLI 共用的 `~/.pi`。
 - Linux x64：下载 `.deb` 包，用发行版自带的包管理器安装。社区还维护了一个 [flatpark.org](https://flatpark.org/apps/io.github.abcwyc.pi-agent-desktop/) 上的 Flatpak 版本——不是官方发布，但 Flatpak 兼容大多数发行版，也会帮你处理更新。
 - Windows x64：下载名称以 `x64-setup.exe` 结尾的安装程序并运行。安装器会在需要时安装 Microsoft WebView2。
 
-正式 Release 支持运行 macOS 11 或更高版本的 Apple Silicon Mac、Windows 10/11 x64，以及使用 WebKitGTK 4.1 和 GTK 3 的 Linux x64 发行版。桌面包内包含运行 Pi Agent 所需的 Next.js 服务、Node.js runtime 和当前版本的 Pi SDK，打开 App 时会自动启动本地服务，不需要用户另开终端、安装 Node.js 或单独启动 Web Server。
+正式 Release 支持运行 macOS 11 或更高版本的 Apple Silicon Mac、Windows 10/11 x64，以及使用 WebKitGTK 4.1 和 GTK 3 的 Linux x64 发行版。桌面包内包含运行 Entity Assistant 所需的 Next.js 服务、Node.js runtime 和当前版本的 Pi SDK，打开 App 时会自动启动本地服务，不需要用户另开终端、安装 Node.js 或单独启动 Web Server。
 
-> 安装 Pi Agent 后，可以直接使用 App 中的 Pi Agent 功能；但它不会在系统全局安装 `pi` 命令。如果还需要在终端中使用 Pi CLI，请按照 [pi 项目](https://github.com/earendil-works/pi) 的说明单独安装。
+> 安装 Entity Assistant 后，可以直接使用 App 中的 Entity Assistant 功能；但它不会在系统全局安装 `pi` 命令。如果还需要在终端中使用 Pi CLI，请按照 [pi 项目](https://github.com/earendil-works/pi) 的说明单独安装。
 
 > **macOS 首次打开被拦截**：macOS 版本目前没有 Apple Developer ID 签名和公证，首次打开时 Gatekeeper 可能提示“无法验证开发者”或“已损坏，无法打开”（通过 Homebrew 安装也一样）。可以在「系统设置 › 隐私与安全性」中点「仍要打开」，或在终端执行：
 >
 > ```bash
-> xattr -dr com.apple.quarantine "/Applications/Pi Agent.app"
+> xattr -dr com.apple.quarantine "/Applications/Entity Assistant.app"
 > ```
 
 首次启用签名自动升级前，旧的无 updater 版本需要手动安装一次新的签名 App。此后即可在设置中完成升级。
 
 ### 使用现有 Pi 数据
 
-Pi Agent 默认读取 Pi 的本地数据目录：
+Entity Assistant 默认读取 Pi 的本地数据目录：
 
 ```text
 ~/.pi/agent/
@@ -69,15 +69,15 @@ Pi Agent 默认读取 Pi 的本地数据目录：
 ~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl
 ```
 
-如果电脑上已经使用过 Pi，安装 App 后可以继续浏览原有会话、模型和认证配置。可以通过 `PI_CODING_AGENT_DIR` 指向其他 Pi Agent 数据目录。
+如果电脑上已经使用过 Pi，安装 App 后可以继续浏览原有会话、模型和认证配置。可以通过 `PI_CODING_AGENT_DIR` 指向其他 Entity Assistant 数据目录。
 
 模型密钥和会话数据保留在用户电脑上；文件浏览 API 仅允许访问当前会话、所选项目和显式授权的工作目录。
 
 ## 版本检查与升级
 
-Pi Agent 最多每七天检查一次以下仓库的最新稳定 Release：
+Entity Assistant 最多每七天检查一次以下仓库的最新稳定 Release：
 
-- `abcwyc/pi-agent-desktop`
+- `stormwine1986/pi-agent-desktop`
 - `earendil-works/pi`
 - `agegr/pi-web`
 
@@ -97,7 +97,7 @@ Pi Agent 最多每七天检查一次以下仓库的最新稳定 Release：
 
 ## HTTP 代理
 
-Pi Agent 的服务端模型和 API 请求支持标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。例如从终端启动开发服务时：
+Entity Assistant 的服务端模型和 API 请求支持标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。例如从终端启动开发服务时：
 
 ```bash
 HTTP_PROXY=http://127.0.0.1:7890 \
@@ -130,7 +130,7 @@ npm run dev
 
 ### 网络暴露（局域网）
 
-`npm run dev` 和 `npm start` 只监听 `127.0.0.1`。`npm run dev:lan`、`npm run start:lan` 与 `pi-web -H 0.0.0.0` 会监听所有网卡。Pi Agent 能以你的身份执行 shell 命令（终端标签和 agent 自身工具）并读取文件，因此**任何能访问该端口的人都拥有同样的权限**。使用局域网模式前请先设置密码：
+`npm run dev` 和 `npm start` 只监听 `127.0.0.1`。`npm run dev:lan`、`npm run start:lan` 与 `pi-web -H 0.0.0.0` 会监听所有网卡。Entity Assistant 能以你的身份执行 shell 命令（终端标签和 agent 自身工具）并读取文件，因此**任何能访问该端口的人都拥有同样的权限**。使用局域网模式前请先设置密码：
 
 ```bash
 PI_WEB_PASSWORD='换成足够长的口令' npm run dev:lan
@@ -195,7 +195,7 @@ npm run desktop:build
   - 命中高/中风险文件 → 推送 `sync/pi-web-<tag>` 分支并开 PR，附上边界报告，**不**触发发布。合并该 PR 才会发版。
 - [`release.yml`](./.github/workflows/release.yml)：收到组件同步工作流的显式触发后，串行构建 Apple Silicon (`aarch64`) DMG 和 Windows x64 NSIS `-setup.exe`，不构建 Intel Mac 版本。Release 在两个平台的 updater 签名文件、`latest.json` 和组件清单全部上传完成前保持草稿状态 —— `manifest` job 依赖**整个**构建矩阵，任一平台失败就不会转正。构建失败会创建/更新 `release-failure` Issue。
 
-上游同步使用 Git 合并，因此本仓库维护的 Pi Agent 品牌、设置入口和升级逻辑会作为本地修改保留。合并冲突会让工作流停止——这是安全的失败方式。真正危险的是**无冲突但语义错误**的合并：上游改了本仓库也改过的区域，Git 干净地合上了，测试也全绿。上面的边界求交就是为此设置的，规则见 [维护边界说明](./docs/ownership-boundaries.md)。
+上游同步使用 Git 合并，因此本仓库维护的 Entity Assistant 品牌、设置入口和升级逻辑会作为本地修改保留。合并冲突会让工作流停止——这是安全的失败方式。真正危险的是**无冲突但语义错误**的合并：上游改了本仓库也改过的区域，Git 干净地合上了，测试也全绿。上面的边界求交就是为此设置的，规则见 [维护边界说明](./docs/ownership-boundaries.md)。
 
 同步失败会自动创建/更新 `component-sync-failure` Issue，不会静默积压。
 
@@ -231,6 +231,6 @@ instrumentation.ts     Next.js 服务端 HTTP 代理初始化
 
 ## 署名与许可证
 
-Pi Agent 的桌面集成由 `pi-agent-desktop` 提供，核心能力和 Web 界面分别来自 [earendil-works/pi](https://github.com/earendil-works/pi) 与 [agegr/pi-web](https://github.com/agegr/pi-web)。感谢这些项目及其贡献者。
+Entity Assistant 的桌面集成由 `pi-agent-desktop` 提供，核心能力和 Web 界面分别来自 [earendil-works/pi](https://github.com/earendil-works/pi) 与 [agegr/pi-web](https://github.com/agegr/pi-web)。感谢这些项目及其贡献者。
 
 本仓库根目录代码遵循 [`LICENSE`](./LICENSE) 中的 MIT License。三个组成项目的代码和依赖同时受各自仓库许可证约束；复制、修改或重新分发时请保留相应版权与许可声明。

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Rewrites the version and sha256 of Casks/pi-agent.rb for a published release.
+// Rewrites the version and sha256 of Casks/entity-assistant.rb for a published release.
 //   node scripts/update-homebrew-cask.mjs <version> <sha256>
 // The release workflow calls this after the release is published, with the
 // digest GitHub reports for the aarch64 DMG.
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-export const CASK_PATH = fileURLToPath(new URL("../Casks/pi-agent.rb", import.meta.url));
+export const CASK_PATH = fileURLToPath(new URL("../Casks/entity-assistant.rb", import.meta.url));
 
 export function updateCask(source, version, sha256) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid version: ${version}`);
@@ -15,7 +15,7 @@ export function updateCask(source, version, sha256) {
     .replace(/^(\s*version )"[^"]*"/m, `$1"${version}"`)
     .replace(/^(\s*sha256 )"[^"]*"/m, `$1"${sha256}"`);
   if (!next.includes(`version "${version}"`) || !next.includes(`sha256 "${sha256}"`)) {
-    throw new Error("Casks/pi-agent.rb has no version/sha256 line to update");
+    throw new Error("Casks/entity-assistant.rb has no version/sha256 line to update");
   }
   return next;
 }
@@ -28,5 +28,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const sha256 = rawSha.replace(/^sha256:/, "");
   await writeFile(CASK_PATH, updateCask(await readFile(CASK_PATH, "utf8"), version, sha256));
-  console.log(`Casks/pi-agent.rb -> ${version} (${sha256})`);
+  console.log(`Casks/entity-assistant.rb -> ${version} (${sha256})`);
 }

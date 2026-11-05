@@ -2,11 +2,11 @@
 
 `pi-agent-desktop` 会将已安装的 macOS、Windows 或 Linux 应用作为一个由 updater 签名的完整包更新。该安装包会记录三个组件在 `src-tauri/resources/component-versions.json` 中的确切版本：
 
-1. `abcwyc/pi-agent-desktop`
+1. `stormwine1986/pi-agent-desktop`
 2. `earendil-works/pi`
 3. `agegr/pi-web`
 
-The settings screen checks only the latest stable `abcwyc/pi-agent-desktop` GitHub Release, at most once a week. If the installed desktop app version is older, its single **Upgrade** button downloads that signed release, installs the complete app, and restarts it. It never replaces JavaScript or dependencies inside an already installed signed app.
+The settings screen checks only the latest stable `stormwine1986/pi-agent-desktop` GitHub Release, at most once a week. If the installed desktop app version is older, its single **Upgrade** button downloads that signed release, installs the complete app, and restarts it. It never replaces JavaScript or dependencies inside an already installed signed app.
 
 ## Automatic component sync
 

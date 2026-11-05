@@ -19,7 +19,7 @@ test("updateCask rewrites only the version and sha256 lines", async () => {
 
 test("the cask points at the aarch64 DMG the release publishes", async () => {
   const source = await readFile(CASK_PATH, "utf8");
-  assert.match(source, /releases\/download\/v#\{version\}\/Pi\.Agent_#\{version\}_aarch64\.dmg/);
+  assert.match(source, /releases\/download\/v#\{version\}\/Entity\.Assistant_#\{version\}_aarch64\.dmg/);
   assert.match(source, /depends_on arch: :arm64/);
   // `depends_on macos: ">= :big_sur"` is deprecated in Homebrew 5+, and any
   // versioned minimum at or below Big Sur is redundant under Homebrew's own

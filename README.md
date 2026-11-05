@@ -1,4 +1,4 @@
-# Pi Agent
+# Entity Assistant
 
 **English** | [简体中文](./README.zh-CN.md)
 
@@ -15,50 +15,50 @@
 - Preview source code, diffs, Markdown, images, audio, PDF, and DOCX files.
 - Dark mode, automatic session naming, a completion sound, and restored run state.
 - A weekly check of the latest stable `pi-agent-desktop` GitHub Release, with an in-app notice only when the installed app is older.
-- One upgrade button installs a complete, signed new build of Pi Agent and restarts automatically.
+- One upgrade button installs a complete, signed new build of Entity Assistant and restarts automatically.
 
-![Pi Agent light mode](./docs/screenshots/pi-agent-light.webp)
+![Entity Assistant light mode](./docs/screenshots/pi-agent-light.webp)
 
-![Pi Agent dark mode](./docs/screenshots/pi-agent-dark.webp)
+![Entity Assistant dark mode](./docs/screenshots/pi-agent-dark.webp)
 
-**[⬇️ Download Pi Agent (macOS / Windows)](https://github.com/abcwyc/pi-agent-desktop/releases)**
+**[⬇️ Download Entity Assistant (macOS / Windows)](https://github.com/stormwine1986/pi-agent-desktop/releases)**
 
-Repository: [abcwyc/pi-agent-desktop](https://github.com/abcwyc/pi-agent-desktop)
+Repository: [stormwine1986/pi-agent-desktop](https://github.com/stormwine1986/pi-agent-desktop)
 
 ## Installation And Usage
 
 ### Install The Desktop App
 
-Builds are available from [GitHub Releases](https://github.com/abcwyc/pi-agent-desktop/releases):
+Builds are available from [GitHub Releases](https://github.com/stormwine1986/pi-agent-desktop/releases):
 
 - Apple Silicon Mac: download the `aarch64.dmg`, open it, and drag the app into `Applications`. Official releases do not build for Intel Macs.
 - Apple Silicon Mac with [Homebrew](https://brew.sh): install from this repository's tap. The tap is added from the repo URL, so the first command is needed once:
 
   ```bash
-  brew tap abcwyc/pi-agent-desktop https://github.com/abcwyc/pi-agent-desktop
-  brew install --cask pi-agent
+  brew tap stormwine1986/pi-agent-desktop https://github.com/stormwine1986/pi-agent-desktop
+  brew install --cask entity-assistant
   ```
 
-  The app upgrades itself from Settings, so `brew upgrade` leaves it alone unless you pass `--greedy`. `brew uninstall --cask --zap pi-agent` removes the app and its window state but never `~/.pi`, which the pi CLI shares.
+  The app upgrades itself from Settings, so `brew upgrade` leaves it alone unless you pass `--greedy`. `brew uninstall --cask --zap entity-assistant` removes the app and its window state but never `~/.pi`, which the pi CLI shares.
 - Linux x64: download the `.deb` package and install it with your distribution's package manager. A community-maintained Flatpak is also available at [flatpark.org](https://flatpark.org/apps/io.github.abcwyc.pi-agent-desktop/) — not an official release, but Flatpak works across most distributions and handles updates for you.
 
 - Windows x64: download the installer whose name ends in `x64-setup.exe` and run it. The installer pulls in Microsoft WebView2 when it is missing.
 
 Official releases support Apple Silicon Macs running macOS 11 or later, Windows 10/11 x64, and Linux x64 distributions with WebKitGTK 4.1 and GTK 3. The desktop package bundles the Next.js server, the Node.js runtime, and the current Pi SDK, so the local server starts with the app — no separate terminal, Node.js installation, or manually started web server is required.
 
-> Installing Pi Agent gives you the agent inside the app, but it does not install a global `pi` command. If you also want the Pi CLI in your terminal, install it separately by following the [pi project](https://github.com/earendil-works/pi) instructions.
+> Installing Entity Assistant gives you the agent inside the app, but it does not install a global `pi` command. If you also want the Pi CLI in your terminal, install it separately by following the [pi project](https://github.com/earendil-works/pi) instructions.
 
 > **macOS blocks the first launch**: the macOS build is not yet signed with an Apple Developer ID or notarized, so Gatekeeper may say the developer cannot be verified or that the app "is damaged and can't be opened" (Homebrew installs included). Click "Open Anyway" in System Settings › Privacy & Security, or run:
 >
 > ```bash
-> xattr -dr com.apple.quarantine "/Applications/Pi Agent.app"
+> xattr -dr com.apple.quarantine "/Applications/Entity Assistant.app"
 > ```
 
 Before signed auto-updates can be used for the first time, an older build without the updater has to be replaced by manually installing a signed one. Upgrades then happen from Settings.
 
 ### Use Existing Pi Data
 
-Pi Agent reads Pi's local data directory by default:
+Entity Assistant reads Pi's local data directory by default:
 
 ```text
 ~/.pi/agent/
@@ -76,9 +76,9 @@ Model keys and session data stay on your machine. The file-browsing API only all
 
 ## Update Checks And Upgrades
 
-Pi Agent checks the latest stable release of `abcwyc/pi-agent-desktop` at most once every seven days:
+Entity Assistant checks the latest stable release of `stormwine1986/pi-agent-desktop` at most once every seven days:
 
-- `abcwyc/pi-agent-desktop`
+- `stormwine1986/pi-agent-desktop`
 - `earendil-works/pi`
 - `agegr/pi-web`
 
@@ -132,7 +132,7 @@ Do not run `next build` or `npm run build` during normal development. They write
 
 ### Network Exposure (LAN)
 
-`npm run dev` and `npm start` listen on `127.0.0.1` only. `npm run dev:lan`, `npm run start:lan` and `pi-web -H 0.0.0.0` listen on every interface. Pi Agent can run shell commands (the terminal tab and the agent's own tools) and read files as you, so **anyone who can reach the port gets the same access**. Before using a LAN mode, set a password:
+`npm run dev` and `npm start` listen on `127.0.0.1` only. `npm run dev:lan`, `npm run start:lan` and `pi-web -H 0.0.0.0` listen on every interface. Entity Assistant can run shell commands (the terminal tab and the agent's own tools) and read files as you, so **anyone who can reach the port gets the same access**. Before using a LAN mode, set a password:
 
 ```bash
 PI_WEB_PASSWORD='choose-a-long-passphrase' npm run dev:lan
@@ -199,7 +199,7 @@ The repository contains two chained automation workflows:
   - High or medium risk files hit → pushes a `sync/pi-web-<tag>` branch and opens a PR with the boundary report, and does **not** trigger a release. Merging that PR is what ships a version.
 - [`release.yml`](./.github/workflows/release.yml): after an explicit trigger from the component sync workflow, serially builds the Apple Silicon (`aarch64`) DMG, the Linux x64 `.deb`, and the Windows x64 NSIS `-setup.exe`. No Intel Mac build is produced. The release stays a draft until the updater signature files, `latest.json`, and the component manifest for all platforms are uploaded — the `manifest` job depends on the **entire** build matrix, so a failure on any platform keeps it from being published. Build failures create or update a `release-failure` issue.
 
-Upstream sync uses a Git merge, so this fork's Pi Agent branding, settings entry points, and upgrade logic survive as local modifications. Merge conflicts stop the workflow, which is the safe failure mode. The genuinely dangerous case is a **conflict-free but semantically wrong** merge: upstream changed a region this fork also changed, Git merged it cleanly, and the tests still pass. The boundary intersection above exists for exactly that case; the rules are in [Ownership boundaries](./docs/ownership-boundaries.md).
+Upstream sync uses a Git merge, so this fork's Entity Assistant branding, settings entry points, and upgrade logic survive as local modifications. Merge conflicts stop the workflow, which is the safe failure mode. The genuinely dangerous case is a **conflict-free but semantically wrong** merge: upstream changed a region this fork also changed, Git merged it cleanly, and the tests still pass. The boundary intersection above exists for exactly that case; the rules are in [Ownership boundaries](./docs/ownership-boundaries.md).
 
 A failed sync creates or updates a `component-sync-failure` issue, so nothing piles up silently.
 
@@ -235,6 +235,6 @@ instrumentation.ts     Next.js server-side HTTP proxy initialization
 
 ## Credits And License
 
-The desktop integration of Pi Agent is provided by `pi-agent-desktop`; the core capabilities and the web interface come from [earendil-works/pi](https://github.com/earendil-works/pi) and [agegr/pi-web](https://github.com/agegr/pi-web) respectively. Thanks to those projects and their contributors.
+The desktop integration of Entity Assistant is provided by `pi-agent-desktop`; the core capabilities and the web interface come from [earendil-works/pi](https://github.com/earendil-works/pi) and [agegr/pi-web](https://github.com/agegr/pi-web) respectively. Thanks to those projects and their contributors.
 
 Code in the root of this repository is under the MIT License in [`LICENSE`](./LICENSE). The code and dependencies of the three component projects remain subject to the licenses of their own repositories; keep the corresponding copyright and license notices when copying, modifying, or redistributing.

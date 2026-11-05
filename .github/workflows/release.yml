@@ -245,8 +245,8 @@ jobs:
           This issue is reused for subsequent failures; close it once a release is green."
           fi
 
-  # Keeps Casks/pi-agent.rb (the Homebrew tap: `brew tap abcwyc/pi-agent-desktop
-  # https://github.com/abcwyc/pi-agent-desktop`) on the release that was just
+  # Keeps Casks/entity-assistant.rb (the Homebrew tap: `brew tap stormwine1986/pi-agent-desktop
+  # https://github.com/stormwine1986/pi-agent-desktop`) on the release that was just
   # published. Runs only after `manifest` has published it, so a draft or partly
   # failed release never reaches Homebrew users. Placed after `notify` because
   # release-workflows.test.mjs slices the manifest job up to `notify:`.
@@ -278,6 +278,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/pi-agent.rb
+          git add Casks/entity-assistant.rb
           git commit -m "chore(homebrew): update cask to $version"
           git push origin HEAD:main

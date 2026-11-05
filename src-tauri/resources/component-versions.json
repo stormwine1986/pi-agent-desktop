@@ -4,7 +4,7 @@
   "components": [
     {
       "id": "pi-agent-desktop",
-      "repository": "abcwyc/pi-agent-desktop",
+      "repository": "stormwine1986/pi-agent-desktop",
       "version": "0.8.2"
     },
     {

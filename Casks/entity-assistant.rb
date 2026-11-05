@@ -2,10 +2,10 @@ cask "entity-assistant" do
   version "0.8.1"
   sha256 "c96d1ccd2b16a000db812eda76c9657a452b9df7797f688ebd8e5eb84fb6d7a5"
 
-  url "https://github.com/abcwyc/pi-agent-desktop/releases/download/v#{version}/Entity.Assistant_#{version}_aarch64.dmg"
+  url "https://github.com/stormwine1986/pi-agent-desktop/releases/download/v#{version}/Entity.Assistant_#{version}_aarch64.dmg"
   name "Entity Assistant"
   desc "Local AI agent desktop app built on pi"
-  homepage "https://github.com/abcwyc/pi-agent-desktop"
+  homepage "https://github.com/stormwine1986/pi-agent-desktop"
 
   livecheck do
     url :url
