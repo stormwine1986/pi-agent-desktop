@@ -9,7 +9,7 @@ import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
  *
  * pi stores it in the global `settings.json` and creates it on first use, and the
  * CLI hands it to `ModelRuntime.login()` through `LoginOptions.getDeviceId`
- * (`interactive-mode.ts`). Pi Web talks to the same agent dir, so both surfaces
+ * (`interactive-mode.ts`). Entity Assistant talks to the same agent dir, so both surfaces
  * keep one identity. The agent dir doubles as the cwd on purpose: `deviceId` is
  * global-only, and a committed project settings file must never hand every clone
  * the same ID.

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 
-// Pi Web's own preferences, kept out of pi's settings.json because the pi CLI
+// Entity Assistant's own preferences, kept out of pi's settings.json because the pi CLI
 // and other hosts read that file and have no artifacts panel.
 
 type StoredSettings = Record<string, unknown> & { artifactsPrompt?: unknown };
@@ -16,7 +16,7 @@ export function readStored(settingsPath: string): StoredSettings {
   if (!existsSync(settingsPath)) return {};
   const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Invalid Pi Web settings: expected an object");
+    throw new Error("Invalid Entity Assistant settings: expected an object");
   }
   return parsed as StoredSettings;
 }
@@ -41,7 +41,7 @@ export function writeArtifactsPromptEnabled(enabled: boolean, settingsPath = get
   return isArtifactsPromptEnabled(settingsPath);
 }
 
-/** Merge keys into Pi Web's settings file, leaving every other key as it was. */
+/** Merge keys into Entity Assistant's settings file, leaving every other key as it was. */
 export function updatePiWebSettings(patch: Record<string, unknown>, settingsPath = getPiWebSettingsPath()): void {
   const stored = readStored(settingsPath);
   mkdirSync(dirname(settingsPath), { recursive: true });

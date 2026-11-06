@@ -33,7 +33,7 @@ function readInitialLocale(): Locale {
 }
 
 /**
- * 提供 Pi Web 的界面语言状态和翻译能力。
+ * 提供 Entity Assistant 的界面语言状态和翻译能力。
  * @param props React 子节点
  * @returns 包含语言上下文的 React 节点
  */

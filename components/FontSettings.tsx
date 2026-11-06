@@ -93,7 +93,7 @@ export function FontSettings() {
         <FontChoice kind="mono" installed={installed} value={fonts.mono} onChange={(mono) => setFonts({ ...fonts, mono })} />
         <div className="settings-font-preview" aria-label={t("settings.fontPreview")}>
           <p>{t("settings.fontPreviewText")}</p>
-          <code>{'const message = "Hello, Pi"; // 0123456789'}</code>
+          <code>{'const message = "Hello, Assistant"; // 0123456789'}</code>
         </div>
       </div>
       {saving && <p className="settings-font-status sr-only" role="status">{t("settings.fontSaving")}</p>}

@@ -1,6 +1,6 @@
 // Fork-owned: forking a session file, and ctx.newSession / ctx.fork /
 // ctx.switchSession from an extension command. The pi CLI replaces its single
-// session in place (AgentSessionRuntime); Pi Web hosts many, so the target gets
+// session in place (AgentSessionRuntime); Entity Assistant hosts many, so the target gets
 // its own wrapper, the source finishes the command that asked for the move, and
 // the browser follows a `session_replaced` event. `session_before_switch` and
 // `session_before_fork` handlers can cancel, as in the CLI.

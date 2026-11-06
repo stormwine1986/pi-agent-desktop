@@ -9,7 +9,7 @@
 // The syntax is LibreChat's container directive. It is parsed here with a
 // line scanner rather than remark-directive: that plugin also turns ordinary
 // chat text such as `:name` into directives, while this one only ever matches
-// a line starting with `:::artifact{`. Outside Pi Web the block still reads as
+// a line starting with `:::artifact{`. Outside Entity Assistant the block still reads as
 // a fenced code block between two marker lines.
 //
 // Versions: every occurrence of an identifier in a session is a new version,

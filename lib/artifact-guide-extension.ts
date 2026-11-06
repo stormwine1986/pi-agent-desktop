@@ -7,7 +7,7 @@ export const ARTIFACT_GUIDE_SECTION = "artifacts";
 // Tells the model the `:::artifact` syntax lib/artifacts.ts parses. Kept short
 // because it is sent with every request; the "when not to" lines matter as
 // much as the format, or every code answer turns into a panel.
-export const ARTIFACT_GUIDE = `Replies are shown in Pi Web, which renders an artifact block in a side panel next to the chat. Use an artifact only when the user benefits from viewing or interacting with standalone content: a complete HTML page, app, game, visualization or dashboard; a React component; an SVG image; a Mermaid diagram; or a long self-contained document they will reuse. Do not use one for short snippets, explanations, answers that fit in the message, or changes to project files (edit those with tools).
+export const ARTIFACT_GUIDE = `Replies are shown in Entity Assistant, which renders an artifact block in a side panel next to the chat. Use an artifact only when the user benefits from viewing or interacting with standalone content: a complete HTML page, app, game, visualization or dashboard; a React component; an SVG image; a Mermaid diagram; or a long self-contained document they will reuse. Do not use one for short snippets, explanations, answers that fit in the message, or changes to project files (edit those with tools).
 
 Format (the inner code fence is required):
 :::artifact{identifier="tip-calculator" type="html" title="Tip calculator"}
@@ -24,7 +24,7 @@ Format (the inner code fence is required):
 - Keep commentary outside the block, usually one or two sentences.`;
 
 /**
- * Adds the `<artifacts>` prompt section to every run of a normal Pi Web
+ * Adds the `<artifacts>` prompt section to every run of a normal Entity Assistant
  * session. The switch in Settings › General is read on each run, so turning
  * it off removes the section from the next prompt without a reload (the SDK
  * diffs sections and records the removal in the transcript).

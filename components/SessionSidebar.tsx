@@ -6,6 +6,7 @@ import { listSessionFamilies } from "@/lib/session-family";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import { PRODUCT_NAME } from "@/lib/branding";
 import { useI18n } from "@/hooks/useI18n";
 import { formatCompactRelativeTime, formatRelativeTime } from "@/lib/i18n/format";
 import { createPortal } from "react-dom";
@@ -809,7 +810,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       };
       for (const id of completedWithNotifications) {
         void notifyDesktop({
-          title: "Entity Assistant",
+          title: PRODUCT_NAME,
           body: `Finished: ${sessionName(id)}`,
         });
       }

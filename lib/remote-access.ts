@@ -20,7 +20,7 @@ import { hasRelayMark } from "./relay/mark.ts";
  * turning on Funnel by mistake, or a local process forging the Host header,
  * does not open the server.
  *
- * The file lives next to Pi Web's other settings (`pi-web/settings.json`), but
+ * The file lives next to Entity Assistant's other settings (`pi-web/settings.json`), but
  * is resolved without the pi SDK because `proxy.ts` reads it on every request.
  */
 
@@ -127,7 +127,7 @@ export function writeRemoteAccessConfig(
   try {
     const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stored = parsed as Record<string, unknown>;
-    else throw new Error("Invalid Pi Web settings: expected an object");
+    else throw new Error("Invalid Entity Assistant settings: expected an object");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
