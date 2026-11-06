@@ -15,7 +15,20 @@ const serverResourcesDir = join(rootDir, "src-tauri", "resources", "server");
 const serverHelperDir = join(rootDir, "src-tauri", "resources", "Entity Assistant Server.app");
 const nodeResourcesDir = join(rootDir, "src-tauri", "resources", "node");
 
-async function runNextBuild() {
+/**
+ * Next writes `<distDir>/trace` while the build finishes. With the
+ * `webpackBuildWorker` experiment the compile runs in a child process, and on
+ * Windows the parent's attempt to open that file can lose the race against the
+ * worker's closing handle: `EPERM: operation not permitted, open '...trace'`.
+ * It is intermittent (~1 in 2 here), always at the same point, and succeeds on
+ * a second run. Matched narrowly on purpose — a build failure must not turn
+ * into "retry until it passes", which would hide real breakage.
+ */
+function isBuildTraceRace(output) {
+  return /EPERM[\s\S]{0,200}\.next-desktop[\\/]trace/.test(output);
+}
+
+async function runNextBuildOnce() {
   const require = createRequire(import.meta.url);
   const nextBin = require.resolve("next/dist/bin/next", { paths: [rootDir] });
 
@@ -28,7 +41,13 @@ async function runNextBuild() {
   delete buildEnv.__NEXT_PRIVATE_STANDALONE_CONFIG;
   delete buildEnv.__NEXT_PRIVATE_ORIGIN;
 
-  await new Promise((resolve, reject) => {
+  let output = "";
+  const collect = (chunk) => {
+    output += chunk.toString();
+    return chunk;
+  };
+
+  return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [nextBin, "build", "--webpack"], {
       cwd: rootDir,
       env: {
@@ -36,15 +55,38 @@ async function runNextBuild() {
         NEXT_TELEMETRY_DISABLED: "1",
         PI_WEB_DESKTOP_BUILD: "1",
       },
-      stdio: "inherit",
+      // Piped so the exit reason can be inspected, written straight through so
+      // the build still reads like it did with "inherit".
+      stdio: ["inherit", "pipe", "pipe"],
     });
 
+    child.stdout.on("data", (chunk) => process.stdout.write(collect(chunk)));
+    child.stderr.on("data", (chunk) => process.stderr.write(collect(chunk)));
+
     child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Next.js desktop build failed (${signal ?? `exit ${code}`}).`));
-    });
+    child.once("exit", (code, signal) => resolve({ code, signal, output }));
   });
+}
+
+/** Waits for the closed trace handle to be released before trying again. */
+function pause(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runNextBuild() {
+  const first = await runNextBuildOnce();
+  if (first.code === 0) return;
+  if (!isBuildTraceRace(first.output)) {
+    throw new Error(`Next.js desktop build failed (${first.signal ?? `exit ${first.code}`}).`);
+  }
+
+  console.warn("[prepare-desktop] Next lost the race on .next-desktop/trace (EPERM); retrying once.");
+  await pause(2000);
+
+  const second = await runNextBuildOnce();
+  if (second.code !== 0) {
+    throw new Error(`Next.js desktop build failed (${second.signal ?? `exit ${second.code}`}).`);
+  }
 }
 
 async function assembleServer() {
