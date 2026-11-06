@@ -19,13 +19,30 @@ const markdownSanitizeSchema = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    // `entity-item:` is how a reply points at a domain object: the key stays
+    // readable in the text, and clicking opens it in a panel tab instead of a
+    // browser (`lib/entity-opener.ts`).
+    href: [...(defaultSchema.protocols?.href ?? []), "file", "entity-item"],
   },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
 export function markdownUrlTransform(value: string): string {
-  return /^file:/i.test(value) ? value : defaultUrlTransform(value);
+  // `defaultUrlTransform` keeps only http(s)/mailto/xmpp and relative URLs;
+  // ours must also survive with the two schemes the app intercepts itself.
+  return /^(?:file|entity-item):/i.test(value) ? value : defaultUrlTransform(value);
+}
+
+/**
+ * The same, for the marks that are rendered without file-link support.
+ *
+ * `entity-item:` names a domain object, not a file, so it must not depend on
+ * whether this renderer can open files — that coupling left the href blank and
+ * the click silently dead. `file:` keeps the default treatment here, since
+ * without a file opener it would only produce a dead link.
+ */
+export function markdownEntityItemUrlTransform(value: string): string {
+  return /^entity-item:/i.test(value) ? value : defaultUrlTransform(value);
 }
 
 /**

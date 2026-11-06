@@ -19,12 +19,30 @@ import { clearDraft } from "@/lib/draft-store";
 import { TabBar, type Tab } from "./TabBar";
 import { LazyTerminalPanel as TerminalPanel, preloadTerminalPanel } from "./LazyTerminalPanel";
 import { ViewsPanel } from "./ViewsPanel";
+import { EntityPanel } from "./EntityPanel";
+import { EntityCreatePanel } from "./EntityCreatePanel";
 
 /** One to-do tab per workspace; the id is stable so reopening focuses it. */
 interface ViewsTabState {
   id: string;
   cwd: string;
 }
+
+/** One opened entity, shown beside the conversation like a file or artifact. */
+interface EntityTabState {
+  id: string;
+  cwd: string;
+  /** Absent when the link named no channel; the panel resolves it from the project. */
+  server?: string;
+  workspace?: string;
+  /** Empty while a new entity is being created in this tab. */
+  key: string;
+  /** This tab is a create form, not an entity. */
+  create?: boolean;
+}
+
+/** How many entity tabs stay open; the oldest gives way first. */
+const MAX_ENTITY_TABS = 6;
 
 // Heavy, rarely-used surfaces are code-split out of the main bundle. The
 // config modals may never be opened at all; FileViewer drags in markdown +
@@ -38,7 +56,6 @@ import { SettingsPanel } from "./SettingsPanel";
 import { keepDocumentTitle } from "@/lib/document-title";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
-import { UpdateReminder } from "./UpdateReminder";
 import { useTheme } from "@/hooks/useTheme";
 import { useFonts } from "@/hooks/useFonts";
 import { useI18n } from "@/hooks/useI18n";
@@ -73,6 +90,7 @@ import { artifactPanelTab, artifactTabId, artifactTabsForSession, upsertArtifact
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsView } from "./artifacts/ArtifactsView";
 import { setArtifactOpener, useArtifactTitles } from "@/lib/artifact-store";
+import { setEntityChannel, setEntityOpener } from "@/lib/entity-opener";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -741,6 +759,12 @@ export function AppShell() {
   // To-do views (`.pi/views.yaml`): one tab per workspace, opened from the
   // project menu the same way a terminal is.
   const [viewsTabs, setViewsTabs] = useState<ViewsTabState[]>([]);
+  // Whether this project declares to-do views. Opening the panel lands on them
+  // when it does; the file tree is what a project without views falls back to.
+  const [viewsAvailable, setViewsAvailable] = useState(false);
+  // Opened entities: one tab per (channel, space, key), so the same entity
+  // reached twice — from a list row and from a key in a reply — lands in one tab.
+  const [entityTabs, setEntityTabs] = useState<EntityTabState[]>([]);
   // artifactPanelTab reads each tab's newest title; this re-renders when one changes.
   useArtifactTitles(artifactTabs);
   const panelTabs: Tab[] = useMemo(() => [...fileTabs, ...terminalTabs.map((tab) => ({
@@ -754,23 +778,16 @@ export function AppShell() {
     label: "待办",
     filePath: tab.cwd,
     kind: "views" as const,
-  }))], [fileTabs, terminalTabs, artifactTabs, viewsTabs]);
+  })), ...entityTabs.map((tab) => ({
+    id: tab.id,
+    label: tab.create ? "新建" : tab.key,
+    filePath: tab.cwd,
+    kind: "entity" as const,
+  }))], [fileTabs, terminalTabs, artifactTabs, viewsTabs, entityTabs]);
   const activeArtifactTab = artifactTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeViewsTab = viewsTabs.find((tab) => tab.id === activeFileTabId) ?? null;
-  const handleRightPanelToggle = useCallback(() => {
-    if (isMobile) {
-      setSidebarOpen(false);
-      setActiveTopPanel(null);
-    }
-    setTopMoreOpen(false);
-    setRightPanelOpen((open) => {
-      // A manual open with no tab lands on the project file tree, not a mostly
-      // empty "No file open" state.
-      if (!open && panelTabs.length === 0) setFileTreeOpen(true);
-      if (open) setRightPanelExpanded(false);
-      return !open;
-    });
-  }, [isMobile, panelTabs]);
+  const activeEntityTab = entityTabs.find((tab) => tab.id === activeFileTabId) ?? null;
+
 
   useEffect(() => {
     try {
@@ -855,6 +872,48 @@ export function AppShell() {
   // workbench stay project-only, so they keep using visibleProjectCwd.
   const chatFolderCwd = isChatWorkspaceActive && selectedSession?.chatFolder ? selectedSession.cwd : null;
   const workbenchCwd = visibleProjectCwd ?? chatFolderCwd;
+
+  // Asked once per project, and cheaply: `probe=1` reads the yaml without
+  // running any of its queries, so this costs nothing at startup.
+  useEffect(() => {
+    if (!workbenchCwd) {
+      setViewsAvailable(false);
+      return;
+    }
+    const controller = new AbortController();
+    void fetch(`/api/views?probe=1&cwd=${encodeURIComponent(workbenchCwd)}`, { signal: controller.signal })
+      .then((response) => response.json() as Promise<{ exists?: boolean; error?: string | null }>)
+      .then((body) => setViewsAvailable(Boolean(body.exists) && !body.error))
+      .catch(() => {
+        if (!controller.signal.aborted) setViewsAvailable(false);
+      });
+    return () => controller.abort();
+  }, [workbenchCwd]);
+
+  const handleRightPanelToggle = useCallback(() => {
+    if (isMobile) {
+      setSidebarOpen(false);
+      setActiveTopPanel(null);
+    }
+    setTopMoreOpen(false);
+    setRightPanelOpen((open) => {
+      // A manual open with no tab lands on what the project actually has work
+      // in: its to-do views when `.pi/views.yaml` declares any, otherwise the
+      // file tree. Either beats a mostly empty "No file open" state.
+      if (!open && panelTabs.length === 0) {
+        if (viewsAvailable && workbenchCwd) {
+          const id = `views:${workbenchCwd}`;
+          setViewsTabs((tabs) => (tabs.some((tab) => tab.id === id) ? tabs : [...tabs, { id, cwd: workbenchCwd }]));
+          setActiveFileTabId(id);
+          setFileTreeOpen(false);
+        } else {
+          setFileTreeOpen(true);
+        }
+      }
+      if (open) setRightPanelExpanded(false);
+      return !open;
+    });
+  }, [isMobile, panelTabs, viewsAvailable, workbenchCwd]);
   const projectPickerStartCwd = isChatWorkspaceActive
     ? null
     : selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
@@ -1728,6 +1787,89 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isChatWorkspaceActive, isMobile]);
 
+  /**
+   * Opens (or focuses) one entity beside the conversation.
+   *
+   * The id is the channel + space + key, so the same entity opened from a list
+   * row and from a key in a reply is one tab, not two. Tabs are capped: a
+   * conversation that mentions a dozen keys must not fill the strip.
+   */
+  const handleOpenEntity = useCallback((ref: { server?: string; workspace?: string; key: string }) => {
+    // The list belongs to a tab, and that tab's cwd is the folder whose
+    // `mcp.json` named the server — the same one the rows were fetched through.
+    // A chat that owns a folder resolves the same way; a chat without one has no
+    // `mcp.json` to read, so it cannot open an entity at all.
+    const cwd = activeViewsTab?.cwd ?? workbenchCwd;
+    if (!cwd) {
+      // Silence here looks like a dead link, which reads as a broken app rather
+      // than "this conversation has no project".
+      console.warn(
+        `[entity-item] 无法打开 ${ref.key}：当前会话没有关联文件夹，找不到声明 MCP 服务器的 mcp.json。请从项目会话里打开。`,
+      );
+      return;
+    }
+    // A link that named no channel keeps "auto": the panel asks the project's
+    // servers which one holds the key, so one entity is one tab either way.
+    const id = `entity:${ref.server ?? "auto"}:${ref.workspace ?? ""}:${ref.key}`;
+    setEntityTabs((tabs) => {
+      if (tabs.some((tab) => tab.id === id)) return tabs;
+      const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, key: ref.key }];
+      return next.length > MAX_ENTITY_TABS ? next.slice(next.length - MAX_ENTITY_TABS) : next;
+    });
+    setActiveFileTabId(id);
+    setRightPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [activeViewsTab?.cwd, isMobile, workbenchCwd]);
+
+  // A reply's `entity-item:` link opens through this opener (lib/entity-opener).
+  // A link that named its channel becomes the fallback for later channel-less
+  // ones; a channel-less link is left to the panel to resolve.
+  useEffect(() => setEntityOpener((request) => {
+    if (request.server && request.workspace) {
+      setEntityChannel({ server: request.server, workspace: request.workspace });
+    }
+    handleOpenEntity(request);
+  }), [handleOpenEntity]);
+
+  /** Opens a create form in the channel and space the current list belongs to. */
+  const handleCreateEntity = useCallback((ref: { server: string; workspace: string }) => {
+    const cwd = activeViewsTab?.cwd ?? workbenchCwd;
+    if (!cwd) return;
+    const id = `entity:new:${Date.now()}`;
+    setEntityTabs((tabs) => {
+      const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, key: "", create: true }];
+      return next.length > MAX_ENTITY_TABS ? next.slice(next.length - MAX_ENTITY_TABS) : next;
+    });
+    setActiveFileTabId(id);
+    setRightPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [activeViewsTab?.cwd, isMobile, workbenchCwd]);
+
+  /**
+   * Swaps the create form for the entity it produced, in place.
+   *
+   * The tab keeps its position and becomes the real one, so the reader lands on
+   * what they just created instead of a stale "新建" tab plus a second tab.
+   */
+  const handleEntityCreated = useCallback((tabId: string, key: string) => {
+    setEntityTabs((tabs) => {
+      const target = tabs.find((tab) => tab.id === tabId);
+      if (!target?.server || !target.workspace) return tabs;
+      const id = `entity:${target.server}:${target.workspace}:${key}`;
+      if (tabs.some((tab) => tab.id === id && tab.id !== tabId)) {
+        return tabs.filter((tab) => tab.id !== tabId);
+      }
+      return tabs.map((tab) => tab.id === tabId
+        ? { id, cwd: tab.cwd, server: tab.server, workspace: tab.workspace, key }
+        : tab);
+    });
+    setActiveFileTabId((current) => {
+      if (current !== tabId) return current;
+      const target = entityTabs.find((tab) => tab.id === tabId);
+      return target?.server && target.workspace ? `entity:${target.server}:${target.workspace}:${key}` : current;
+    });
+  }, [entityTabs]);
+
   // Message cards open artifacts through lib/artifact-store. An automatic open
   // (a streamed artifact just finished) is skipped on mobile, where the panel
   // would cover the reply that is still being read.
@@ -1759,7 +1901,7 @@ export function AppShell() {
     const remaining = terminalTabs.filter((item) => item.id !== tab.id);
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
     setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? null);
-    if (!replacement && !remaining.length && !fileTabs.length && !artifactTabs.length && !viewsTabs.length) setRightPanelOpen(false);
+    if (!replacement && !remaining.length && !fileTabs.length && !artifactTabs.length && !viewsTabs.length && !entityTabs.length) setRightPanelOpen(false);
   };
 
   const handleCloseFileTab = useCallback((tabId: string) => {
@@ -1767,23 +1909,30 @@ export function AppShell() {
       const remaining = artifactTabs.filter((tab) => tab.id !== tabId);
       setArtifactTabs(remaining);
       setActiveFileTabId((cur) => cur !== tabId ? cur : remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? null);
-      if (!remaining.length && !fileTabs.length && !terminalTabs.length) setRightPanelOpen(false);
+      if (!remaining.length && !fileTabs.length && !terminalTabs.length && !viewsTabs.length && !entityTabs.length) setRightPanelOpen(false);
       return;
     }
     if (terminalTabs.some((tab) => tab.id === tabId)) {
       setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
       return;
     }
+    if (entityTabs.some((tab) => tab.id === tabId)) {
+      const remaining = entityTabs.filter((tab) => tab.id !== tabId);
+      setEntityTabs(remaining);
+      setActiveFileTabId((cur) => cur !== tabId ? cur : remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? artifactTabs.at(-1)?.id ?? viewsTabs.at(-1)?.id ?? null);
+      if (!remaining.length && !fileTabs.length && !terminalTabs.length && !artifactTabs.length && !viewsTabs.length) setRightPanelOpen(false);
+      return;
+    }
     if (viewsTabs.some((tab) => tab.id === tabId)) {
       const remaining = viewsTabs.filter((tab) => tab.id !== tabId);
       setViewsTabs(remaining);
       setActiveFileTabId((cur) => cur !== tabId ? cur : remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? artifactTabs.at(-1)?.id ?? null);
-      if (!remaining.length && !fileTabs.length && !terminalTabs.length && !artifactTabs.length) setRightPanelOpen(false);
+      if (!remaining.length && !fileTabs.length && !terminalTabs.length && !artifactTabs.length && !entityTabs.length) setRightPanelOpen(false);
       return;
     }
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0 && terminalTabs.length === 0 && artifactTabs.length === 0 && viewsTabs.length === 0) setRightPanelOpen(false);
+      if (next.length === 0 && terminalTabs.length === 0 && artifactTabs.length === 0 && viewsTabs.length === 0 && entityTabs.length === 0) setRightPanelOpen(false);
       return next;
     });
     setActiveFileTabId((cur) => {
@@ -1791,7 +1940,7 @@ export function AppShell() {
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? artifactTabs.at(-1)?.id ?? null;
     });
-  }, [fileTabs, terminalTabs, artifactTabs, viewsTabs]);
+  }, [fileTabs, terminalTabs, artifactTabs, viewsTabs, entityTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1923,10 +2072,10 @@ export function AppShell() {
   }
   const panelHasViewer = Boolean(activeFileTabId && panelTabs.some((tab) => tab.id === activeFileTabId));
   const fileTreeAutoCollapsed = fileTreeNarrow && panelHasViewer && !fileTreeNarrowOverride;
-  // A to-do view fills the panel on its own: the project tree is about files,
-  // and keeping it beside a table only eats width. It comes back untouched
-  // when another tab is selected.
-  const fileTreeShown = fileTreeOpen && !fileTreeAutoCollapsed && !activeViewsTab;
+  // A to-do view or an entity fills the panel on its own: the project tree is
+  // about files, and keeping it beside a table or a field list only eats width.
+  // It comes back untouched when another tab is selected.
+  const fileTreeShown = fileTreeOpen && !fileTreeAutoCollapsed && !activeViewsTab && !activeEntityTab;
   const handleFileTreeToggle = () => {
     if (fileTreeShown) {
       setFileTreeOpen(false);
@@ -3190,7 +3339,10 @@ export function AppShell() {
               onNewTerminal={visibleProjectCwd ? () => handleOpenTerminal(visibleProjectCwd) : undefined}
             />
           </div>
-          {workbenchCwd && !activeViewsTab && (
+          {/* Hidden where the tree cannot show: a to-do list or an entity is
+              the panel's whole content, and a toggle that does nothing reads
+              as broken. */}
+          {workbenchCwd && !activeViewsTab && !activeEntityTab && (
             <button
               type="button"
               className={`file-workbench-icon-button file-tree-toggle${fileTreeShown ? " is-active" : ""}`}
@@ -3252,7 +3404,24 @@ export function AppShell() {
               versionRequest={activeArtifactTab.versionRequest}
             />
           ) : activeViewsTab ? (
-            <ViewsPanel cwd={activeViewsTab.cwd} onBringToChat={handleBringEntityToChat} />
+            <ViewsPanel
+              cwd={activeViewsTab.cwd}
+              onBringToChat={handleBringEntityToChat}
+              onOpenEntity={handleOpenEntity}
+              onCreateEntity={handleCreateEntity}
+            />
+          ) : activeEntityTab?.create && activeEntityTab.server && activeEntityTab.workspace ? (
+            <EntityCreatePanel
+              key={activeEntityTab.id}
+              target={{
+                cwd: activeEntityTab.cwd,
+                server: activeEntityTab.server,
+                workspace: activeEntityTab.workspace,
+              }}
+              onCreated={(key) => handleEntityCreated(activeEntityTab.id, key)}
+            />
+          ) : activeEntityTab ? (
+            <EntityPanel key={activeEntityTab.id} target={activeEntityTab} onOpenEntity={handleOpenEntity} />
           ) : activeFileTab?.filePath ? (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
@@ -3422,7 +3591,6 @@ export function AppShell() {
         onStatus={setProjectTrust}
       />
     )}
-    <UpdateReminder onOpenSettings={() => setSettingsSection("general")} />
     <DomContextMenuHost />
     <AppNoticeShelf />
     </div>

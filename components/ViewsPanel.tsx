@@ -69,10 +69,14 @@ function clockOf(timestamp: number): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-export function ViewsPanel({ cwd, onBringToChat }: {
+export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }: {
   cwd: string;
   /** Hand one row's entity to the conversation composer. */
   onBringToChat?: (ref: { server: string; workspace: string; key: string; name: string; state: string }) => void;
+  /** Open one row's entity in its own panel tab. */
+  onOpenEntity?: (ref: { server: string; workspace: string; key: string; name: string }) => void;
+  /** Start a new entity in this list's channel and space. */
+  onCreateEntity?: (ref: { server: string; workspace: string }) => void;
 }) {
   const [data, setData] = useState<ViewsResponse | null>(null);
   /** Fetched, but withheld because it contains entries the user has not seen yet. */
@@ -223,6 +227,35 @@ export function ViewsPanel({ cwd, onBringToChat }: {
         {staleAt !== null && (
           <span style={{ color: danger, whiteSpace: "nowrap" }}>可能不是最新（截至 {clockOf(staleAt)}）</span>
         )}
+        {/* Creating needs a channel and a space; the list being looked at
+            already names both, so the button asks nothing extra. */}
+        <button
+          type="button"
+          onClick={() => {
+            if (!active?.server || !active.workspace) return;
+            onCreateEntity?.({ server: active.server, workspace: active.workspace });
+          }}
+          disabled={!onCreateEntity || !active?.server || !active.workspace}
+          title={
+            !active
+              ? "先选一条视图，才知道建在哪个空间"
+              : !active.server || !active.workspace
+                ? "这条视图没有声明 server/workspace，无法确定建在哪"
+                : `在 ${active.workspace} 新建一条实体`
+          }
+          style={{
+            border: `1px solid ${line}`,
+            background: surface,
+            color: "inherit",
+            borderRadius: 4,
+            padding: "2px 8px",
+            fontSize: 12,
+            cursor: onCreateEntity && active?.server && active.workspace ? "pointer" : "default",
+            opacity: onCreateEntity && active?.server && active.workspace ? 1 : 0.5,
+          }}
+        >
+          新建
+        </button>
         <button
           type="button"
           onClick={() => void evaluate("apply")}
@@ -320,7 +353,9 @@ export function ViewsPanel({ cwd, onBringToChat }: {
                 </span>
               )}
             </header>
-            {active.error ? <Notice text={active.error} /> : <ViewTable view={active} onBringToChat={onBringToChat} />}
+            {active.error ? <Notice text={active.error} /> : (
+              <ViewTable view={active} onBringToChat={onBringToChat} onOpenEntity={onOpenEntity} />
+            )}
           </div>
         </div>
       ) : (
@@ -339,9 +374,10 @@ export function ViewsPanel({ cwd, onBringToChat }: {
   );
 }
 
-function ViewTable({ view, onBringToChat }: {
+function ViewTable({ view, onBringToChat, onOpenEntity }: {
   view: ViewRows;
   onBringToChat?: (ref: { server: string; workspace: string; key: string; name: string; state: string }) => void;
+  onOpenEntity?: (ref: { server: string; workspace: string; key: string; name: string }) => void;
 }) {
   if (view.rows.length === 0) {
     return <div style={{ fontSize: 12, color: muted, padding: "4px 2px" }}>这条查询没有匹配的实体。</div>;
@@ -349,6 +385,8 @@ function ViewTable({ view, onBringToChat }: {
   // The hand-off needs the entity behind the row, which is only meaningful when
   // the server told us its key and the view names the channel it came from.
   const canCarry = Boolean(onBringToChat) && view.entities.some((entity) => entity.key);
+  const canOpen = Boolean(onOpenEntity) && view.entities.some((entity) => entity.key);
+  const showActions = canCarry || canOpen;
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
@@ -357,7 +395,7 @@ function ViewTable({ view, onBringToChat }: {
             {/* First, not last: the table scrolls sideways in a narrow panel, and an
                 action column on the right is only reachable after scrolling past
                 every configured column. */}
-            {canCarry && <th style={{ borderBottom: `1px solid ${line}`, width: "1%" }} aria-label="带入会话" />}
+            {showActions && <th style={{ borderBottom: `1px solid ${line}`, width: "1%" }} aria-label="行操作" />}
             {view.columns.map((column) => (
               <th
                 key={column}
@@ -378,31 +416,47 @@ function ViewTable({ view, onBringToChat }: {
         <tbody>
           {view.rows.map((row, rowIndex) => (
             <tr key={rowIndex}>
-              {canCarry && (
+              {showActions && (
                 <td style={{ borderBottom: `1px solid ${line}`, padding: "2px 6px 2px 0", whiteSpace: "nowrap", verticalAlign: "top" }}>
                   {(() => {
                     const entity = view.entities[rowIndex];
                     if (!entity?.key || !view.server || !view.workspace) return null;
+                    const buttonStyle = {
+                      border: `1px solid ${line}`,
+                      background: "none",
+                      color: muted,
+                      borderRadius: 4,
+                      padding: "1px 5px",
+                      font: "inherit",
+                      fontSize: 11,
+                      lineHeight: 1.4,
+                      cursor: "pointer",
+                    } as const;
                     return (
-                      <button
-                        type="button"
-                        onClick={() => onBringToChat?.({ server: view.server, workspace: view.workspace, ...entity })}
-                        title={`带入会话：${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
-                        aria-label={`带入会话：${entity.key}`}
-                        style={{
-                          border: `1px solid ${line}`,
-                          background: "none",
-                          color: muted,
-                          borderRadius: 4,
-                          padding: "1px 5px",
-                          font: "inherit",
-                          fontSize: 11,
-                          lineHeight: 1.4,
-                          cursor: "pointer",
-                        }}
-                      >
-                        带入
-                      </button>
+                      <span style={{ display: "inline-flex", gap: 4 }}>
+                        {canOpen && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenEntity?.({ server: view.server, workspace: view.workspace, key: entity.key, name: entity.name })}
+                            title={`打开 ${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
+                            aria-label={`打开 ${entity.key}`}
+                            style={buttonStyle}
+                          >
+                            打开
+                          </button>
+                        )}
+                        {canCarry && (
+                          <button
+                            type="button"
+                            onClick={() => onBringToChat?.({ server: view.server, workspace: view.workspace, ...entity })}
+                            title={`带入会话：${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
+                            aria-label={`带入会话：${entity.key}`}
+                            style={buttonStyle}
+                          >
+                            带入
+                          </button>
+                        )}
+                      </span>
                     );
                   })()}
                 </td>

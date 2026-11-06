@@ -436,3 +436,35 @@ test("alert markers inside lists stay ordinary quotes", () => {
   const html = renderMarkdown("- item\n\n  > [!NOTE]\n  > nested");
   assert.doesNotMatch(html, /markdown-alert/);
 });
+
+test("an entity-item link survives sanitizing and stays on this page", () => {
+  const html = renderMarkdown("由 [MR-000123](entity-item:entity-base/ws_manhu/MR-000123) 派生。");
+  // The key is the visible text: copying the reply must not yield a URL.
+  assert.match(html, />MR-000123</);
+  // Sanitizing must not blank the href — the click handler needs it.
+  assert.match(html, /href="entity-item:entity-base\/ws_manhu\/MR-000123"/);
+  // A marker, not a place: no new tab, no external-link hand-off.
+  assert.doesNotMatch(html, /target="_blank"[^>]*href="entity-item:/);
+});
+
+test("an entity-item link survives even where file links are not enabled", () => {
+  // The scheme names a domain object, not a file: rendering it without an
+  // `onOpenFile` handler must still leave the href, or the click goes nowhere.
+  const html = renderMarkdown("由 [MR-000123](entity-item:entity-base/ws_manhu/MR-000123) 派生。", { onOpenFile: undefined });
+  assert.match(html, /href="entity-item:entity-base\/ws_manhu\/MR-000123"/);
+  assert.match(html, />MR-000123</);
+});
+
+test("a link the model already wrote is left exactly as it is", () => {
+  const html = renderMarkdown("[OR-000036](entity-item:entity-base/ws_manhu/OR-000036)");
+  assert.match(html, /href="entity-item:entity-base\/ws_manhu\/OR-000036"/);
+  // One anchor, not a link wrapping a link.
+  assert.equal((html.match(/<a /g) ?? []).length, 1);
+});
+
+test("a key the model did not link stays plain text", () => {
+  // Marking keys is the model's job. Turning every key-shaped string into a
+  // link here would guess at references the reply never meant to make.
+  const html = renderMarkdown("| Key | 名称 |\n| --- | --- |\n| OR-000025 | 测试 |");
+  assert.doesNotMatch(html, /entity-item:/);
+});

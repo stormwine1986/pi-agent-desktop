@@ -9,7 +9,8 @@ import { useI18n } from "@/hooks/useI18n";
 import { fenceFilePaths, inlineCodeFilePath } from "@/lib/file-context-menu";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownEntityItemUrlTransform, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { isEntityItemHref, openEntityItemLink } from "@/lib/entity-opener";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 import { HtmlPreviewBlock } from "./HtmlPreviewBlock";
@@ -217,6 +218,22 @@ function buildComponents(
     a({ href, children, ...props }) {
       // `node` is react-markdown metadata, not a DOM attribute.
       delete props.node;
+      // A reference to a domain object, not a place: keep the key as the text
+      // and open the object beside the conversation instead of a browser tab.
+      if (isEntityItemHref(href)) {
+        return (
+          <a
+            href={href}
+            {...props}
+            onClick={(event) => {
+              event.preventDefault();
+              openEntityItemLink(href);
+            }}
+          >
+            {children}
+          </a>
+        );
+      }
       const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
       const openFile = onOpenFile;
       if (!filePath || !openFile) {
@@ -283,7 +300,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
       isStreaming={isStreaming}
       remarkPlugins={keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins}
       rehypePlugins={markdownRehypePlugins}
-      urlTransform={onOpenFile ? markdownUrlTransform : undefined}
+      urlTransform={onOpenFile ? markdownUrlTransform : markdownEntityItemUrlTransform}
       components={components}
     >
       {normalizedMarkdown}

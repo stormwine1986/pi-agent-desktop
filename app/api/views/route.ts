@@ -153,6 +153,14 @@ export async function GET(req: Request) {
     return NextResponse.json({ path: config.path, exists: true, error: config.error, views: [] });
   }
 
+  // `?probe=1` answers "does this project have views?" without running a single
+  // query. The panel asks this when it opens to decide between the to-do list
+  // and the file tree; evaluating every view there would cost a round trip to
+  // each MCP server before anything is shown.
+  if (url.searchParams.get("probe") === "1") {
+    return NextResponse.json({ path: config.path, exists: true, error: null, views: [] });
+  }
+
   const agentDir = getAgentDir();
   const views = await Promise.all(
     config.views.map(async (entry): Promise<ViewRows> => {
