@@ -94,10 +94,7 @@ function GeneralSettings({
   onQuoteSelectionChange,
   soundEnabled,
   onSoundToggle,
-  onBusyChange,
-}: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange" | "soundEnabled" | "onSoundToggle"> & {
-  onBusyChange: (busy: boolean) => void;
-}) {
+}: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange" | "soundEnabled" | "onSoundToggle">) {
   const { locale, setLocale, supportedLocales, t } = useI18n();
   const { mode: diffViewMode, setMode: setDiffViewMode } = useDiffViewMode();
   const { width: chatContentWidth, setWidth: setChatContentWidth, fontSize, setFontSize } = useChatAppearance();
@@ -180,7 +177,7 @@ function GeneralSettings({
             <p className="settings-general-tagline">{t("appSettings.tagline", { product: PRODUCT_NAME })}</p>
             <p className="settings-general-tagline">{t("appSettings.taglineDetails")}</p>
           </section>
-          <AppUpdatesSection onBusyChange={onBusyChange} />
+          <AppUpdatesSection />
 
           <section className="settings-general-section">
             <h3 className="settings-general-heading">{t("settings.chat")}</h3>
@@ -429,9 +426,6 @@ export function SettingsPanel({
     requiresProject: settingsSectionRequiresProject(item.id),
   }));
   const sectionRequiresProject = settingsSectionRequiresProject(section);
-  // A signed desktop update installs and relaunches the app; the dialog must not
-  // be dismissible from under it (the Version & Updates block reports the phase).
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => setLastSettingsSection(initialSection), [initialSection]);
 
@@ -440,9 +434,8 @@ export function SettingsPanel({
 
   // Bubble phase, unless something nearer handled the key. The trust dialog,
   // which opens above Settings, takes Escape in the capture phase and stops it,
-  // so one Escape closes that dialog and leaves Settings open. A busy update
-  // keeps the dialog open with it (see onBusyChange above).
-  useEffect(() => listenForPanelEscape(document, () => { if (!busy) onClose(); }), [onClose, busy]);
+  // so one Escape closes that dialog and leaves Settings open.
+  useEffect(() => listenForPanelEscape(document, onClose), [onClose]);
 
   // Focus moves into Settings as it opens and back to what had it once it closes. Left
   // on the chat composer (a bare /mcp opens Settings from there), Escape would reach the
@@ -483,7 +476,7 @@ export function SettingsPanel({
       aria-modal="true"
       aria-label={t("settings.title")}
       tabIndex={-1}
-      onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
       className="settings-dialog-backdrop"
     >
       <div className="settings-dialog-surface">
@@ -520,7 +513,7 @@ export function SettingsPanel({
         </div>
 
         <main className="settings-dialog-main">
-          {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} soundEnabled={soundEnabled} onSoundToggle={onSoundToggle} onBusyChange={setBusy} />)}
+          {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} soundEnabled={soundEnabled} onSoundToggle={onSoundToggle} />)}
           {sectionHost("appearance", <AppearanceSettings />)}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} onOpenMcp={() => activateSection("mcp")} />)}
           {/* Visited sections stay mounted, so the ones whose answer depends on trust take the page's
@@ -531,6 +524,9 @@ export function SettingsPanel({
           {/* No project needed: the global mcp.json is listed alone, and a project adds its group. */}
           {sectionHost("mcp", <McpConfig embedded key={cwd ?? ""} cwd={cwd} trust={projectTrust} onTrustProject={onOpenTrustDialog} onProjectTrustChanged={onProjectTrustChanged} onClose={onClose} />)}
         </main>
+        {/* Attribution, kept as plain small print in the corner so it never competes
+            with the settings controls above it. */}
+        <p className="settings-dialog-footnote">powered by Pi</p>
       </div>
     </div>
   );

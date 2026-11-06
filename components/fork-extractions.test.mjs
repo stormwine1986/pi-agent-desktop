@@ -100,7 +100,10 @@ const EXTRACTIONS = [
     // resurrection this guards against.
     movedTo: ["components/AppUpdatesSection.tsx", "components/desktop/DesktopAppSection.tsx"],
     movedDefinitions: ["AppUpdatesSection", "DesktopAppSection"],
-    absentFromOrigin: ["/api/updates", "installLatestDesktopRelease", "closeQuits", "quitAppNative"],
+    // The update check and its installer were removed from this build, so
+    // `/api/updates` and `installLatestDesktopRelease` no longer appear in
+    // either file — only the desktop switches are still moved code.
+    absentFromOrigin: ["closeQuits", "quitAppNative"],
     requiredInOrigin: ["AppUpdatesSection", "DesktopAppSection"],
   },
   {
@@ -281,7 +284,6 @@ const FORK_FEATURES = [
       "dragRegionProps",
       "app-topbar--mac-inset",
       "SettingsPanel",
-      "UpdateReminder",
       "PRODUCT_NAME",
     ],
   },

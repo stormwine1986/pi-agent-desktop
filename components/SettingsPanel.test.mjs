@@ -43,7 +43,7 @@ test("keeps one settings surface per concern — no desktop tab duplicating Gene
   // info moved to the top of General and its desktop-only switches ride along
   // in a self-hiding section, so the tab itself must stay gone.
   assert.doesNotMatch(panelSource, /id: "desktop"/);
-  assert.match(panelSource, /<AppUpdatesSection onBusyChange=/);
+  assert.match(panelSource, /<AppUpdatesSection \/>/);
   assert.match(panelSource, /<DesktopAppSection \/>/);
   assert.match(panelSource, /settings-general-overview/);
   assert.match(panelSource, /PRODUCT_NAME/);
@@ -82,7 +82,8 @@ test("keeps visited settings sections mounted and contains nested Escape handlin
   assert.match(panelSource, /mountedSections\.has\(id\)/);
   assert.match(panelSource, /hidden=\{section !== id\}/);
   // Settings closes on an Escape nothing nearer handled (lib/stacked-dialog.test.mjs pins the phases).
-  assert.match(panelSource, /useEffect\(\(\) => listenForPanelEscape\(document, \(\) => \{ if \(!busy\) onClose\(\); \}\), \[onClose, busy\]\);/);
+  // No update can be installing any more, so Escape has nothing to wait for.
+  assert.match(panelSource, /useEffect\(\(\) => listenForPanelEscape\(document, onClose\), \[onClose\]\);/);
   assert.doesNotMatch(panelSource, /addEventListener\("keydown"/);
   // An Escape that cancels an IME composition is the input method's, not a request to close.
   assert.match(stackedDialogSource, /if \(event\.key !== "Escape" \|\| event\.defaultPrevented \|\| cancelsComposition\(event\)\) return;/);
