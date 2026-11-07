@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AppSelect } from "./AppSelect";
+
+import { MAX_LINK_KEYS, parseLinkKeys, type LinkKeyCheck } from "@/lib/entity-links";
+import type { LinkOption } from "@/lib/entity-permissions";
+
 import {
   accent,
   buttonStyle,
@@ -9,12 +14,20 @@ import {
   FieldControl,
   formatValue,
   inputStyle,
+  isTableDraft,
+  isTableProperty,
   line,
   muted,
   propertyLabel,
   propertyName,
   propertyType,
+  serializeTableRows,
   surface,
+  TableEditor,
+  tableDraftRows,
+  TableValue,
+  type DraftMap,
+  type FieldDraft,
   type FieldProperty,
 } from "./entity-field";
 
@@ -25,6 +38,11 @@ interface RelationRow {
   name: string;
   state: string;
   linkType: string;
+  /** The relation named from this entity's side; used when reading downstream. */
+  inverseLinkType: string;
+  direction: "upstream" | "downstream";
+  /** Whether this reader may remove the link — decided by the side that owns it. */
+  canUnlink: boolean;
 }
 
 interface EntityResponse {
@@ -45,6 +63,8 @@ interface EntityResponse {
   writableFields: string[];
   /** Transitions open to this reader from the current state. */
   routes: AvailableRoute[];
+  /** Relations this type declares, with this reader's right to create each. */
+  linkOptions: LinkOption[];
 }
 
 /** A transition the base allows from the current state. */
@@ -63,32 +83,54 @@ export interface EntityTarget {
   key: string;
 }
 
-/** A draft starts from what the server holds, as text the inputs can display. */
-function draftOf(data: EntityResponse): Record<string, string> {
-  const draft: Record<string, string> = {};
+/**
+ * A draft starts from what the server holds: text for most fields, rows for a
+ * `table` field (a table is edited row by row, never as a JSON blob).
+ */
+function draftOf(data: EntityResponse): DraftMap {
+  const draft: DraftMap = {};
   for (const property of data.properties) {
     const name = propertyName(property);
     if (!name) continue;
     const value = data.fields[name];
+    if (isTableProperty(property)) {
+      draft[name] = tableDraftRows(property, value);
+      continue;
+    }
     draft[name] = value === undefined || value === null ? "" : formatValue(value);
   }
   return draft;
 }
 
+/** Same text/rows comparison for both shapes, so a save sends only what changed. */
+function sameDraft(before: FieldDraft | undefined, after: FieldDraft | undefined): boolean {
+  return JSON.stringify(before ?? "") === JSON.stringify(after ?? "");
+}
+
 /** Only what changed, so a save cannot touch fields the user never looked at. */
-function changedFields(data: EntityResponse, draft: Record<string, string>): Record<string, unknown> {
+function changedFields(data: EntityResponse, draft: DraftMap): Record<string, unknown> {
   const changed: Record<string, unknown> = {};
   for (const property of data.properties) {
     const name = propertyName(property);
     if (!name || !(name in draft)) continue;
+    const value = draft[name];
+    if (isTableProperty(property)) {
+      const rows = isTableDraft(value) ? value : [];
+      const beforeRows = tableDraftRows(property, data.fields[name]);
+      if (sameDraft(rows, beforeRows)) continue;
+      // Rows, not text: the base takes an array of objects here.
+      changed[name] = serializeTableRows(property, rows);
+      continue;
+    }
+    const text = typeof value === "string" ? value : "";
     const before = data.fields[name];
     const beforeText = before === undefined || before === null ? "" : formatValue(before);
-    if (draft[name] === beforeText) continue;
+    if (text === beforeText) continue;
     // Numbers go back as numbers; everything else stays a string and lets the
     // server reject what it does not accept (`FM-VALIDATE`).
-    changed[name] = propertyType(property) === "number" && draft[name].trim() !== ""
-      ? Number(draft[name])
-      : draft[name];
+    changed[name] = propertyType(property) === "number" && text.trim() !== ""
+      ? Number(text)
+      : text;
   }
   return changed;
 }
@@ -113,7 +155,7 @@ export function EntityPanel({ target, onOpenEntity }: {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState<DraftMap>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -127,6 +169,21 @@ export function EntityPanel({ target, onOpenEntity }: {
   // One panel, two views of the same entity: its own fields, or its place in
   // the chain. Both are read-only until asked otherwise.
   const [tab, setTab] = useState<"attr" | "relations">("attr");
+  // Linking by key: no search here — keys come from the conversation, get
+  // judged first, and only what the base would accept goes on to be written.
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkType, setLinkType] = useState("");
+  const [keyText, setKeyText] = useState("");
+  // The text the current verdicts belong to; anything newer is unjudged.
+  const [checkedText, setCheckedText] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [checkItems, setCheckItems] = useState<LinkKeyCheck[]>([]);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [linking, setLinking] = useState(false);
+  // Which row is asking "really remove this?", keyed by direction:linkType:key.
+  const [breakTarget, setBreakTarget] = useState<string | null>(null);
+  const [breaking, setBreaking] = useState(false);
+  const [breakError, setBreakError] = useState<string | null>(null);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ cwd: target.cwd, key: target.key });
@@ -187,26 +244,57 @@ export function EntityPanel({ target, onOpenEntity }: {
   /**
    * One list per relation, keyed by direction and link type.
    *
-   * Mixing every downstream link into one list hides which kind it is, and the
-   * base names the kinds itself — so the grouping uses its names rather than a
-   * table of ours.
+   * Relations the type declares come first, even with nothing linked: an entity
+   * with no links must still show what it *could* link, otherwise "没挂" and
+   * "不能挂" look the same in a panel that has room for neither explanation.
+   * The grouping uses the base's own names rather than a table of ours.
    */
   const relationGroups = useMemo(() => {
-    const groups = new Map<string, { direction: string; linkType: string; rows: RelationRow[] }>();
-    const sides: Array<[string, RelationRow[]]> = [
+    interface Group {
+      id: string;
+      direction: "upstream" | "downstream";
+      linkType: string;
+      label: string;
+      targetTypes: string[];
+      rows: RelationRow[];
+    }
+    const groups = new Map<string, Group>();
+    for (const option of data?.linkOptions ?? []) {
+      groups.set(`upstream:${option.linkType}`, {
+        id: `upstream:${option.linkType}`,
+        direction: "upstream",
+        linkType: option.linkType,
+        label: option.linkType,
+        targetTypes: option.targetTypes,
+        rows: [],
+      });
+    }
+    const sides: Array<[Group["direction"], RelationRow[]]> = [
       ["upstream", traces?.upstream ?? []],
       ["downstream", traces?.downstream ?? []],
     ];
     for (const [direction, rows] of sides) {
       for (const row of rows) {
         const id = `${direction}:${row.linkType}`;
-        const group = groups.get(id) ?? { direction, linkType: row.linkType, rows: [] };
-        group.rows.push(row);
-        groups.set(id, group);
+        const existing = groups.get(id);
+        if (existing) {
+          existing.rows.push(row);
+          continue;
+        }
+        groups.set(id, {
+          id,
+          direction,
+          linkType: row.linkType,
+          // A downstream link is named by the side that owns it; reading it
+          // back with the inverse name is what makes "被谁指向" legible.
+          label: direction === "downstream" ? row.inverseLinkType || row.linkType : row.linkType,
+          targetTypes: [],
+          rows: [row],
+        });
       }
     }
     return [...groups.values()];
-  }, [traces]);
+  }, [data, traces]);
   const changed = data ? changedFields(data, draft) : {};
   const changedCount = Object.keys(changed).length;
 
@@ -328,6 +416,150 @@ export function EntityPanel({ target, onOpenEntity }: {
     }
     setPendingRoute(route);
     setRouteDraft({});
+  };
+
+  const parsedKeys = useMemo(() => parseLinkKeys(keyText), [keyText]);
+  const linkOptions = data?.linkOptions ?? [];
+  const selectedLink = linkOptions.find((option) => option.linkType === linkType) ?? null;
+  const okItems = checkItems.filter((item) => item.ok);
+  const rejected = checkItems.length - okItems.length;
+  // A verdict belongs to the text it judged: editing after that makes it stale.
+  const linkReady = Boolean(
+    data && selectedLink?.canLink && okItems.length > 0 && !checking && !linking && keyText === checkedText,
+  );
+
+  const openLinkForm = () => {
+    setLinkError(null);
+    if (linkOpen) {
+      setLinkOpen(false);
+      return;
+    }
+    if (!linkType) {
+      const first = linkOptions.find((option) => option.canLink) ?? linkOptions[0];
+      setLinkType(first?.linkType ?? "");
+    }
+    setLinkOpen(true);
+  };
+
+  /** Judges every key in the box — one request, one verdict per key. */
+  const runCheck = useCallback(async () => {
+    if (!data || !selectedLink) return;
+    const keys = parseLinkKeys(keyText).keys;
+    const judged = keyText;
+    if (keys.length === 0) {
+      setCheckItems([]);
+      setCheckedText(judged);
+      return;
+    }
+    setChecking(true);
+    setLinkError(null);
+    try {
+      const params = new URLSearchParams({ cwd: target.cwd, server: data.server });
+      const response = await fetch(`/api/entity/link/check?${params}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sourceKey: data.key, linkType: selectedLink.linkType, keys }),
+      });
+      const body = await response.json() as { items?: LinkKeyCheck[]; error?: string };
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      setCheckItems(body.items ?? []);
+    } catch (cause) {
+      setLinkError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      // Judged either way: a failed check must not re-fire on every render.
+      setCheckedText(judged);
+      setChecking(false);
+    }
+  }, [data, keyText, selectedLink, target.cwd]);
+
+  // Typing pauses → judge. Blur judges at once (see the textarea).
+  useEffect(() => {
+    if (!linkOpen || checking || keyText === checkedText) return;
+    const timer = setTimeout(() => { void runCheck(); }, 400);
+    return () => clearTimeout(timer);
+  }, [linkOpen, checking, keyText, checkedText, runCheck]);
+
+  const submitLink = async () => {
+    if (!data || !selectedLink || !linkReady) return;
+    const targetKeys = okItems.map((item) => item.resolvedKey || item.key);
+    setLinking(true);
+    setLinkError(null);
+    try {
+      const params = new URLSearchParams({ cwd: target.cwd, server: data.server });
+      const response = await fetch(`/api/entity/link?${params}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sourceKey: data.key, linkType: selectedLink.linkType, targetKeys }),
+      });
+      const body = await response.json() as { revision?: number; error?: string };
+      if (!response.ok) {
+        // The batch is atomic: a failure here linked nothing at all.
+        setLinkError(body.error ?? `HTTP ${response.status}`);
+        return;
+      }
+      // Only the keys that went through leave the box; the rejected ones stay
+      // with their reason, so a typo is never silently swallowed.
+      const done = new Set(targetKeys.map((key) => key.toUpperCase()));
+      const rest = parseLinkKeys(keyText).keys.filter((key) => !done.has(key.toUpperCase()));
+      const restText = rest.join(" ");
+      setKeyText(restText);
+      setCheckedText(restText);
+      setCheckItems((current) => current.filter((item) => !item.ok));
+      if (rest.length === 0) setLinkOpen(false);
+      if (typeof body.revision === "number") {
+        // A new revision also re-reads the traces, so the list shows the link.
+        const revision = body.revision;
+        setData((current) => (current ? { ...current, revision } : current));
+      }
+    } catch (cause) {
+      setLinkError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const removeKey = (key: string) => {
+    const id = key.toUpperCase();
+    const rest = parseLinkKeys(keyText).keys.filter((item) => item.toUpperCase() !== id);
+    const restText = rest.join(" ");
+    setKeyText(restText);
+    setCheckedText(restText);
+    setCheckItems((current) => current.filter((item) => item.key.toUpperCase() !== id));
+  };
+
+  /**
+   * Removes one link. The downstream end is the source, which is the other
+   * entity for a downstream row — the call carries both ends explicitly.
+   */
+  const breakLink = async (row: RelationRow) => {
+    if (!data || breaking) return;
+    setBreaking(true);
+    setBreakError(null);
+    try {
+      const params = new URLSearchParams({
+        cwd: target.cwd,
+        server: data.server,
+        source: row.direction === "upstream" ? data.key : row.key,
+        target: row.direction === "upstream" ? row.key : data.key,
+        linkType: row.linkType,
+        self: data.key,
+      });
+      const response = await fetch(`/api/entity/link?${params}`, { method: "DELETE" });
+      const body = await response.json() as { revision?: number; error?: string };
+      if (!response.ok) {
+        setBreakError(body.error ?? `HTTP ${response.status}`);
+        return;
+      }
+      setBreakTarget(null);
+      if (typeof body.revision === "number") {
+        const revision = body.revision;
+        setData((current) => (current ? { ...current, revision } : current));
+      }
+    } catch (cause) {
+      setBreakError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBreaking(false);
+    }
   };
 
   if (loading && !data) {
@@ -546,11 +778,21 @@ export function EntityPanel({ target, onOpenEntity }: {
               </div>
               <div style={{ minWidth: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", color: empty ? muted : undefined }}>
                 {!editable ? (
-                  empty ? "—" : formatValue(value)
+                  empty
+                    ? "—"
+                    : isTableProperty(property)
+                      ? <TableValue property={property} value={value} />
+                      : formatValue(value)
+                ) : isTableProperty(property) ? (
+                  <TableEditor
+                    property={property}
+                    rows={isTableDraft(draft[name]) ? draft[name] : []}
+                    onChange={(rows) => setDraft((current) => ({ ...current, [name]: rows }))}
+                  />
                 ) : (
                   <FieldControl
                     property={property}
-                    value={draft[name] ?? ""}
+                    value={typeof draft[name] === "string" ? draft[name] : ""}
                     onChange={(next) => setDraft((current) => ({ ...current, [name]: next }))}
                   />
                 )}
@@ -704,51 +946,300 @@ export function EntityPanel({ target, onOpenEntity }: {
       </>
       )}
       {tab === "relations" && (
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 10px 12px" }}>
-          {traceError ? (
-            <div style={{ color: danger, fontSize: 12 }}>关系读取失败：{traceError}</div>
-          ) : relationGroups.length === 0 ? (
-            <div style={{ color: muted, fontSize: 12, padding: "4px 0" }}>
-              这条实体还没有建立关联。
-            </div>
-          ) : (
-            relationGroups.map((group) => (
-              <div key={`${group.direction}:${group.linkType}`} style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 11, color: muted, margin: "2px 0 3px" }}>
-                  {group.direction === "upstream" ? "上游" : "下游"} · {group.linkType}（{group.rows.length}）
+        <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 0", flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={openLinkForm}
+              disabled={linkOptions.length === 0}
+              title={linkOptions.length === 0 ? "这个类型没有声明任何关系" : "按 key 挂上游实体"}
+              style={{
+                ...buttonStyle,
+                borderColor: accent,
+                color: accent,
+                opacity: linkOptions.length === 0 ? 0.5 : 1,
+              }}
+            >
+              {linkOpen ? "收起挂链" : "＋ 挂链"}
+            </button>
+            <span style={{ marginLeft: "auto", fontSize: 11, color: muted }}>只挂上游</span>
+          </div>
+
+          {linkOpen && (
+            <div
+              style={{
+                margin: "8px 10px 0",
+                padding: 8,
+                border: `1px solid ${line}`,
+                borderRadius: 8,
+                background: surface,
+                flexShrink: 0,
+              }}
+            >
+              <label style={{ display: "block", marginBottom: 6 }}>
+                <span style={{ display: "block", fontSize: 11, color: muted, marginBottom: 2 }}>关系</span>
+                <AppSelect
+                  aria-label="关系"
+                  value={selectedLink?.linkType ?? ""}
+                  onValueChange={(next) => {
+                    setLinkType(next);
+                    // Verdicts depend on the relation's target types and states,
+                    // so none of them survive a change.
+                    setCheckItems([]);
+                    setCheckedText("");
+                    setLinkError(null);
+                  }}
+                  style={inputStyle}
+                  options={linkOptions.map((option) => ({
+                    value: option.linkType,
+                    label: `${option.linkType}${option.targetTypes.length > 0 ? ` → ${option.targetTypes.join(" / ")}` : ""}`
+                      + (option.canLink ? "" : option.blockedBy === "state" ? "（当前状态不可挂）" : "（无权限）"),
+                    disabled: !option.canLink,
+                  }))}
+                />
+              </label>
+              {selectedLink?.description && (
+                <div style={{ fontSize: 11, color: muted, marginBottom: 6 }}>{selectedLink.description}</div>
+              )}
+
+              <span style={{ display: "block", fontSize: 11, color: muted, marginBottom: 2 }}>
+                目标 key
+                <span style={{ marginLeft: 6, opacity: 0.8 }}>
+                  空格 / 逗号 / 换行分隔，最多 {MAX_LINK_KEYS} 个
+                </span>
+              </span>
+              <textarea
+                value={keyText}
+                onChange={(event) => setKeyText(event.target.value)}
+                onBlur={() => {
+                  if (keyText !== checkedText) void runCheck();
+                }}
+                placeholder="MR-000250 MR-000244"
+                rows={2}
+                spellCheck={false}
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }}
+              />
+              {parsedKeys.overflow > 0 && (
+                <div style={{ fontSize: 11, color: danger, marginTop: 4 }}>
+                  共 {parsedKeys.total} 个，最多 {MAX_LINK_KEYS} 个，先去掉 {parsedKeys.overflow} 个
                 </div>
-                {group.rows.map((row) => (
-                  <button
-                    key={`${group.direction}:${group.linkType}:${row.key}`}
-                    type="button"
-                    onClick={() => onOpenEntity?.({ server: data.server, workspace: data.workspace, key: row.key })}
-                    disabled={!onOpenEntity}
-                    title={`${row.key} ${row.name}`}
-                    style={{
-                      display: "flex",
-                      alignItems: "baseline",
-                      gap: 6,
-                      width: "100%",
-                      padding: "3px 4px",
-                      border: "none",
-                      background: "none",
-                      color: "inherit",
-                      font: "inherit",
-                      fontSize: 12,
-                      textAlign: "left",
-                      cursor: onOpenEntity ? "pointer" : "default",
-                    }}
-                  >
-                    <span style={{ flexShrink: 0, color: accent }}>{row.key}</span>
-                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: muted }}>
-                      {row.name}
-                    </span>
-                    <span style={{ flexShrink: 0, fontSize: 11, color: muted }}>{row.state}</span>
-                  </button>
-                ))}
+              )}
+
+              {checking && <div style={{ fontSize: 11, color: muted, marginTop: 4 }}>校验中…</div>}
+
+              {checkItems.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  {checkItems.map((item) => (
+                    <div
+                      key={`${item.key}:${item.reason ?? "ok"}`}
+                      style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "2px 2px", fontSize: 12 }}
+                    >
+                      <span style={{ width: 10, flexShrink: 0, color: item.ok ? accent : danger }}>
+                        {item.ok ? "✓" : "×"}
+                      </span>
+                      <span style={{ flexShrink: 0, color: item.ok ? accent : muted }}>
+                        {item.resolvedKey || item.key}
+                      </span>
+                      <span
+                        title={item.detail}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          color: item.ok ? muted : danger,
+                        }}
+                      >
+                        {item.ok ? item.name || "（无名称）" : item.detail}
+                      </span>
+                      {item.ok && <span style={{ flexShrink: 0, fontSize: 11, color: muted }}>{item.state}</span>}
+                      <button
+                        type="button"
+                        onClick={() => removeKey(item.key)}
+                        title={`从输入里去掉 ${item.key}`}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          color: muted,
+                          font: "inherit",
+                          fontSize: 11,
+                          cursor: "pointer",
+                          padding: 0,
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {linkError && (
+                <div
+                  role="alert"
+                  style={{
+                    color: danger,
+                    fontSize: 12,
+                    marginTop: 6,
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {linkError}
+                </div>
+              )}
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => void submitLink()}
+                  disabled={!linkReady}
+                  style={{ ...buttonStyle, borderColor: accent, color: accent, opacity: linkReady ? 1 : 0.5 }}
+                >
+                  {linking ? "挂链中…" : checking ? "校验中…" : okItems.length > 0 ? `挂 ${okItems.length} 条` : "挂链"}
+                </button>
+                <button type="button" onClick={openLinkForm} disabled={linking} style={buttonStyle}>
+                  取消
+                </button>
+                {rejected > 0 && (
+                  <span style={{ marginLeft: "auto", fontSize: 11, color: muted }}>
+                    {rejected} 条不可挂，会留在框里
+                  </span>
+                )}
               </div>
-            ))
+            </div>
           )}
+
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 10px 12px" }}>
+            {traceError ? (
+              <div style={{ color: danger, fontSize: 12 }}>关系读取失败：{traceError}</div>
+            ) : relationGroups.length === 0 ? (
+              <div style={{ color: muted, fontSize: 12, padding: "4px 0" }}>
+                这条实体还没有建立关联。
+              </div>
+            ) : (
+              relationGroups.map((group) => (
+                <div key={group.id} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, color: muted, margin: "2px 0 3px" }}>
+                    {group.direction === "upstream" ? "上游" : "下游"} · {group.label}
+                    {group.targetTypes.length > 0 ? ` → ${group.targetTypes.join(" / ")}` : ""}（{group.rows.length}）
+                  </div>
+                  {group.rows.length === 0 ? (
+                    <div style={{ fontSize: 11, color: muted, padding: "2px 4px" }}>还没有挂</div>
+                  ) : (
+                    group.rows.map((row) => {
+                      const id = `${group.direction}:${group.linkType}:${row.key}`;
+                      if (breakTarget === id) {
+                        return (
+                          <div
+                            key={row.key}
+                            style={{
+                              margin: "2px 0 4px",
+                              padding: "4px 6px",
+                              border: `1px solid ${danger}`,
+                              borderRadius: 6,
+                              background: "rgba(229,72,77,0.08)",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ fontSize: 11 }}>断开 {row.key}？</span>
+                              <button
+                                type="button"
+                                onClick={() => void breakLink(row)}
+                                disabled={breaking}
+                                style={{
+                                  marginLeft: "auto",
+                                  ...buttonStyle,
+                                  borderColor: danger,
+                                  color: danger,
+                                  padding: "1px 7px",
+                                  fontSize: 11,
+                                  opacity: breaking ? 0.6 : 1,
+                                }}
+                              >
+                                {breaking ? "断开中…" : "断开"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBreakTarget(null);
+                                  setBreakError(null);
+                                }}
+                                disabled={breaking}
+                                style={{ ...buttonStyle, padding: "1px 7px", fontSize: 11 }}
+                              >
+                                取消
+                              </button>
+                            </div>
+                            {breakError && (
+                              <div style={{ color: danger, fontSize: 11, marginTop: 4, whiteSpace: "pre-wrap" }}>
+                                {breakError}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div
+                          key={row.key}
+                          style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "3px 2px" }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onOpenEntity?.({ server: data.server, workspace: data.workspace, key: row.key })}
+                            disabled={!onOpenEntity}
+                            title={`${row.key} ${row.name}`}
+                            style={{
+                              display: "flex",
+                              alignItems: "baseline",
+                              gap: 6,
+                              flex: 1,
+                              minWidth: 0,
+                              padding: 0,
+                              border: "none",
+                              background: "none",
+                              color: "inherit",
+                              font: "inherit",
+                              fontSize: 12,
+                              textAlign: "left",
+                              cursor: onOpenEntity ? "pointer" : "default",
+                            }}
+                          >
+                            <span style={{ flexShrink: 0, color: accent }}>{row.key}</span>
+                            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: muted }}>
+                              {row.name}
+                            </span>
+                            <span style={{ flexShrink: 0, fontSize: 11, color: muted }}>{row.state}</span>
+                          </button>
+                          {row.canUnlink ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBreakError(null);
+                                setBreakTarget(id);
+                              }}
+                              title={`断开 ${row.key}`}
+                              style={{ ...buttonStyle, padding: "1px 7px", fontSize: 11 }}
+                            >
+                              断开
+                            </button>
+                          ) : (
+                            <span
+                              title="这条链接由下游那一端维护，需要对该类型有写权限"
+                              style={{ flexShrink: 0, fontSize: 11, color: muted, opacity: 0.8 }}
+                            >
+                              归对方所有
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>

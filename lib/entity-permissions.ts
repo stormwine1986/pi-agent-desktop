@@ -43,6 +43,13 @@ export function rolesIn(value: unknown, workspace: string): string[] {
   return [...roles];
 }
 
+/** The type-level write gate: outside it, a reader writes nothing at all. */
+function typeWriteAllowed(definition: Record<string, unknown>, roles: string[]): boolean {
+  const permissions = asRecord(definition.permissions);
+  if (!permissions) return true;
+  return allows(asStrings(permissions.write), roles);
+}
+
 /**
  * Fields this reader may change in `state`.
  *
@@ -53,9 +60,7 @@ export function rolesIn(value: unknown, workspace: string): string[] {
 export function writableFieldsOf(metadata: unknown, state: string, roles: string[]): string[] {
   const definition = asRecord(metadata);
   if (!definition) return [];
-
-  const typePermissions = asRecord(definition.permissions);
-  if (typePermissions && !allows(asStrings(typePermissions.write), roles)) return [];
+  if (!typeWriteAllowed(definition, roles)) return [];
 
   const fields = Array.isArray(definition.fields) ? definition.fields : [];
   const writable: string[] = [];
@@ -127,4 +132,84 @@ export function availableRoutesOf(metadata: unknown, state: string, roles: strin
     });
   }
   return offers;
+}
+
+/**
+ * One relation this type declares, and whether this reader may create it now.
+ *
+ * A link is written from the downstream end, so only the relations this entity
+ * owns are offered here: `targetEntityTypes` names the upstream side, and the
+ * base refuses anything else (`traceability-service.ts`).
+ */
+export interface LinkOption {
+  linkType: string;
+  /** The relation named from the other end, e.g. `is_satisfied_by`. */
+  inverseName: string;
+  description: string;
+  targetTypes: string[];
+  allowedSourceStates: string[];
+  allowedTargetStates: string[];
+  /** Whether this reader may create one from the entity's current state. */
+  canLink: boolean;
+  /** The model's own reason when `canLink` is false. */
+  blockedBy: "role" | "state" | null;
+}
+
+export function linkOptionsOf(metadata: unknown, state: string, roles: string[]): LinkOption[] {
+  const definition = asRecord(metadata);
+  if (!definition) return [];
+  const declared = Array.isArray(definition.traceability) ? definition.traceability : [];
+  const typeWritable = typeWriteAllowed(definition, roles);
+
+  const options: LinkOption[] = [];
+  for (const entry of declared) {
+    const trace = asRecord(entry);
+    const linkType = typeof trace?.name === "string" ? trace.name : "";
+    if (!linkType) continue;
+
+    // `permissions` on a relation narrows the type-level write; missing or
+    // empty means "whoever may write the type" — the same rule the base applies
+    // in `canManageTrace`.
+    const roleOk = typeWritable && allows(asStrings(trace?.permissions), roles);
+    const sourceStates = asStrings(trace?.allowedSourceStates);
+    const stateOk = sourceStates.length === 0 || sourceStates.includes(state);
+
+    options.push({
+      linkType,
+      inverseName: typeof trace?.inverseName === "string" ? trace.inverseName : "",
+      description: typeof trace?.description === "string" ? trace.description : "",
+      targetTypes: asStrings(trace?.targetEntityTypes),
+      allowedSourceStates: sourceStates,
+      allowedTargetStates: asStrings(trace?.allowedTargetStates),
+      canLink: roleOk && stateOk,
+      blockedBy: roleOk ? (stateOk ? null : "state") : "role",
+    });
+  }
+  return options;
+}
+
+/**
+ * Whether this reader may create or remove links of one relation on a type.
+ *
+ * Mirrors the base's `canManageTrace`: a declared relation may narrow access to
+ * its own `permissions`, and a relation the model no longer declares falls back
+ * to the type-level write gate — which is what keeps retired relations
+ * readable and unlinkable (a new link is refused earlier, by the model check).
+ */
+export function canManageTraceOf(
+  metadata: unknown,
+  linkType: string,
+  roles: string[],
+  options?: { allowRetired?: boolean },
+): boolean {
+  const definition = asRecord(metadata);
+  if (!definition) return false;
+  if (!typeWriteAllowed(definition, roles)) return false;
+
+  const declared = Array.isArray(definition.traceability) ? definition.traceability : [];
+  const trace = declared
+    .map((entry) => asRecord(entry))
+    .find((entry) => typeof entry?.name === "string" && entry.name.toLowerCase() === linkType.toLowerCase());
+  if (!trace) return options?.allowRetired === true;
+  return allows(asStrings(trace.permissions), roles);
 }

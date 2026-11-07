@@ -1,54 +1,34 @@
 import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
+import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
+import { asRecord, canManageTraceOf, rolesIn } from "@/lib/entity-permissions";
+import { normalizeTraces, type TracesResponse } from "@/lib/entity-traces";
 
 export const dynamic = "force-dynamic";
 
-/** The entity on the other end of one link, as much of it as a list row needs. */
-export interface RelationRow {
-  key: string;
-  type: string;
-  name: string;
-  state: string;
-  /** `targets`, `is_targeted_by`, `verifies`… as the base names it. */
-  linkType: string;
-}
-
-export interface TracesResponse {
-  upstream: RelationRow[];
-  downstream: RelationRow[];
-}
+export type { RelationRow, TracesResponse } from "@/lib/entity-traces";
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function rowOf(entity: Record<string, unknown> | undefined, link: Record<string, unknown>): RelationRow | null {
-  const key = text(entity?.key);
-  if (!key) return null;
-  return {
-    key,
-    type: text(entity?.type),
-    name: text(entity?.name),
-    state: text(entity?.state),
-    linkType: text(link.linkType),
-  };
+/** `get` answers a flat entity or wraps it under `entity`; accept both. */
+function unwrapEntity(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (typeof record.key === "string") return record;
+  const inner = asRecord(record.entity);
+  return typeof inner?.key === "string" ? inner : null;
 }
 
 /**
- * What this entity is traced to, one hop out, split by direction.
+ * One hop of traceability, with the one thing a list row needs beyond the
+ * link: whether this reader may remove it.
  *
- * The base reports each link with both ends embedded; the row worth showing is
- * the end that is *not* this entity. Direction is the base's own reading —
- * "downstream" means the other entity depends on this one — so upstream and
- * downstream are never inferred from link type names, which a customer's model
- * is free to extend.
+ * Removing a link is the downstream side's call (`unlink` takes `sourceId`),
+ * so the question differs by direction: for an upstream row the source is this
+ * entity, for a downstream row it is the other one — whose type definition
+ * decides the answer.
  */
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -62,24 +42,51 @@ export async function GET(request: Request): Promise<Response> {
 
   const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
+  const target: McpHttpTarget = resolved.target;
 
-  const result = await callMcpTool(resolved.target, "list_traces", { entityId: key });
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 502 });
+  const entityResult = await callMcpTool(target, "get", { id: key, includeAttachments: false });
+  if (!entityResult.ok) return NextResponse.json({ error: entityResult.error }, { status: 502 });
+  const entity = unwrapEntity(entityResult.value);
+  if (!entity) return NextResponse.json({ error: `服务器没有返回 ${key}` }, { status: 502 });
 
-  const links = Array.isArray(result.value) ? result.value : [];
-  const response: TracesResponse = { upstream: [], downstream: [] };
-  for (const entry of links) {
-    const link = asRecord(entry);
-    if (!link || link.isActive === false) continue;
-    const source = asRecord(link.sourceEntity);
-    const target = asRecord(link.targetEntity);
-    // The other end is whichever entity is not this one; a self-link is dropped.
-    const other = text(source?.key) === key ? target : source;
-    const row = rowOf(other, link);
-    if (!row || row.key === key) continue;
-    if (text(link.direction) === "upstream") response.upstream.push(row);
-    else if (text(link.direction) === "downstream") response.downstream.push(row);
+  const type = text(entity.type);
+  const workspace = text(entity.workspaceId);
+
+  const [linksResult, metadataResult, meResult] = await Promise.all([
+    callMcpTool(target, "list_traces", { entityId: key }),
+    callMcpTool(target, "get_metadata", { type }),
+    callMcpTool(target, "about_me", {}),
+  ]);
+
+  if (!linksResult.ok) {
+    // A failed read must say so: an empty list would read as "no relations".
+    return NextResponse.json({ error: linksResult.error, upstream: [], downstream: [] }, { status: 502 });
   }
 
-  return NextResponse.json(response);
+  const traces: TracesResponse = normalizeTraces(
+    Array.isArray(linksResult.value) ? linksResult.value : [],
+    key,
+  );
+  const roles = meResult.ok ? rolesIn(meResult.value, workspace) : [];
+
+  // One definition per type involved, so each row's own type decides its permission.
+  const definitions = new Map<string, unknown>();
+  if (metadataResult.ok) definitions.set(type, metadataResult.value);
+  const otherTypes = [...new Set(
+    traces.downstream.map((row) => row.type).filter((name) => name && name !== type),
+  )];
+  const extra = await Promise.all(otherTypes.map(async (other) => {
+    const found = await callMcpTool(target, "get_metadata", { type: other });
+    return [other, found.ok ? found.value : null] as const;
+  }));
+  for (const [name, definition] of extra) definitions.set(name, definition);
+
+  for (const row of [...traces.upstream, ...traces.downstream]) {
+    // The link's owner is the source side: this entity going upstream, the
+    // other entity going downstream.
+    const ownerType = row.direction === "upstream" ? type : row.type;
+    row.canUnlink = canManageTraceOf(definitions.get(ownerType), row.linkType, roles, { allowRetired: true });
+  }
+
+  return NextResponse.json(traces);
 }

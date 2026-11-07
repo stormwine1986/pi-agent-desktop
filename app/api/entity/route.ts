@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { globalMcpConfigPath, projectMcpConfigPath } from "@/lib/mcp-config-read";
-import { asRecord, asStrings, availableRoutesOf, rolesIn, writableFieldsOf, type AvailableRoute } from "@/lib/entity-permissions";
+import { asRecord, asStrings, availableRoutesOf, linkOptionsOf, rolesIn, writableFieldsOf, type AvailableRoute, type LinkOption } from "@/lib/entity-permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +43,12 @@ export interface EntityResponse {
   writableFields: string[];
   /** Transitions this reader may take from the current state. */
   routes: AvailableRoute[];
+  /**
+   * Relations this type declares and this reader may write, computed the same
+   * way as `writableFields` — the panel offers what the model allows, not what
+   * it happens to have seen linked already.
+   */
+  linkOptions: LinkOption[];
 }
 
 function text(value: unknown): string {
@@ -176,6 +182,7 @@ async function loadEntity(target: McpHttpTarget, server: string, workspace: stri
     roles,
     writableFields: writableFieldsOf(metadata, state, roles),
     routes: availableRoutesOf(metadata, state, roles),
+    linkOptions: linkOptionsOf(metadata, state, roles),
   };
   return { payload };
 }
