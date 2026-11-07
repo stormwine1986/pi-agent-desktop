@@ -10327,3 +10327,23 @@ html.dark .artifacts-thumb[data-tone="data"] { --tone: #4fc1d6; }
 .relay-devices > .settings-option-hint {
   padding: 10px 14px 0;
 }
+
+/* Todo views (components/ViewsPanel.tsx): the key cell is the row's handle —
+   clicking it opens the entity board, so it needs to look clickable. */
+.views-key-link {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: rgba(128, 128, 128, 0.55);
+  text-underline-offset: 2px;
+}
+
+.views-key-link:hover {
+  color: var(--accent, #5b9dd9);
+  text-decoration-color: currentColor;
+}
+
+.views-key-link:focus-visible {
+  outline: 1px solid var(--accent, #5b9dd9);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
