@@ -38,6 +38,20 @@ export interface ViewDefinition {
   pageSize: number;
   /** Whether a background re-evaluation may announce new entries for this view. */
   notify: boolean;
+  /**
+   * Which navigation group this view belongs to, or null when ungrouped.
+   *
+   * Only the navigation reads it: evaluation, paging and reminders behave the
+   * same whichever group a view sits in (SSR-000087 VW-NAV ②).
+   */
+  group: string | null;
+}
+
+/** A group as declared under the root `groups:`, for ordering and labels. */
+export interface ViewGroup {
+  title: string;
+  /** Whether the panel starts with this group folded. */
+  collapsed: boolean;
 }
 
 export interface ViewEntry {
@@ -55,6 +69,8 @@ export interface ViewsConfig {
   /** Why the file as a whole could not be used (bad YAML, wrong root shape). */
   error: string | null;
   views: ViewEntry[];
+  /** Declared group order and labels; empty when the file declares none. */
+  groups: ViewGroup[];
 }
 
 /**
@@ -134,6 +150,19 @@ function parseView(raw: unknown, index: number): ViewEntry {
     }
   }
 
+  // A group is a label, so an empty one means "none" rather than an error: a
+  // customer who leaves the key in place after ungrouping a view should not get
+  // a broken view out of it (SSR-000087 ⑦, SSR-000066 格式校验).
+  let group: string | null = null;
+  if (raw.group !== undefined && raw.group !== null) {
+    const text = asText(raw.group);
+    if (typeof raw.group !== "string") {
+      problems.push(`group 只能是字符串（写的是 ${JSON.stringify(raw.group)}）`);
+    } else if (text.length > 0) {
+      group = text;
+    }
+  }
+
   if (problems.length > 0) {
     return { title: title || `#${index + 1}`, error: problems.join("；"), view: null };
   }
@@ -141,7 +170,7 @@ function parseView(raw: unknown, index: number): ViewEntry {
   return {
     title,
     error: null,
-    view: { title, server, workspace, dql, columns, orderBy, order, pageSize, notify },
+    view: { title, server, workspace, dql, columns, orderBy, order, pageSize, notify, group },
   };
 }
 
@@ -153,7 +182,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
   }));
   const found = candidates.find((candidate) => existsSync(candidate.absolute));
   if (!found) {
-    return { path: candidates[0].absolute, exists: false, error: null, views: [] };
+    return { path: candidates[0].absolute, exists: false, error: null, views: [], groups: [] };
   }
 
   let text: string;
@@ -165,6 +194,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
       exists: true,
       error: `读取失败：${error instanceof Error ? error.message : String(error)}`,
       views: [],
+      groups: [],
     };
   }
 
@@ -177,6 +207,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
       exists: true,
       error: `YAML 解析失败：${error instanceof Error ? error.message : String(error)}`,
       views: [],
+      groups: [],
     };
   }
 
@@ -186,6 +217,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
       exists: true,
       error: "根节点必须是对象，形如 views: [...]",
       views: [],
+      groups: [],
     };
   }
 
@@ -196,6 +228,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
       exists: true,
       error: "缺少 views 数组（views: [...]）",
       views: [],
+      groups: [],
     };
   }
 
@@ -214,5 +247,44 @@ export function readViewsConfig(cwd: string): ViewsConfig {
     }
   }
 
-  return { path: found.absolute, exists: true, error: null, views };
+  const groups = parseGroups(parsed.groups);
+  if (typeof groups === "string") {
+    return { path: found.absolute, exists: true, error: groups, views: [], groups: [] };
+  }
+
+  return { path: found.absolute, exists: true, error: null, views, groups };
+}
+
+/**
+ * `groups:` only orders and labels the navigation; it never adds or hides a
+ * view. A malformed list is a file-level problem because there is no view to
+ * attach it to (SSR-000066 ①: the panel shows the reason rather than guessing).
+ */
+function parseGroups(raw: unknown): ViewGroup[] | string {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return "groups 必须是数组（可写组名或 { title, collapsed }）";
+
+  const groups: ViewGroup[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (typeof item === "string") {
+      const title = item.trim();
+      if (!title) return `groups 第 ${index + 1} 项是空字符串，删掉它或写上组名`;
+      groups.push({ title, collapsed: false });
+      continue;
+    }
+    if (!isRecord(item)) {
+      return `groups 第 ${index + 1} 项既不是组名也不是 { title, collapsed }`;
+    }
+    const title = asText(item.title);
+    if (!title) return `groups 第 ${index + 1} 项缺少 title`;
+    let collapsed = false;
+    if (item.collapsed !== undefined && item.collapsed !== null) {
+      if (typeof item.collapsed !== "boolean") {
+        return `groups 第 ${index + 1} 项的 collapsed 只能是 true 或 false`;
+      }
+      collapsed = item.collapsed;
+    }
+    groups.push({ title, collapsed });
+  }
+  return groups;
 }

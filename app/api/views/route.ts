@@ -34,6 +34,8 @@ interface ViewRows {
   entities: RowEntity[];
   /** Whether the panel may announce new rows for this view. */
   notify: boolean;
+  /** Navigation group this view belongs to; null when ungrouped. */
+  group: string | null;
   error: string | null;
 }
 
@@ -78,6 +80,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     rows: [],
     entities: [],
     notify: view.notify,
+    group: view.group,
     error: null,
   };
   // The error has to name the query that failed: the panel shows it as-is, and
@@ -120,6 +123,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
       };
     }),
     notify: view.notify,
+    group: view.group,
     error: null,
   };
 }
@@ -150,7 +154,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ path: config.path, exists: false, error: null, views: [] });
   }
   if (config.error) {
-    return NextResponse.json({ path: config.path, exists: true, error: config.error, views: [] });
+    return NextResponse.json({ path: config.path, exists: true, error: config.error, views: [], groups: [] });
   }
 
   // `?probe=1` answers "does this project have views?" without running a single
@@ -158,7 +162,7 @@ export async function GET(req: Request) {
   // and the file tree; evaluating every view there would cost a round trip to
   // each MCP server before anything is shown.
   if (url.searchParams.get("probe") === "1") {
-    return NextResponse.json({ path: config.path, exists: true, error: null, views: [] });
+    return NextResponse.json({ path: config.path, exists: true, error: null, views: [], groups: config.groups });
   }
 
   const agentDir = getAgentDir();
@@ -167,11 +171,11 @@ export async function GET(req: Request) {
       // A view that failed validation still occupies its slot in the panel: the
       // user needs to see which entry is broken.
       if (!entry.view) {
-        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, error: entry.error ?? "配置无效" };
+        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, group: null, error: entry.error ?? "配置无效" };
       }
       return runView(agentDir, cwd, entry.view);
     }),
   );
 
-  return NextResponse.json({ path: config.path, exists: true, error: null, views });
+  return NextResponse.json({ path: config.path, exists: true, error: null, views, groups: config.groups });
 }

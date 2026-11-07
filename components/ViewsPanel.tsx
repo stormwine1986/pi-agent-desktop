@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { subscribeEntityWrites } from "@/lib/entity-activity";
+import { APP_PREF_KEYS, getPrefJson, setPrefJson } from "@/lib/app-prefs";
+import { groupViews, type ViewGroupDecl } from "@/lib/views/group";
 
 /**
  * The to-do views declared by the workspace's `.pi/views.yaml`.
@@ -39,6 +41,8 @@ interface ViewRows {
   entities: { key: string; name: string; state: string }[];
   /** `notify: false` in views.yaml: new entries appear, but nothing is announced. */
   notify: boolean;
+  /** Navigation group, or null when the view is ungrouped. */
+  group: string | null;
   error: string | null;
 }
 
@@ -47,6 +51,8 @@ interface ViewsResponse {
   exists: boolean;
   error: string | null;
   views: ViewRows[];
+  /** Declared group order and default folding; empty when none are declared. */
+  groups: ViewGroupDecl[];
 }
 
 const muted = "rgba(128,128,128,0.75)";
@@ -185,7 +191,8 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
       if (document.visibilityState === "visible") void evaluate("diff");
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => {
+  
+  return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
@@ -202,10 +209,98 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
     void evaluate("apply");
   }), [evaluate]);
 
-  const views = data?.views ?? [];
+  // Memoised so the grouping below does not recompute on every render.
+  const views = useMemo(() => data?.views ?? [], [data]);
   const activeIndex = views.length === 0 ? -1 : Math.min(Math.max(selected, 0), views.length - 1);
   const active = activeIndex >= 0 ? views[activeIndex] : null;
+
+  const nav = useMemo(() => groupViews(views, data?.groups ?? []), [data?.groups, views]);
+
+  // Folded groups: what this project last chose, else the file's default. A
+  // local preference, so it stays out of views.yaml (SSR-000087 ⑦).
+  //
+  // An empty stored list is a choice, not an absence: without that distinction
+  // expanding a `collapsed: true` group would be undone by the next poll.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const stored = getPrefJson<Record<string, string[]>>(APP_PREF_KEYS.collapsedViewGroups)?.[cwd];
+    const initial = Array.isArray(stored)
+      ? new Set(stored.filter((title) => typeof title === "string"))
+      : new Set((data?.groups ?? []).filter((group) => group.collapsed).map((group) => group.title));
+    setCollapsedGroups(initial);
+  }, [cwd, data?.groups]);
+
+  const toggleGroup = useCallback((title: string) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(title)) next.delete(title);
+      else next.add(title);
+      const all = getPrefJson<Record<string, string[]>>(APP_PREF_KEYS.collapsedViewGroups) ?? {};
+      setPrefJson(APP_PREF_KEYS.collapsedViewGroups, { ...all, [cwd]: [...next] });
+      return next;
+    });
+  }, [cwd]);
   const heldCounts = held?.counts ?? {};
+
+  /**
+   * One navigation row. Index-based on purpose: grouping changes which section
+   * draws a view, never which view a click selects.
+   */
+  const renderRow = (index: number, indented: boolean) => {
+    const view = views[index];
+    if (!view) return null;
+    const isActive = index === activeIndex;
+    const fresh = heldCounts[index] ?? 0;
+    return (
+      <button
+        key={index}
+        type="button"
+        onClick={() => {
+          setSelected(index);
+          // Asking for the view is also asking for what is new in it.
+          if (held) apply(held.response);
+        }}
+        aria-current={isActive ? "true" : undefined}
+        title={view.error ? `${view.title}\n${view.error}` : view.title}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          padding: indented ? "5px 8px 5px 18px" : "5px 8px 5px 6px",
+          border: "none",
+          borderLeft: `2px solid ${isActive ? "var(--accent, #5b9dd9)" : "transparent"}`,
+          background: isActive ? surface : "none",
+          color: view.error ? danger : "inherit",
+          font: "inherit",
+          fontSize: 12,
+          fontWeight: isActive ? 600 : 400,
+          textAlign: "left",
+          cursor: "pointer",
+        }}
+      >
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {view.title}
+        </span>
+        {view.error ? (
+          <span aria-label="配置有误" style={{ flexShrink: 0, fontSize: 10 }}>
+            ●
+          </span>
+        ) : fresh > 0 ? (
+          <span
+            title={`${fresh} 条新条目，点开查看`}
+            style={{ flexShrink: 0, color: "var(--accent, #5b9dd9)", fontVariantNumeric: "tabular-nums" }}
+          >
+            +{fresh}
+          </span>
+        ) : (
+          <span style={{ flexShrink: 0, color: muted, fontVariantNumeric: "tabular-nums" }}>
+            {view.rows.length}
+          </span>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minWidth: 0 }}>
@@ -288,59 +383,71 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
               padding: "4px 0",
             }}
           >
-            {views.map((view, index) => {
-              const isActive = index === activeIndex;
-              const fresh = heldCounts[index] ?? 0;
-              return (
-                <button
-                  key={index}
-                  type="button"
-                  onClick={() => {
-                    setSelected(index);
-                    // Asking for the view is also asking for what is new in it.
-                    if (held) apply(held.response);
-                  }}
-                  aria-current={isActive ? "true" : undefined}
-                  title={view.error ? `${view.title}\n${view.error}` : view.title}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    width: "100%",
-                    padding: "5px 8px 5px 6px",
-                    border: "none",
-                    borderLeft: `2px solid ${isActive ? "var(--accent, #5b9dd9)" : "transparent"}`,
-                    background: isActive ? surface : "none",
-                    color: view.error ? danger : "inherit",
-                    font: "inherit",
-                    fontSize: 12,
-                    fontWeight: isActive ? 600 : 400,
-                    textAlign: "left",
-                    cursor: "pointer",
-                  }}
-                >
-                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {view.title}
-                  </span>
-                  {view.error ? (
-                    <span aria-label="配置有误" style={{ flexShrink: 0, fontSize: 10 }}>
-                      ●
-                    </span>
-                  ) : fresh > 0 ? (
-                    <span
-                      title={`${fresh} 条新条目，点开查看`}
-                      style={{ flexShrink: 0, color: "var(--accent, #5b9dd9)", fontVariantNumeric: "tabular-nums" }}
-                    >
-                      +{fresh}
-                    </span>
-                  ) : (
-                    <span style={{ flexShrink: 0, color: muted, fontVariantNumeric: "tabular-nums" }}>
-                      {view.rows.length}
-                    </span>
+            {nav.ordered.length === 0
+              ? nav.ungrouped.map((index) => renderRow(index, false))
+              : (
+                <>
+                  {nav.ordered.map((title) => {
+                    const indices = nav.members.get(title) ?? [];
+                    const folded = collapsedGroups.has(title);
+                    const broken = indices.some((index) => Boolean(views[index]?.error));
+                    // A folded group can hold the view being read; say so rather
+                    // than leave the reader wondering why no row is marked.
+                    const holdsActive = folded && indices.includes(activeIndex);
+                    return (
+                      <div key={`group:${title}`}>
+                        <button
+                          type="button"
+                          onClick={() => toggleGroup(title)}
+                          aria-expanded={!folded}
+                          title={`${title}（${indices.length} 个视图）`}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            width: "100%",
+                            padding: "5px 8px 5px 6px",
+                            border: "none",
+                            background: "none",
+                            color: "inherit",
+                            font: "inherit",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            textAlign: "left",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <span aria-hidden="true" style={{ flexShrink: 0, color: muted, fontSize: 10, width: 8 }}>
+                            {folded ? "▸" : "▾"}
+                          </span>
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {title}
+                          </span>
+                          {holdsActive && (
+                            <span aria-label="当前视图在这个组里" style={{ flexShrink: 0, color: "var(--accent, #5b9dd9)", fontSize: 10 }}>
+                              ●
+                            </span>
+                          )}
+                          {broken && (
+                            <span aria-label="组内有配置错误的视图" style={{ flexShrink: 0, color: danger, fontSize: 10 }}>
+                              ●
+                            </span>
+                          )}
+                        </button>
+                        {/* Folding hides rows only. Evaluation and reminders keep
+                            running for every view in the group (SSR-000087 ②). */}
+                        {!folded && indices.map((index) => renderRow(index, true))}
+                      </div>
+                    );
+                  })}
+                  {nav.ungrouped.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: line, margin: "4px 8px" }} />
+                      {nav.ungrouped.map((index) => renderRow(index, false))}
+                    </>
                   )}
-                </button>
-              );
-            })}
+                </>
+              )}
           </nav>
 
           <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "8px 10px 16px" }}>
@@ -386,7 +493,11 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
   // the server told us its key and the view names the channel it came from.
   const canCarry = Boolean(onBringToChat) && view.entities.some((entity) => entity.key);
   const canOpen = Boolean(onOpenEntity) && view.entities.some((entity) => entity.key);
-  const showActions = canCarry || canOpen;
+  const showActions = canCarry;
+  // A row opens its entity board by clicking its key, so the key column is the
+  // target instead of a per-row "open" button. When the view does not name that
+  // column, the cell whose text *is* the key still works (`-1` = no such column).
+  const keyColumnIndex = view.columns.findIndex((column) => column.trim().toLowerCase() === "key");
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
@@ -414,72 +525,83 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
           </tr>
         </thead>
         <tbody>
-          {view.rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              {showActions && (
-                <td style={{ borderBottom: `1px solid ${line}`, padding: "2px 6px 2px 0", whiteSpace: "nowrap", verticalAlign: "top" }}>
-                  {(() => {
-                    const entity = view.entities[rowIndex];
-                    if (!entity?.key || !view.server || !view.workspace) return null;
-                    const buttonStyle = {
-                      border: `1px solid ${line}`,
-                      background: "none",
-                      color: muted,
-                      borderRadius: 4,
-                      padding: "1px 5px",
-                      font: "inherit",
-                      fontSize: 11,
-                      lineHeight: 1.4,
-                      cursor: "pointer",
-                    } as const;
-                    return (
-                      <span style={{ display: "inline-flex", gap: 4 }}>
-                        {canOpen && (
-                          <button
-                            type="button"
-                            onClick={() => onOpenEntity?.({ server: view.server, workspace: view.workspace, key: entity.key, name: entity.name })}
-                            title={`打开 ${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
-                            aria-label={`打开 ${entity.key}`}
-                            style={buttonStyle}
-                          >
-                            打开
-                          </button>
-                        )}
-                        {canCarry && (
-                          <button
-                            type="button"
-                            onClick={() => onBringToChat?.({ server: view.server, workspace: view.workspace, ...entity })}
-                            title={`带入会话：${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
-                            aria-label={`带入会话：${entity.key}`}
-                            style={buttonStyle}
-                          >
-                            带入
-                          </button>
-                        )}
-                      </span>
-                    );
-                  })()}
-                </td>
-              )}
-              {row.map((value, columnIndex) => (
-                <td
-                  key={columnIndex}
-                  style={{
-                    padding: "3px 8px 3px 0",
-                    borderBottom: `1px solid ${line}`,
-                    verticalAlign: "top",
-                    maxWidth: 320,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={value}
-                >
-                  {value}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {view.rows.map((row, rowIndex) => {
+            const entity = view.entities[rowIndex];
+            const rowServable = Boolean(entity?.key && view.server && view.workspace);
+            return (
+              <tr key={rowIndex}>
+                {showActions && (
+                  <td style={{ borderBottom: `1px solid ${line}`, padding: "2px 4px 2px 0", whiteSpace: "nowrap", verticalAlign: "top" }}>
+                    {canCarry && rowServable && entity ? (
+                      <button
+                        type="button"
+                        onClick={() => onBringToChat?.({ server: view.server, workspace: view.workspace, ...entity })}
+                        title={`带入会话：${entity.key}${entity.name ? ` ${entity.name}` : ""}`}
+                        aria-label={`带入会话：${entity.key}`}
+                        style={{
+                          border: `1px solid ${line}`,
+                          background: "none",
+                          color: muted,
+                          borderRadius: 4,
+                          padding: 0,
+                          width: 16,
+                          height: 16,
+                          font: "inherit",
+                          fontSize: 11,
+                          lineHeight: 1,
+                          cursor: "pointer",
+                        }}
+                      >
+                        @
+                      </button>
+                    ) : null}
+                  </td>
+                )}
+                {row.map((value, columnIndex) => {
+                  // The key cell is the row's handle: clicking it opens the
+                  // entity board. It stays a button so it is keyboard-reachable
+                  // and reads as clickable, without an extra column of buttons.
+                  const opensEntity = canOpen && rowServable && entity !== undefined
+                    && (columnIndex === keyColumnIndex || (keyColumnIndex < 0 && value === entity.key));
+                  return (
+                    <td
+                      key={columnIndex}
+                      style={{
+                        padding: "3px 8px 3px 0",
+                        borderBottom: `1px solid ${line}`,
+                        verticalAlign: "top",
+                        maxWidth: 320,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={opensEntity ? `打开实体看板：${entity?.key}${entity?.name ? ` ${entity.name}` : ""}` : value}
+                    >
+                      {opensEntity && entity ? (
+                        <button
+                          type="button"
+                          className="views-key-link"
+                          onClick={() => onOpenEntity?.({ server: view.server, workspace: view.workspace, key: entity.key, name: entity.name })}
+                          aria-label={`打开实体看板：${entity.key}`}
+                          style={{
+                            border: "none",
+                            background: "none",
+                            padding: 0,
+                            font: "inherit",
+                            color: "inherit",
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                        >
+                          {value}
+                        </button>
+                      ) : value}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

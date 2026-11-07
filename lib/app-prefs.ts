@@ -14,6 +14,8 @@ export const APP_PREF_KEYS = {
   sidebarWidth: "pi-sidebar-width",
   rightPanelWidth: "pi-right-panel-width",
   unreadSessionIds: "pi-web:unread-session-ids",
+  /** Project cwd -> group titles folded in the to-do navigation (local preference, SSR-000087 ⑦). */
+  collapsedViewGroups: "pi-web:collapsed-view-groups",
   /** Project roots moved to the sidebar's Archive group (see lib/archived-projects.ts). */
   archivedProjects: "pi-web:archived-projects",
   /** "1" while the sidebar Archive group is unfolded; folded by default. */
