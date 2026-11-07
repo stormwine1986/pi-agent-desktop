@@ -7,12 +7,17 @@ import {
   danger,
   FieldControl,
   inputStyle,
+  isTableDraft,
+  isTableProperty,
   line,
   muted,
   propertyLabel,
   propertyName,
   propertyType,
+  serializeTableRows,
   surface,
+  TableEditor,
+  type DraftMap,
   type FieldProperty,
 } from "./entity-field";
 
@@ -52,7 +57,7 @@ export function EntityCreatePanel({ target, onCreated }: {
   const [types, setTypes] = useState<CreatableType[] | null>(null);
   const [type, setType] = useState<string>("");
   const [metadata, setMetadata] = useState<TypeMetadata | null>(null);
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState<DraftMap>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,8 +134,16 @@ export function EntityCreatePanel({ target, onCreated }: {
     try {
       const fields: Record<string, unknown> = {};
       for (const [name, raw] of Object.entries(draft)) {
-        if (raw === "") continue;
         const property = metadata?.properties.find((item) => propertyName(item) === name);
+        if (property && isTableProperty(property)) {
+          // Rows, not text: the base takes an array of objects here. An empty
+          // table is simply not sent — there is nothing to create.
+          const rows = isTableDraft(raw) ? raw : [];
+          if (rows.length === 0) continue;
+          fields[name] = serializeTableRows(property, rows);
+          continue;
+        }
+        if (typeof raw !== "string" || raw === "") continue;
         fields[name] = property && propertyType(property) === "number" ? Number(raw) : raw;
       }
       const response = await fetch(`/api/entity/create?${base}`, {
@@ -243,11 +256,19 @@ export function EntityCreatePanel({ target, onCreated }: {
                 {propertyLabel(property)}
                 {isRequired && <span style={{ color: danger }}> *</span>}
               </div>
-              <FieldControl
-                property={property}
-                value={draft[name] ?? ""}
-                onChange={(next) => setDraft((current) => ({ ...current, [name]: next }))}
-              />
+              {isTableProperty(property) ? (
+                <TableEditor
+                  property={property}
+                  rows={isTableDraft(draft[name]) ? draft[name] : []}
+                  onChange={(rows) => setDraft((current) => ({ ...current, [name]: rows }))}
+                />
+              ) : (
+                <FieldControl
+                  property={property}
+                  value={typeof draft[name] === "string" ? draft[name] : ""}
+                  onChange={(next) => setDraft((current) => ({ ...current, [name]: next }))}
+                />
+              )}
             </div>
           );
         })}
