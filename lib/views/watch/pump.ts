@@ -144,10 +144,14 @@ async function dispatch(
     runCwd: watch.project,
   });
 
+  // Every attempt is its own session, so three failures leave three sessions in
+  // the sidebar with the same title. Numbering the retries is the only thing
+  // that tells the second attempt from the third after the fact.
+  const attempt = await attemptNumber(target, row.key, watch.claim, deps);
   const started = await deps.startSession(
     watch.project,
     prompt,
-    `${view.title} · ${row.key}`,
+    attempt > 1 ? `${view.title} · ${row.key}（第 ${attempt} 次）` : `${view.title} · ${row.key}`,
   );
   if (!started.ok) return { ok: false, error: started.error };
 
@@ -158,6 +162,25 @@ async function dispatch(
   // The verdict is written when the turn ends, never on a tick.
   void judge(input, row.key, started.value.done, deps, registry);
   return { ok: true, value: sessionId };
+}
+
+/**
+ * Which attempt this is: the failures already on record, plus the one about to
+ * run.
+ *
+ * Counted from the revision history like the verdict is, so there is no counter
+ * of ours to drift. The claim just written has no successor yet, so it does not
+ * count as a failure — a fresh item reads as attempt 1 and keeps a plain title.
+ */
+async function attemptNumber(
+  target: WatchTarget,
+  key: string,
+  claim: { to: string; back: string },
+  deps: WatchDeps,
+): Promise<number> {
+  const history = await deps.states(target, key);
+  if (!history.ok) return 1;
+  return countConsecutiveFailures(history.value, claim) + 1;
 }
 
 /**
