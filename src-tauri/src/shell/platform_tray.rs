@@ -14,9 +14,9 @@ use tauri::Manager;
 use super::{quit_application, show_main_window};
 
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_SHOW_LABEL: &str = "Show Entity Assistant";
+const LINUX_TRAY_SHOW_LABEL: &str = "Show";
 #[cfg(target_os = "linux")]
-const LINUX_TRAY_QUIT_LABEL: &str = "Quit Entity Assistant";
+const LINUX_TRAY_QUIT_LABEL: &str = "Quit";
 
 #[cfg(target_os = "linux")]
 struct LinuxTray {
@@ -133,8 +133,12 @@ pub fn build_linux_tray(app: &tauri::App) -> Result<(), std::io::Error> {
 // hidden on close.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn build_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let show_item = MenuItem::with_id(app, "show", "Show Entity Assistant", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit Entity Assistant", true, None::<&str>)?;
+    // Terse on purpose: the icons and the tooltip already say which app this
+    // is, and a tray menu is read at a glance. "Show Entity Assistant" wraps
+    // to two lines on a scaled display, which is how a two-item menu starts
+    // looking like a dialog.
+    let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
     let icon = app
         .default_window_icon()
