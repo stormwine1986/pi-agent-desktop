@@ -1,6 +1,6 @@
 import type { ViewDefinition, ViewWatch } from "../config";
 import {
-  countConsecutiveFailures,
+  countClaims,
   formatFields,
   renderPrompt,
   sliceDql,
@@ -165,30 +165,35 @@ async function dispatch(
 }
 
 /**
- * Which attempt this is: the failures already on record, plus the one about to
- * run.
+ * Which attempt this is: how many times the entity has entered the claim state.
  *
- * Counted from the revision history like the verdict is, so there is no counter
- * of ours to drift. The claim just written has no successor yet, so it does not
- * count as a failure — a fresh item reads as attempt 1 and keeps a plain title.
+ * Counted from the revision history, so there is no counter of ours to drift.
+ * The claim for this dispatch is already written, so it is included — a fresh
+ * item reads as attempt 1 and keeps a plain title. Only a person moving an item
+ * back into the queue produces a second number, because the pump never returns
+ * anything by itself.
  */
 async function attemptNumber(
   target: WatchTarget,
   key: string,
-  claim: { to: string; back: string },
+  claim: { to: string },
   deps: WatchDeps,
 ): Promise<number> {
   const history = await deps.states(target, key);
   if (!history.ok) return 1;
-  return countConsecutiveFailures(history.value, claim) + 1;
+  return Math.max(1, countClaims(history.value, claim.to));
 }
 
 /**
  * Reads the entity after the session ends.
  *
- * Still `claim.to` → the work did not land: hand it back for another attempt, or
- * park it once the streak is exhausted. Anything else → the executing project
- * already moved it, and this pump has nothing to add.
+ * Still `claim.to` → the work did not land. It goes to `claim.manual` and stays
+ * there: the pump does not retry, because it cannot tell "nothing happened" from
+ * "it happened but was not recorded", so a second attempt would repeat the first
+ * with no new information. Deciding what to do next is the person's job.
+ *
+ * Anything else → the executing project moved it, and this pump has nothing to
+ * add either way (a finished item and an abandoned one both count as resolved).
  */
 async function judge(
   input: PumpInput,
@@ -225,19 +230,9 @@ async function judge(
     return;
   }
 
-  const history = await deps.states(target, key);
-  // The attempt that just ended has not been written back yet, so it is added here.
-  const failures = (history.ok ? countConsecutiveFailures(history.value, claim) : 0) + 1;
-  const exhausted = failures >= watch.maxFailures;
-  const next = exhausted ? claim.manual : claim.back;
-
-  const moved = await deps.promote(target, key, next, after.value.revision);
-  if (!moved.ok) {
-    deps.log({ type: "error", view: view.title, key, message: moved.error });
-    return;
-  }
-  if (exhausted) deps.log({ type: "manual", view: view.title, key, reason: "failures" });
-  else deps.log({ type: "failed", view: view.title, key, state: after.value.state, failures });
+  const moved = await deps.promote(target, key, claim.manual, after.value.revision);
+  if (moved.ok) deps.log({ type: "manual", view: view.title, key, reason: "failed" });
+  else deps.log({ type: "error", view: view.title, key, message: moved.error });
 }
 
 /** The session overstayed `timeoutMin`: surface it, without killing anything. */

@@ -56,15 +56,21 @@ export interface ViewDefinition {
   watch: ViewWatch | null;
 }
 
-/** The four states a dispatched item passes through, named by the view's author. */
+/**
+ * The three states a dispatched item passes through, named by the view's author.
+ *
+ * There is no "hand it back" state: an attempt that did not land goes straight
+ * to `manual` and stays there until a person decides what to do with it. Retries
+ * were tried and removed — the dispatcher cannot tell "the work did not happen"
+ * from "the work happened but was not recorded", so the second attempt learned
+ * nothing from the first and the third only burned time.
+ */
 export interface WatchClaim {
   /** The pending state, as written in the view's DQL. */
   from: string;
   /** Claimed: the item leaves the pending set. */
   to: string;
-  /** Handed back here after a failed attempt; defaults to `from`. */
-  back: string;
-  /** Set when the failures or a timeout exhausted the view's patience. */
+  /** Parked here when an attempt did not land or timed out. Never automatic again. */
   manual: string;
 }
 
@@ -75,7 +81,6 @@ export interface ViewWatch {
   /** Prompt template file: absolute path. */
   prompt: string;
   intervalSec: number;
-  maxFailures: number;
   timeoutMin: number;
   claim: WatchClaim;
 }
@@ -236,7 +241,6 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
   if (!promptText) problems.push("缺少 watch.prompt（任务说明文件）");
 
   const intervalSec = positiveInt(raw.intervalSec, 90, "watch.intervalSec", problems);
-  const maxFailures = positiveInt(raw.maxFailures, 3, "watch.maxFailures", problems);
   const timeoutMin = positiveInt(raw.timeoutMin, 120, "watch.timeoutMin", problems);
 
   const claimRaw = raw.claim;
@@ -247,16 +251,22 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
     const from = asText(claimRaw.from);
     const to = asText(claimRaw.to);
     const manual = asText(claimRaw.manual);
-    const backText = asText(claimRaw.back);
     if (!from) problems.push("缺少 watch.claim.from（待处理状态）");
     if (!to) problems.push("缺少 watch.claim.to（认领状态）");
     if (!manual) problems.push("缺少 watch.claim.manual（待人工状态）");
-    for (const [key, value] of [["from", claimRaw.from], ["to", claimRaw.to], ["manual", claimRaw.manual], ["back", claimRaw.back]] as const) {
+    if (claimRaw.back !== undefined) {
+      problems.push("watch.claim.back 已移除：没有重试，没做完的条目直接进 manual");
+    }
+    for (const [key, value] of [["from", claimRaw.from], ["to", claimRaw.to], ["manual", claimRaw.manual]] as const) {
       if (value !== undefined && value !== null && typeof value !== "string") {
         problems.push(`watch.claim.${key} 只能是字符串（写的是 ${JSON.stringify(value)}）`);
       }
     }
-    if (from && to && manual) claim = { from, to, back: backText || from, manual };
+    if (from && to && manual) claim = { from, to, manual };
+  }
+
+  if (raw.maxFailures !== undefined) {
+    problems.push("watch.maxFailures 已移除：没有重试，没做完的条目第一次失败就进 manual");
   }
 
   if (problems.length > 0) return null;
@@ -265,7 +275,6 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
     project: isAbsolute(projectText) ? projectText : join(projectDir, projectText),
     prompt: isAbsolute(promptText) ? promptText : join(projectDir, promptText),
     intervalSec,
-    maxFailures,
     timeoutMin,
     // `claim` cannot be null here: its absence is a problem, and problems returned above.
     claim: claim as WatchClaim,

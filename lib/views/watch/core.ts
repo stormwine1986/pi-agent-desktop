@@ -60,8 +60,7 @@ export interface WatchDeps {
 export type WatchLogEvent =
   | { type: "claimed"; view: string; key: string; runCwd: string; sessionId: string }
   | { type: "done"; view: string; key: string; state: string }
-  | { type: "failed"; view: string; key: string; state: string; failures: number }
-  | { type: "manual"; view: string; key: string; reason: "failures" | "timeout" }
+  | { type: "manual"; view: string; key: string; reason: "failed" | "timeout" }
   | { type: "conflict"; view: string; key: string }
   | { type: "error"; view: string; key?: string; message: string };
 
@@ -100,23 +99,20 @@ export function sliceDql(dql: string, from: string, to: string): WatchResult<str
 }
 
 /**
- * How many times in a row this entity went `to → back` without anything else
- * happening in between.
+ * How many times this entity has entered the claim state, counted from the
+ * revision history.
  *
- * A successful attempt moves `to → <something else>` and resets the streak. The
- * caller adds one for the attempt that just failed, because its own `to → back`
- * has not been written yet.
+ * The dispatch is the attempt this count lands on, because the claim has
+ * already been written by the time it is asked for. A person who moves an item
+ * out of `manual` and back into the queue makes the next dispatch the second
+ * attempt — nothing else can, since the pump never returns an item by itself.
  */
-export function countConsecutiveFailures(
-  states: readonly string[],
-  claim: { to: string; back: string },
-): number {
-  let streak = 0;
-  for (let index = 1; index < states.length; index += 1) {
-    if (states[index - 1] !== claim.to) continue;
-    streak = states[index] === claim.back ? streak + 1 : 0;
+export function countClaims(states: readonly string[], claimedState: string): number {
+  let count = 0;
+  for (const state of states) {
+    if (state === claimedState) count += 1;
   }
-  return streak;
+  return count;
 }
 
 /** `{{name}}` substitution; unknown placeholders are left alone, so a typo is visible. */

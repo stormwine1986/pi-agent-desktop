@@ -179,9 +179,6 @@ export async function validate(
   if (watch.claim.manual === watch.claim.from) {
     return `watch.claim.manual 不能等于 from（${watch.claim.from}），否则待人工会被立刻重新派发`;
   }
-  if (watch.claim.back === watch.claim.to) {
-    return `watch.claim.back 不能等于 to（${watch.claim.to}），否则归还是空操作`;
-  }
 
   const type = extractType(view.dql);
   if (!type) return null; // No type in the DQL: state checks need metadata we cannot fetch.
@@ -193,7 +190,6 @@ export async function validate(
   for (const [field, state] of [
     ["from", watch.claim.from],
     ["to", watch.claim.to],
-    ["back", watch.claim.back],
     ["manual", watch.claim.manual],
   ] as const) {
     if (!validStates.includes(state)) {
@@ -203,9 +199,6 @@ export async function validate(
   const missing: string[] = [];
   if (!routes.some((route) => route.from === watch.claim.from && route.to === watch.claim.to)) {
     missing.push(`${watch.claim.from} → ${watch.claim.to}`);
-  }
-  if (!routes.some((route) => route.from === watch.claim.to && route.to === watch.claim.back)) {
-    missing.push(`${watch.claim.to} → ${watch.claim.back}`);
   }
   if (!routes.some((route) => route.from === watch.claim.to && route.to === watch.claim.manual)) {
     missing.push(`${watch.claim.to} → ${watch.claim.manual}`);
