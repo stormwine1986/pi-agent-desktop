@@ -48,6 +48,22 @@ export function watchViewState(projectCwd: string, view: ViewDefinition): ViewSt
   return states.get(watchViewKey(projectCwd, view));
 }
 
+/**
+ * What the panel needs to explain a silent view: a watched view that cannot
+ * dispatch looks exactly like an empty queue otherwise.
+ */
+export interface WatchViewStatus {
+  /** Why this view is not dispatching, or null when it is fine. */
+  disabled: string | null;
+  /** True while a session for this view is running. */
+  inFlight: boolean;
+}
+
+export function watchViewStatus(projectCwd: string, view: ViewDefinition): WatchViewStatus | null {
+  const state = states.get(watchViewKey(projectCwd, view));
+  return state ? { disabled: state.disabled, inFlight: state.inFlight } : null;
+}
+
 export function startWatchPump(options: WatchPumpOptions = {}): () => void {
   const deps = options.deps ?? createLiveDeps();
   const intervalMs = options.intervalMs ?? TICK_MS;

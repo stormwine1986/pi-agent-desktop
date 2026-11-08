@@ -43,6 +43,11 @@ interface ViewRows {
   notify: boolean;
   /** Navigation group, or null when the view is ungrouped. */
   group: string | null;
+  /**
+   * Dispatch state for a watched view: `disabled` says why it is not handing
+   * anything out. A read-only view, or one that has not been scanned yet, is null.
+   */
+  watch: { disabled: string | null; inFlight: boolean } | null;
   error: string | null;
 }
 
@@ -59,6 +64,8 @@ const muted = "rgba(128,128,128,0.75)";
 const line = "rgba(128,128,128,0.25)";
 const surface = "rgba(128,128,128,0.06)";
 const danger = "#e5484d";
+/** Amber: something is turned off but nothing failed — a watched view that cannot dispatch. */
+const warning = "#d19a2b";
 
 const NAV_WIDTH = 180;
 const POLL_INTERVAL_MS = 60_000;
@@ -298,6 +305,17 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             {view.rows.length}
           </span>
         )}
+        {/* A watched view that cannot dispatch looks exactly like an empty queue,
+            so the reason has to be visible without opening anything. */}
+        {view.watch?.disabled && (
+          <span
+            aria-label="watch 未生效"
+            title={`watch 未生效：${view.watch.disabled}`}
+            style={{ flexShrink: 0, fontSize: 10, color: warning }}
+          >
+            ●
+          </span>
+        )}
       </button>
     );
   };
@@ -460,6 +478,11 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
                 </span>
               )}
             </header>
+            {active.watch?.disabled && (
+              <div style={{ fontSize: 11, color: warning, marginBottom: 6, lineHeight: 1.5 }}>
+                watch 未生效：{active.watch.disabled}
+              </div>
+            )}
             {active.error ? <Notice text={active.error} /> : (
               <ViewTable view={active} onBringToChat={onBringToChat} onOpenEntity={onOpenEntity} />
             )}

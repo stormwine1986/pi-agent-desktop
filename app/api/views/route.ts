@@ -5,6 +5,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
 import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
+import { validate, watchViewStatus } from "@/lib/views/watch";
+import { createLiveDeps } from "@/lib/views/watch/runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +38,8 @@ interface ViewRows {
   notify: boolean;
   /** Navigation group this view belongs to; null when ungrouped. */
   group: string | null;
+  /** Dispatch state for a watched view: why it is not dispatching, and whether it is running. */
+  watch: { disabled: string | null; inFlight: boolean } | null;
   error: string | null;
 }
 
@@ -71,6 +75,21 @@ function cell(item: unknown, column: string): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Why a watched view is not dispatching.
+ *
+ * The pump keeps that reason in memory, but only the process holding the lease
+ * scans views — so a second window (dev server beside the app) would show an
+ * empty answer. Validating here covers that case; it is one metadata read, and
+ * only for views this process has not seen.
+ */
+async function watchStatusOf(cwd: string, view: ViewDefinition): Promise<{ disabled: string | null; inFlight: boolean } | null> {
+  if (!view.watch) return null;
+  const known = watchViewStatus(cwd, view);
+  if (known) return known;
+  return { disabled: await validate(cwd, view, view.watch, createLiveDeps()), inFlight: false };
+}
+
 async function runView(agentDir: string, cwd: string, view: ViewDefinition): Promise<ViewRows> {
   const empty = {
     title: view.title,
@@ -81,6 +100,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     entities: [],
     notify: view.notify,
     group: view.group,
+    watch: await watchStatusOf(cwd, view),
     error: null,
   };
   // The error has to name the query that failed: the panel shows it as-is, and
@@ -124,6 +144,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     }),
     notify: view.notify,
     group: view.group,
+    watch: await watchStatusOf(cwd, view),
     error: null,
   };
 }
@@ -171,7 +192,7 @@ export async function GET(req: Request) {
       // A view that failed validation still occupies its slot in the panel: the
       // user needs to see which entry is broken.
       if (!entry.view) {
-        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, group: null, error: entry.error ?? "配置无效" };
+        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, group: null, watch: null, error: entry.error ?? "配置无效" };
       }
       return runView(agentDir, cwd, entry.view);
     }),
