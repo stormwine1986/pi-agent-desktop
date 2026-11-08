@@ -1295,6 +1295,12 @@ pub fn run() {
         // three: VISIBLE would resurrect a window the user hid to the tray
         // before quitting (this app owns show/hide itself), and DECORATIONS
         // would fight the custom window chrome.
+        //
+        // The splash is denied: it is built centred, so restoring a position
+        // for it means the panel is drawn in the middle of the screen and then
+        // jumps to wherever the last launch left it — a visible two-step on
+        // every start. It also has no state worth keeping; it lives for two
+        // seconds and is rebuilt from scratch each time.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(
@@ -1302,6 +1308,7 @@ pub fn run() {
                         | tauri_plugin_window_state::StateFlags::POSITION
                         | tauri_plugin_window_state::StateFlags::MAXIMIZED,
                 )
+                .with_denylist(&[shell::SPLASH_LABEL])
                 .build(),
         )
         .on_menu_event(|app, event| {

@@ -26,7 +26,10 @@ use crate::native_prefs::read_stored_theme;
 #[cfg(not(target_os = "macos"))]
 use crate::native_prefs::theme_background_color;
 
-pub(crate) const SPLASH_LABEL: &str = "splash";
+/// Label of the splash window. Public so the window-state plugin can denylist
+/// it: the plugin restores a saved position after the window is already on
+/// screen, which made a centred panel jump to one side on every start.
+pub const SPLASH_LABEL: &str = "splash";
 
 /// The app icon, compiled in rather than read from the resource directory: the
 /// splash must draw before anything else is guaranteed to be on disk.
