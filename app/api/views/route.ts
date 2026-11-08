@@ -3,8 +3,9 @@ import { stat } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
-import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
+import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
+import { checkOrderBy, declaredSortFields } from "@/lib/views/order-by";
 import { validate, watchViewStatus } from "@/lib/views/watch";
 import { createLiveDeps } from "@/lib/views/watch/runtime";
 
@@ -95,6 +96,63 @@ async function watchStatusOf(cwd: string, view: ViewDefinition): Promise<{ disab
   return { disabled: await validate(cwd, view, view.watch, createLiveDeps()), inFlight: false };
 }
 
+/**
+ * A sort key that does not exist is caught before the query, so a typo is not
+ * discovered by paying for a failed round trip (`SSR-000066` AC-2).
+ *
+ * The type's field list is cached per endpoint + space + type: the panel asks
+ * every 60 seconds per view, and a dozen views over one type must not become a
+ * dozen metadata reads. A failure is remembered for a shorter while, so a
+ * server that is briefly down does not cost a request per view per refresh —
+ * and an unknown list (null) abstains, leaving the verdict to `list`.
+ */
+const SORT_FIELD_TTL_MS = 5 * 60_000;
+const SORT_FIELD_FAILURE_TTL_MS = 30_000;
+
+interface SortFieldCacheEntry {
+  fields: string[] | null;
+  expiresAt: number;
+}
+
+const sortFieldCache = new Map<string, SortFieldCacheEntry>();
+
+/** The type a view reads, from its DQL; `null` when it names none. */
+function typeOf(dql: string): string | null {
+  const match = /\btype\s*=\s*(['"])([^'"]+)\1/i.exec(dql);
+  return match ? match[2] : null;
+}
+
+async function sortFieldsFor(
+  target: McpHttpTarget,
+  workspace: string,
+  type: string,
+): Promise<string[] | null> {
+  const key = `${target.url}\u0000${workspace}\u0000${type}`;
+  const now = Date.now();
+  const cached = sortFieldCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.fields;
+
+  const metadata = await callMcpTool(target, "get_metadata", { type });
+  const fields = metadata.ok ? declaredSortFields(metadata.value) : null;
+  sortFieldCache.set(key, {
+    fields,
+    expiresAt: now + (fields ? SORT_FIELD_TTL_MS : SORT_FIELD_FAILURE_TTL_MS),
+  });
+  return fields;
+}
+
+/** Names the reason `orderBy` cannot be used, or null when it is fine. */
+async function orderByProblem(target: McpHttpTarget, view: ViewDefinition): Promise<string | null> {
+  if (!view.orderBy) return null;
+  const type = typeOf(view.dql);
+  // No type in the DQL: the field list belongs to no type, so say nothing and
+  // let `list` judge (failing open is the rule here).
+  if (!type) return null;
+  const declared = await sortFieldsFor(target, view.workspace, type);
+  const verdict = checkOrderBy(view.orderBy, declared);
+  return verdict.ok ? null : verdict.error;
+}
+
 async function runView(agentDir: string, cwd: string, view: ViewDefinition, offset: number): Promise<ViewRows> {
   const empty = {
     title: view.title,
@@ -116,6 +174,9 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition, offs
   const withQuery = (reason: string) => `${reason}\nDQL：${view.dql}`;
   const target = resolveMcpTarget(agentDir, cwd, view.server);
   if (!target.ok) return { ...empty, error: withQuery(target.error) };
+
+  const orderByReason = await orderByProblem(target.target, view);
+  if (orderByReason) return { ...empty, error: withQuery(orderByReason) };
 
   const args: Record<string, unknown> = {
     workspaceId: view.workspace,
