@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { subscribeEntityWrites } from "@/lib/entity-activity";
 import { APP_PREF_KEYS, getPrefJson, setPrefJson } from "@/lib/app-prefs";
 import { groupViews, type ViewGroupDecl } from "@/lib/views/group";
+import { pageWindow, clampOffset } from "@/lib/views/page";
 
 /**
  * The to-do views declared by the workspace's `.pi/views.yaml`.
@@ -43,6 +44,10 @@ interface ViewRows {
   notify: boolean;
   /** Navigation group, or null when the view is ungrouped. */
   group: string | null;
+  /** Where this page starts, how many rows match, and the view's page size. */
+  offset: number;
+  total: number | null;
+  pageSize: number;
   /**
    * Dispatch state for a watched view: `disabled` says why it is not handing
    * anything out. A read-only view, or one that has not been scanned yet, is null.
@@ -69,6 +74,31 @@ const warning = "#d19a2b";
 
 const NAV_WIDTH = 180;
 const POLL_INTERVAL_MS = 60_000;
+
+/** A page arrow: small, quiet, and only there when it leads somewhere. */
+const pagerStyle: React.CSSProperties = {
+  border: `1px solid ${line}`,
+  background: "transparent",
+  color: "inherit",
+  borderRadius: 4,
+  padding: "0 6px",
+  lineHeight: "16px",
+  fontSize: 12,
+  cursor: "pointer",
+};
+
+/**
+ * "51–100 · 共 320" — the range on screen, and how much exists.
+ *
+ * The count matters more than the range: a view that silently stops at its page
+ * size reads as "this is everything there is".
+ */
+function pageLabel(view: ViewRows): string {
+  if (view.rows.length === 0) return view.total ? `无数据（共 ${view.total} 条）` : "无数据";
+  const from = view.offset + 1;
+  const to = view.offset + view.rows.length;
+  return view.total === null ? `${from}–${to}` : `${from}–${to} · 共 ${view.total} 条`;
+}
 
 /** How many keys a view gained since the copy the user is looking at. */
 function countNewKeys(before: ViewRows | undefined, view: ViewRows): number {
@@ -104,10 +134,19 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
 
   const dataRef = useRef<ViewsResponse | null>(null);
   const inFlightRef = useRef(false);
+  // Where each view is scrolled to. A ref because it only feeds the next
+  // request — what is on screen comes back from the server. Per view, because
+  // they are separate result sets (SSR-000067 ②).
+  const offsetsRef = useRef<Record<number, number>>({});
+  useEffect(() => { offsetsRef.current = {}; }, [cwd]);
 
   const request = useCallback(async (): Promise<ViewsResponse | null> => {
     try {
-      const response = await fetch(`/api/views?cwd=${encodeURIComponent(cwd)}`);
+      const offsets = offsetsRef.current;
+      const suffix = Object.keys(offsets).length > 0
+        ? `&offsets=${encodeURIComponent(JSON.stringify(offsets))}`
+        : "";
+      const response = await fetch(`/api/views?cwd=${encodeURIComponent(cwd)}${suffix}`);
       const body = (await response.json().catch(() => null)) as ViewsResponse | { error?: string } | null;
       if (!response.ok) {
         setFailure(((body as { error?: string } | null)?.error) ?? `HTTP ${response.status}`);
@@ -221,7 +260,52 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
   const activeIndex = views.length === 0 ? -1 : Math.min(Math.max(selected, 0), views.length - 1);
   const active = activeIndex >= 0 ? views[activeIndex] : null;
 
+  const page = active
+    ? pageWindow(active.offset, active.rows.length, active.total, active.pageSize)
+    : { offset: 0, count: 0, total: null, hasPrev: false, hasNext: false };
+
+  const goPage = useCallback((index: number, direction: -1 | 1) => {
+    const view = dataRef.current?.views[index];
+    if (!view) return;
+    const start = Math.max(0, view.offset + direction * Math.max(1, view.pageSize));
+    offsetsRef.current = { ...offsetsRef.current, [index]: start };
+    setShifted(null);
+    // Read the new page now: leaving it to the next poll would look like a
+    // button that does nothing.
+    void evaluate("apply");
+  }, [evaluate]);
+
   const nav = useMemo(() => groupViews(views, data?.groups ?? []), [data?.groups, views]);
+
+  // A page can stop existing between refreshes: a state change takes rows out of
+  // the view, and the offset the user sits on then points past the end. Showing
+  // an empty page there would read as "this view became empty", so snap back to
+  // the last real page — once, because the next response is already in range.
+  //
+  // The same pass notices when the total moved while someone was paging: that is
+  // the one case where "the numbers changed under you" has to be said out loud
+  // (SSR-000067 ③), instead of silently stitching page 2 of yesterday to page 3
+  // of today.
+  const totalsRef = useRef<Record<number, number | null>>({});
+  const [shifted, setShifted] = useState<number | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    for (const [index, view] of data.views.entries()) {
+      const before = totalsRef.current[index];
+      totalsRef.current[index] = view.total;
+      if (view.total === null) continue;
+      if (view.offset > 0 && before !== undefined && before !== null && before !== view.total) {
+        setShifted(index);
+      }
+      const stuck = view.total === 0 ? view.offset > 0 : view.offset >= view.total;
+      if (!stuck) continue;
+      const next = clampOffset(view.offset, view.total, view.pageSize);
+      if (next === view.offset) continue;
+      offsetsRef.current = { ...offsetsRef.current, [index]: next };
+      void evaluate("apply");
+      return;
+    }
+  }, [data, evaluate]);
 
   // Folded groups: what this project last chose, else the file's default. A
   // local preference, so it stays out of views.yaml (SSR-000087 ⑦).
@@ -474,7 +558,22 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
               <strong style={{ fontWeight: 600 }}>{active.title}</strong>
               {!active.error && (
                 <span style={{ color: muted }}>
-                  {active.rows.length === 0 ? "无数据" : `${active.rows.length} 条`}
+                  {pageLabel(active)}
+                </span>
+              )}
+              {!active.error && page.hasPrev && (
+                <button type="button" onClick={() => goPage(activeIndex, -1)} style={pagerStyle} title="上一页">
+                  ‹
+                </button>
+              )}
+              {!active.error && page.hasNext && (
+                <button type="button" onClick={() => goPage(activeIndex, 1)} style={pagerStyle} title="下一页">
+                  ›
+                </button>
+              )}
+              {!active.error && shifted === activeIndex && (
+                <span style={{ color: warning }} title="翻页期间记录数变了，已按最新结果重排">
+                  数据已变化
                 </span>
               )}
             </header>

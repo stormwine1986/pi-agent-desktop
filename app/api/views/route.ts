@@ -38,6 +38,11 @@ interface ViewRows {
   notify: boolean;
   /** Navigation group this view belongs to; null when ungrouped. */
   group: string | null;
+  /** Where this page starts, and how many rows match in total (null = the base did not say). */
+  offset: number;
+  total: number | null;
+  /** The view's page size, so the panel can move by a page rather than by a guess. */
+  pageSize: number;
   /** Dispatch state for a watched view: why it is not dispatching, and whether it is running. */
   watch: { disabled: string | null; inFlight: boolean } | null;
   error: string | null;
@@ -90,7 +95,7 @@ async function watchStatusOf(cwd: string, view: ViewDefinition): Promise<{ disab
   return { disabled: await validate(cwd, view, view.watch, createLiveDeps()), inFlight: false };
 }
 
-async function runView(agentDir: string, cwd: string, view: ViewDefinition): Promise<ViewRows> {
+async function runView(agentDir: string, cwd: string, view: ViewDefinition, offset: number): Promise<ViewRows> {
   const empty = {
     title: view.title,
     server: view.server,
@@ -100,6 +105,9 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     entities: [],
     notify: view.notify,
     group: view.group,
+    offset,
+    total: null,
+    pageSize: view.pageSize,
     watch: await watchStatusOf(cwd, view),
     error: null,
   };
@@ -113,6 +121,10 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     workspaceId: view.workspace,
     query: view.dql,
     limit: view.pageSize,
+    offset,
+    // Asked for every page, not just when someone wants a count: "1–50 of 320"
+    // is how a user finds out the view has more rows than one screen.
+    includeTotal: true,
   };
   if (view.orderBy) {
     args.orderBy = view.orderBy;
@@ -122,7 +134,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
   const result = await callMcpTool(target.target, "list", args);
   if (!result.ok) return { ...empty, error: withQuery(result.error) };
 
-  const payload = result.value as { items?: unknown };
+  const payload = result.value as { items?: unknown; total?: unknown };
   const items = Array.isArray(payload?.items) ? payload.items : [];
   if (!Array.isArray(payload?.items)) {
     return { ...empty, error: withQuery("list 的返回里没有 items 数组") };
@@ -144,9 +156,34 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition): Pro
     }),
     notify: view.notify,
     group: view.group,
+    offset,
+    total: typeof payload?.total === "number" ? payload.total : null,
+    pageSize: view.pageSize,
     watch: await watchStatusOf(cwd, view),
     error: null,
   };
+}
+
+/**
+ * `offsets={"0":50,"2":100}` — a per-view start position.
+ *
+ * Indexed by position in the file, like the panel's selection. Anything that is
+ * not a finite number is dropped rather than rejected: a stale URL should show
+ * the first page, not an error page.
+ */
+function parseOffsets(raw: string | null): Record<string, number> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const offsets: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) offsets[key] = Math.floor(value);
+    }
+    return offsets;
+  } catch {
+    return {};
+  }
 }
 
 export async function GET(req: Request) {
@@ -187,14 +224,18 @@ export async function GET(req: Request) {
   }
 
   const agentDir = getAgentDir();
+  // Per-view offsets: each view pages on its own (SR-000023 ③), so one panel
+  // showing A on page 3 must not move B. Keyed by index because that is what
+  // the panel selects by; a missing or malformed entry means "first page".
+  const offsets = parseOffsets(url.searchParams.get("offsets"));
   const views = await Promise.all(
-    config.views.map(async (entry): Promise<ViewRows> => {
+    config.views.map(async (entry, index): Promise<ViewRows> => {
       // A view that failed validation still occupies its slot in the panel: the
       // user needs to see which entry is broken.
       if (!entry.view) {
-        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, group: null, watch: null, error: entry.error ?? "配置无效" };
+        return { title: entry.title, server: "", workspace: "", columns: [], rows: [], entities: [], notify: true, group: null, offset: 0, total: null, pageSize: 0, watch: null, error: entry.error ?? "配置无效" };
       }
-      return runView(agentDir, cwd, entry.view);
+      return runView(agentDir, cwd, entry.view, offsets[index] ?? 0);
     }),
   );
 
