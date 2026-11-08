@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   accent,
   buttonStyle,
@@ -20,6 +20,7 @@ import {
   type DraftMap,
   type FieldProperty,
 } from "./entity-field";
+import { newKey, submissionKey, type SubmissionKey } from "@/lib/idempotency";
 
 interface CreatableType {
   type: string;
@@ -61,6 +62,9 @@ export function EntityCreatePanel({ target, onCreated }: {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A create has no revision to lose a race on, so a retry after a lost response
+  // is the one place a duplicate entity can appear. Same content, same key.
+  const submission = useRef<SubmissionKey | null>(null);
 
   const base = useMemo(() => new URLSearchParams({
     cwd: target.cwd,
@@ -146,16 +150,26 @@ export function EntityCreatePanel({ target, onCreated }: {
         if (typeof raw !== "string" || raw === "") continue;
         fields[name] = property && propertyType(property) === "number" ? Number(raw) : raw;
       }
+      const signature = `create:${type}:${JSON.stringify(fields)}`;
+      submission.current = submissionKey(submission.current, signature, () => newKey("panel-create"));
       const response = await fetch(`/api/entity/create?${base}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type, fields }),
+        body: JSON.stringify({ type, fields, idempotencyKey: submission.current.key }),
       });
-      const body = await response.json() as { key?: string; error?: string };
+      const body = await response.json() as { key?: string; error?: string; replayed?: boolean };
+      if (body.replayed) {
+        // The entity exists; only its key is missing from a replay. Retire the
+        // key so the next create is treated as a new intention, not a retry.
+        submission.current = null;
+        setError(body.error ?? "这次提交在先前的尝试里已经创建成功。");
+        return;
+      }
       if (!response.ok || !body.key) {
         setError(body.error ?? `HTTP ${response.status}`);
         return;
       }
+      submission.current = null;
       onCreated(body.key);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

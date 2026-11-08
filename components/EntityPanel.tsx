@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppSelect } from "./AppSelect";
 
 import { MAX_LINK_KEYS, parseLinkKeys, type LinkKeyCheck } from "@/lib/entity-links";
 import type { LinkOption } from "@/lib/entity-permissions";
+import { newKey, submissionKey, type SubmissionKey } from "@/lib/idempotency";
 
 import {
   accent,
@@ -159,6 +160,13 @@ export function EntityPanel({ target, onOpenEntity }: {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  // The key belongs to the submission, not the request: a retry of the same
+  // content replays the first outcome, anything else is a new attempt.
+  const submission = useRef<SubmissionKey | null>(null);
+  const keyFor = (signature: string): string => {
+    submission.current = submissionKey(submission.current, signature, () => newKey("panel"));
+    return submission.current.key;
+  };
   // The transition being prepared, and the values its destination requires.
   const [pendingRoute, setPendingRoute] = useState<AvailableRoute | null>(null);
   const [routeDraft, setRouteDraft] = useState<Record<string, string>>({});
@@ -327,7 +335,11 @@ export function EntityPanel({ target, onOpenEntity }: {
       const response = await fetch(`/api/entity?${query}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fields: changed, expectedRevision: data.revision }),
+        body: JSON.stringify({
+          fields: changed,
+          expectedRevision: data.revision,
+          idempotencyKey: keyFor(`update:${data.revision}:${JSON.stringify(changed)}`),
+        }),
       });
       const body = await response.json() as EntityResponse & { error?: string; conflict?: boolean };
       if (!response.ok) {
@@ -337,6 +349,9 @@ export function EntityPanel({ target, onOpenEntity }: {
         setSaveError(body.error ?? `HTTP ${response.status}`);
         return;
       }
+      // Acknowledged: retire the key, so saving the same values again later is a
+      // new submission rather than a replay of this one.
+      submission.current = null;
       setData(body);
       setDraft(draftOf(body));
       setEditing(false);
@@ -382,7 +397,12 @@ export function EntityPanel({ target, onOpenEntity }: {
       const response = await fetch(`/api/entity?${query}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ targetState: route.to, fields: values, expectedRevision: data.revision }),
+        body: JSON.stringify({
+          targetState: route.to,
+          fields: values,
+          expectedRevision: data.revision,
+          idempotencyKey: keyFor(`promote:${route.to}:${data.revision}:${JSON.stringify(values)}`),
+        }),
       });
       const body = await response.json() as EntityResponse & { error?: string; conflict?: boolean };
       if (!response.ok) {
@@ -391,6 +411,7 @@ export function EntityPanel({ target, onOpenEntity }: {
         else setRouteError(body.error ?? `HTTP ${response.status}`);
         return;
       }
+      submission.current = null;
       setData(body);
       setDraft(draftOf(body));
       setPendingRoute(null);

@@ -4,6 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { globalMcpConfigPath, projectMcpConfigPath } from "@/lib/mcp-config-read";
 import { asRecord, asStrings, availableRoutesOf, linkOptionsOf, rolesIn, writableFieldsOf, type AvailableRoute, type LinkOption } from "@/lib/entity-permissions";
+import { acceptedKey } from "@/lib/idempotency";
 
 export const dynamic = "force-dynamic";
 
@@ -210,7 +211,7 @@ export async function POST(request: Request): Promise<Response> {
   const resolved = await resolveTarget(url.searchParams);
   if ("error" in resolved) return NextResponse.json({ error: resolved.error }, { status: resolved.status });
 
-  let body: { fields?: unknown; expectedRevision?: unknown; targetState?: unknown };
+  let body: { fields?: unknown; expectedRevision?: unknown; targetState?: unknown; idempotencyKey?: unknown };
   try {
     body = await request.json() as typeof body;
   } catch {
@@ -234,7 +235,10 @@ export async function POST(request: Request): Promise<Response> {
     // `update` requires fields; `promotion` accepts them only when the route needs them.
     ...(Object.keys(fields).length > 0 ? { fields } : {}),
     ...(expectedRevision === undefined ? {} : { expectedRevision }),
-    idempotencyKey: `panel-${resolved.key}-${Date.now()}`,
+    // The caller owns the key: only it can tell a retry from a new intention
+    // (FM-SUBMIT ④). Generating one here made every retry a fresh submission,
+    // which for `create` meant a second entity.
+    idempotencyKey: acceptedKey(body.idempotencyKey, () => `panel-${resolved.key}-${Date.now()}`),
   });
 
   if (!result.ok) {
