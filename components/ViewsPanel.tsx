@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { subscribeEntityWrites } from "@/lib/entity-activity";
+import { sameMcpServer } from "@/lib/mcp-server-name";
 import { APP_PREF_KEYS, getPrefJson, setPrefJson } from "@/lib/app-prefs";
 import { groupViews, type ViewGroupDecl } from "@/lib/views/group";
 import { pageWindow, clampOffset } from "@/lib/views/page";
@@ -251,7 +252,10 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
     const views = dataRef.current?.views ?? [];
     // Before the first result there is no view to match against; that first
     // evaluation will read the write anyway.
-    if (views.length && !views.some((view) => view.server === server)) return;
+    // The write arrives under pi's namespace spelling (`entity_base`) while a
+    // view names its server the way `mcp.json` does (`entity-base`) — comparing
+    // them literally skipped the refresh for every dashed name.
+    if (views.length && !views.some((view) => sameMcpServer(view.server, server))) return;
     void evaluate("apply");
   }), [evaluate]);
 

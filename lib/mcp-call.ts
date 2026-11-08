@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { mcpServerKey } from "./mcp-server-name";
 
 /**
  * Calls a tool on a configured MCP server over streamable HTTP.
@@ -71,15 +72,31 @@ function readConfigFile(path: string): { entries: Record<string, unknown>; path:
  * Finds the entry `serverName` in the global `mcp.json` and the project's
  * `.pi/mcp.json` — the same two files the app writes. A project entry replaces
  * the global one of its name, as the SDK loads it.
+ *
+ * An exact name wins; otherwise the configured name whose pi namespace matches
+ * is taken (`entity_demo_system_evan` → `entity-demo-system-evan`, see
+ * `lib/mcp-server-name.ts`). pi refuses two loaded servers sharing a namespace,
+ * so that fallback is unambiguous — and if the files do it anyway, the first
+ * configured spelling wins.
  */
 export function resolveMcpTarget(agentDir: string, cwd: string, serverName: string): McpTargetResult {
   const global = readConfigFile(join(agentDir, CONFIG_FILENAME));
   const project = readConfigFile(join(cwd, PROJECT_CONFIG_RELATIVE));
 
-  const fromProject = project?.entries[serverName];
-  const fromGlobal = global?.entries[serverName];
-  const entry = fromProject ?? fromGlobal;
-  const source = (fromProject !== undefined ? project?.path : global?.path) ?? join(agentDir, CONFIG_FILENAME);
+  const lookup = (entries: Record<string, unknown> | undefined): { name?: string; entry?: unknown } => {
+    if (entries === undefined) return {};
+    if (entries[serverName] !== undefined) return { name: serverName, entry: entries[serverName] };
+    const wanted = mcpServerKey(serverName);
+    const name = Object.keys(entries).find((candidate) => mcpServerKey(candidate) === wanted);
+    return name === undefined ? {} : { name, entry: entries[name] };
+  };
+
+  const fromProject = lookup(project?.entries);
+  const hit = fromProject.entry !== undefined ? fromProject : lookup(global?.entries);
+  const entry = hit.entry;
+  const source = (fromProject.entry !== undefined ? project?.path : global?.path) ?? join(agentDir, CONFIG_FILENAME);
+  // The configured spelling, so callers that echo it back name the real entry.
+  const name = hit.name ?? serverName;
 
   if (entry === undefined) {
     const known = [
@@ -91,46 +108,46 @@ export function resolveMcpTarget(agentDir: string, cwd: string, serverName: stri
   }
 
   if (typeof entry !== "object" || entry === null) {
-    return { ok: false, error: `server "${serverName}" 的配置不是对象` };
+    return { ok: false, error: `server "${name}" 的配置不是对象` };
   }
 
   const raw = entry as Record<string, unknown>;
   if (typeof raw.command === "string") {
-    return { ok: false, error: `server "${serverName}" 是 stdio 类型（command），本功能只支持 HTTP 端点` };
+    return { ok: false, error: `server "${name}" 是 stdio 类型（command），本功能只支持 HTTP 端点` };
   }
 
   const urlText = typeof raw.url === "string" ? raw.url.trim() : "";
-  if (!urlText) return { ok: false, error: `server "${serverName}" 没有 url` };
+  if (!urlText) return { ok: false, error: `server "${name}" 没有 url` };
   const expanded = expand(urlText);
-  if (!expanded.ok) return { ok: false, error: `server "${serverName}" 的 url ${expanded.error}` };
+  if (!expanded.ok) return { ok: false, error: `server "${name}" 的 url ${expanded.error}` };
 
   let url: URL;
   try {
     url = new URL(expanded.text);
   } catch {
-    return { ok: false, error: `server "${serverName}" 的 url 不是合法地址：${expanded.text}` };
+    return { ok: false, error: `server "${name}" 的 url 不是合法地址：${expanded.text}` };
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return { ok: false, error: `server "${serverName}" 的 url 必须是 http(s)` };
+    return { ok: false, error: `server "${name}" 的 url 必须是 http(s)` };
   }
 
   const headers: Record<string, string> = {};
   const rawHeaders = raw.headers;
   if (rawHeaders !== undefined) {
     if (typeof rawHeaders !== "object" || rawHeaders === null || Array.isArray(rawHeaders)) {
-      return { ok: false, error: `server "${serverName}" 的 headers 不是对象` };
+      return { ok: false, error: `server "${name}" 的 headers 不是对象` };
     }
     for (const [key, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
       if (typeof value !== "string") {
-        return { ok: false, error: `server "${serverName}" 的 header "${key}" 不是字符串` };
+        return { ok: false, error: `server "${name}" 的 header "${key}" 不是字符串` };
       }
       const headerValue = expand(value);
-      if (!headerValue.ok) return { ok: false, error: `server "${serverName}" 的 header "${key}" ${headerValue.error}` };
+      if (!headerValue.ok) return { ok: false, error: `server "${name}" 的 header "${key}" ${headerValue.error}` };
       headers[key] = headerValue.text;
     }
   }
 
-  return { ok: true, target: { name: serverName, url: url.toString(), headers, source } };
+  return { ok: true, target: { name, url: url.toString(), headers, source } };
 }
 
 /** Session ids by server, so repeat refreshes skip the handshake. */

@@ -13,7 +13,7 @@ export const ENTITY_LINK_GUIDE = `Some replies refer to domain objects (entities
 
 [MR-000123](entity-item:entity-base/ws_manhu/MR-000123)
 
-The server is the name in the tool you called (\`mcp__<server>__<tool>\`); the workspace is the \`workspaceId\` in the tool result. If the reply is already about one server and workspace, \`entity-item:ws_manhu/MR-000123\` or even \`entity-item:MR-000123\` also works — but use the full form when the reply mixes workspaces.
+The server is the name in the tool you called (\`mcp__<server>__<tool>\`, where pi writes a configured \`-\` as \`_\`); the workspace is the \`workspaceId\` in the tool result. If the reply is already about one server and workspace, \`entity-item:ws_manhu/MR-000123\` or even \`entity-item:MR-000123\` also works — but use the full form when the reply mixes workspaces.
 
 Rules:
 - The link text is the key itself, copied exactly as the tool returned it. Never invent, shorten or renumber a key.

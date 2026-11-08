@@ -138,7 +138,9 @@ function resolveTarget(search: URLSearchParams): Promise<Target | { error: strin
 
   const resolved = server ? resolveMcpTarget(getAgentDir(), cwd, server) : null;
   if (!resolved?.ok || !server) return pickTarget(cwd, key, server);
-  return { target: resolved.target, server, workspace, key };
+  // The configured spelling: a link carries pi's namespace (`a_b`) for a server
+  // `mcp.json` names `a-b`, and every follow-up request should name the real entry.
+  return { target: resolved.target, server: resolved.target.name, workspace, key };
 }
 
 /** Reads the entity, its type definition and this reader's roles in one go. */

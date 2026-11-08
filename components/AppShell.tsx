@@ -44,6 +44,18 @@ interface EntityTabState {
 /** How many entity tabs stay open; the oldest gives way first. */
 const MAX_ENTITY_TABS = 6;
 
+/**
+ * The tab id for one entity.
+ *
+ * The server half is written the way pi namespaces a server (`-` as `_`), so a
+ * key opened from a reply's link and the same key opened from a to-do row focus
+ * one tab instead of two: the link can only carry the namespace spelling, while
+ * the list carries the configured one.
+ */
+function entityTabId(server: string | undefined, workspace: string | undefined, key: string): string {
+  return `entity:${server ? mcpServerKey(server) : "auto"}:${workspace ?? ""}:${key}`;
+}
+
 // Heavy, rarely-used surfaces are code-split out of the main bundle. The
 // config modals may never be opened at all; FileViewer drags in markdown +
 // syntax highlighting a second time and only matters once a file tab opens.
@@ -74,6 +86,7 @@ import { isPathInside } from "@/lib/file-links";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import type { EntityContextRef } from "@/lib/entity-context";
 import { PRODUCT_NAME } from "@/lib/branding";
+import { mcpServerKey } from "@/lib/mcp-server-name";
 import { isImeComposing } from "@/lib/ime";
 import {
   resolveInitialNavigation,
@@ -90,8 +103,7 @@ import { artifactPanelTab, artifactTabId, artifactTabsForSession, upsertArtifact
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsView } from "./artifacts/ArtifactsView";
 import { setArtifactOpener, useArtifactTitles } from "@/lib/artifact-store";
-import { setEntityChannel, setEntityOpener } from "@/lib/entity-opener";
-import { useAudio } from "@/hooks/useAudio";
+import { setEntityChannel, setEntityOpener } from "@/lib/entity-opener";import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import {
@@ -1810,7 +1822,7 @@ export function AppShell() {
     }
     // A link that named no channel keeps "auto": the panel asks the project's
     // servers which one holds the key, so one entity is one tab either way.
-    const id = `entity:${ref.server ?? "auto"}:${ref.workspace ?? ""}:${ref.key}`;
+    const id = entityTabId(ref.server, ref.workspace, ref.key);
     setEntityTabs((tabs) => {
       if (tabs.some((tab) => tab.id === id)) return tabs;
       const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, key: ref.key }];
@@ -1855,7 +1867,7 @@ export function AppShell() {
     setEntityTabs((tabs) => {
       const target = tabs.find((tab) => tab.id === tabId);
       if (!target?.server || !target.workspace) return tabs;
-      const id = `entity:${target.server}:${target.workspace}:${key}`;
+      const id = entityTabId(target.server, target.workspace, key);
       if (tabs.some((tab) => tab.id === id && tab.id !== tabId)) {
         return tabs.filter((tab) => tab.id !== tabId);
       }
@@ -1866,7 +1878,9 @@ export function AppShell() {
     setActiveFileTabId((current) => {
       if (current !== tabId) return current;
       const target = entityTabs.find((tab) => tab.id === tabId);
-      return target?.server && target.workspace ? `entity:${target.server}:${target.workspace}:${key}` : current;
+      return target?.server && target.workspace
+        ? entityTabId(target.server, target.workspace, key)
+        : current;
     });
   }, [entityTabs]);
 
