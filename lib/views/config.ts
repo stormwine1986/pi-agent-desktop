@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 // js-yaml 5 ships named exports only (no default), so import the function.
 import { load as loadYaml } from "js-yaml";
 
@@ -45,6 +45,39 @@ export interface ViewDefinition {
    * same whichever group a view sits in (SSR-000087 VW-NAV ②).
    */
   group: string | null;
+  /**
+   * Dispatch configuration, or null for a read-only view.
+   *
+   * Only the shape is checked here (SSR-000066 VW-CFG). Whether the states
+   * exist, whether the routes connect them and whether the directories are on
+   * disk are semantic checks owned by VW-WATCH / VW-CLAIM, because they need
+   * the entity type's metadata.
+   */
+  watch: ViewWatch | null;
+}
+
+/** The four states a dispatched item passes through, named by the view's author. */
+export interface WatchClaim {
+  /** The pending state, as written in the view's DQL. */
+  from: string;
+  /** Claimed: the item leaves the pending set. */
+  to: string;
+  /** Handed back here after a failed attempt; defaults to `from`. */
+  back: string;
+  /** Set when the failures or a timeout exhausted the view's patience. */
+  manual: string;
+}
+
+export interface ViewWatch {
+  enabled: boolean;
+  /** Execution project: absolute path, resolved against the project that owns views.yaml. */
+  project: string;
+  /** Prompt template file: absolute path. */
+  prompt: string;
+  intervalSec: number;
+  maxFailures: number;
+  timeoutMin: number;
+  claim: WatchClaim;
 }
 
 /** A group as declared under the root `groups:`, for ordering and labels. */
@@ -97,7 +130,7 @@ function asText(value: unknown): string {
 }
 
 /** One entry of `views:`; a bad entry never fails the others. */
-function parseView(raw: unknown, index: number): ViewEntry {
+function parseView(raw: unknown, index: number, projectDir: string): ViewEntry {
   if (!isRecord(raw)) {
     return { title: `#${index + 1}`, error: "这一项不是对象（应为 { title, server, workspace, dql, columns }）", view: null };
   }
@@ -167,11 +200,86 @@ function parseView(raw: unknown, index: number): ViewEntry {
     return { title: title || `#${index + 1}`, error: problems.join("；"), view: null };
   }
 
+  const watch = parseWatch(raw.watch, projectDir, problems);
+  if (problems.length > 0) {
+    return { title: title || `#${index + 1}`, error: problems.join("；"), view: null };
+  }
+
   return {
     title,
     error: null,
-    view: { title, server, workspace, dql, columns, orderBy, order, pageSize, notify, group },
+    view: { title, server, workspace, dql, columns, orderBy, order, pageSize, notify, group, watch },
   };
+}
+
+/**
+ * Reads the `watch:` block. Only the shape is checked: a missing key, a wrong
+ * type, a number outside its range. Directories, states and routes are checked
+ * later, where the entity metadata is available.
+ */
+function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewWatch | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) {
+    problems.push("watch 必须是对象（含 project / prompt / claim）");
+    return null;
+  }
+
+  let enabled = true;
+  if (raw.enabled !== undefined && raw.enabled !== null) {
+    if (typeof raw.enabled !== "boolean") problems.push(`watch.enabled 只能是 true 或 false（写的是 ${JSON.stringify(raw.enabled)}）`);
+    else enabled = raw.enabled;
+  }
+
+  const projectText = asText(raw.project);
+  if (!projectText) problems.push("缺少 watch.project（执行项目目录）");
+  const promptText = asText(raw.prompt);
+  if (!promptText) problems.push("缺少 watch.prompt（任务说明文件）");
+
+  const intervalSec = positiveInt(raw.intervalSec, 90, "watch.intervalSec", problems);
+  const maxFailures = positiveInt(raw.maxFailures, 3, "watch.maxFailures", problems);
+  const timeoutMin = positiveInt(raw.timeoutMin, 120, "watch.timeoutMin", problems);
+
+  const claimRaw = raw.claim;
+  let claim: WatchClaim | null = null;
+  if (!isRecord(claimRaw)) {
+    problems.push("缺少 watch.claim（from / to / manual）");
+  } else {
+    const from = asText(claimRaw.from);
+    const to = asText(claimRaw.to);
+    const manual = asText(claimRaw.manual);
+    const backText = asText(claimRaw.back);
+    if (!from) problems.push("缺少 watch.claim.from（待处理状态）");
+    if (!to) problems.push("缺少 watch.claim.to（认领状态）");
+    if (!manual) problems.push("缺少 watch.claim.manual（待人工状态）");
+    for (const [key, value] of [["from", claimRaw.from], ["to", claimRaw.to], ["manual", claimRaw.manual], ["back", claimRaw.back]] as const) {
+      if (value !== undefined && value !== null && typeof value !== "string") {
+        problems.push(`watch.claim.${key} 只能是字符串（写的是 ${JSON.stringify(value)}）`);
+      }
+    }
+    if (from && to && manual) claim = { from, to, back: backText || from, manual };
+  }
+
+  if (problems.length > 0) return null;
+  return {
+    enabled,
+    project: isAbsolute(projectText) ? projectText : join(projectDir, projectText),
+    prompt: isAbsolute(promptText) ? promptText : join(projectDir, promptText),
+    intervalSec,
+    maxFailures,
+    timeoutMin,
+    // `claim` cannot be null here: its absence is a problem, and problems returned above.
+    claim: claim as WatchClaim,
+  };
+}
+
+function positiveInt(raw: unknown, fallback: number, field: string, problems: string[]): number {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const parsed = typeof raw === "string" ? Number(raw.trim()) : raw;
+  if (typeof parsed !== "number" || !Number.isInteger(parsed) || parsed < 1) {
+    problems.push(`${field} 必须是正整数（写的是 ${JSON.stringify(raw)}）`);
+    return fallback;
+  }
+  return parsed;
 }
 
 /** Reads and validates the file at `cwd`. Never throws: problems come back as text. */
@@ -232,7 +340,7 @@ export function readViewsConfig(cwd: string): ViewsConfig {
     };
   }
 
-  const views = rawViews.map(parseView);
+  const views = rawViews.map((raw, index) => parseView(raw, index, cwd));
 
   // Duplicated titles would make two tabs indistinguishable in the panel.
   const seen = new Set<string>();
