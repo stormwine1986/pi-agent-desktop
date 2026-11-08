@@ -15,6 +15,9 @@ const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCom
 
 const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command.ts");
 const { composeMessageWithAttachedFiles } = await jiti.import("@/lib/chat-attachments.ts");
+// `handleSend` appends the carried entities' block to every message, so the
+// extracted-callback scope has to carry it (and the ref it reads) too.
+const { formatEntityContextBlock } = await jiti.import("@/lib/entity-context.ts");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
@@ -702,6 +705,8 @@ test("handleSend lets a handled /mcp through while streaming and sends an unowne
       offersBuiltinSlashCommandWhileStreaming,
       resolveSessionReferences: async (message) => message,
       sessionMentionTargetsRef: { current: new Map() },
+      entityRefsRef: { current: [] },
+      formatEntityContextBlock,
       runBuiltinCommand: async (message) => { calls.builtin.push(message); return handled; },
       clearInput() {},
       onSend: (message) => calls.sent.push(message),
@@ -948,6 +953,8 @@ test("handleSend sends exactly once and routes builtin commands through the pend
       },
       resolveSessionReferences: async (msg) => resolved ?? msg,
       sessionMentionTargetsRef: { current: [] },
+      entityRefsRef: { current: [] },
+      formatEntityContextBlock,
       onSend(message, images) { sends += 1; handler.sent = { message, images }; },
       clearInput() { cleared += 1; },
     });
