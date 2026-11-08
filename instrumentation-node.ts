@@ -2,6 +2,7 @@ import { configureHttpDispatcher } from "@/lib/http-dispatcher";
 import { closeAllAgentEventStreams } from "@/lib/agent-event-stream";
 import { startScheduler } from "@/lib/scheduled-tasks";
 import { restartRelayFromConfig } from "@/lib/relay/runtime";
+import { startWatchPump } from "@/lib/views/watch";
 
 export function registerNodeInstrumentation(): void {
   configureHttpDispatcher();
@@ -9,6 +10,10 @@ export function registerNodeInstrumentation(): void {
   // Scheduled tasks must fire without anyone having opened a page, and the
   // packaged app keeps this server alive while its window is hidden in the tray.
   if (process.env.PI_WEB_DISABLE_SCHEDULER !== "1") startScheduler();
+
+  // Watched views dispatch on the same terms: no page needs to be open, and a
+  // hidden window changes nothing (SSR-000089 ①).
+  if (process.env.PI_WEB_DISABLE_WATCH !== "1") startWatchPump();
 
   // The relay connection (Settings › Remote relay) must also come up without a page:
   // a phone reaches this computer through it.
