@@ -13,6 +13,8 @@ import {
   buttonStyle,
   danger,
   FieldControl,
+  fieldControlOf,
+  fieldDescriptorsOf,
   formatValue,
   inputStyle,
   isTableDraft,
@@ -114,6 +116,10 @@ function changedFields(data: EntityResponse, draft: DraftMap): Record<string, un
   for (const property of data.properties) {
     const name = propertyName(property);
     if (!name || !(name in draft)) continue;
+    // A type this panel cannot render is read-only in the form, so its draft is
+    // never an edit — sending it would post the value we merely displayed
+    // (`FM-RENDER` AC-4).
+    if (fieldControlOf(property) === null) continue;
     const value = draft[name];
     if (isTableProperty(property)) {
       const rows = isTableDraft(value) ? value : [];
@@ -601,17 +607,20 @@ export function EntityPanel({ target, onOpenEntity }: {
   if (!data) return null;
 
   const hidden = new Set(data.hiddenFields);
-  const properties: FieldProperty[] = data.properties.length > 0
-    ? data.properties
-    : Object.keys(data.fields).map((name) => ({ name }));
-  const visible = properties.filter((property) => !hidden.has(propertyName(property)));
-  const unfilled = visible.filter((property) => data.fields[propertyName(property)] === undefined);
+  // One list, derived in one place: every row is a field the type declares and
+  // nothing else (`FM-RENDER` ①). The fallback covers a base response that
+  // carries values but no metadata: the names are still the entity's own.
+  const fields = fieldDescriptorsOf(
+    data.properties.length > 0 ? data.properties : Object.keys(data.fields).map((name) => ({ name })),
+  );
+  const visible = fields.filter((field) => !hidden.has(field.name));
+  const unfilled = visible.filter((field) => data.fields[field.name] === undefined);
   const canEdit = data.writableFields.length > 0;
   const relationCount = (traces?.upstream.length ?? 0) + (traces?.downstream.length ?? 0);
   /** Numbers leave the form as numbers; the base rejects the rest. */
   const coerce = (name: string, raw: string): unknown => {
-    const property = properties.find((item) => propertyName(item) === name);
-    return propertyType(property ?? {}) === "number" && raw.trim() !== "" ? Number(raw) : raw;
+    const type = fields.find((field) => field.name === name)?.type ?? "";
+    return type === "number" && raw.trim() !== "" ? Number(raw) : raw;
   };
 
   return (
@@ -771,8 +780,9 @@ export function EntityPanel({ target, onOpenEntity }: {
       {tab === "attr" && (
       <>
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 10px 12px" }}>
-        {visible.map((property) => {
-          const name = propertyName(property);
+        {visible.map((field) => {
+          const property = field.property;
+          const name = field.name;
           const value = data.fields[name];
           const empty = value === undefined || value === "";
           const description = typeof property.description === "string" ? property.description : "";
@@ -865,7 +875,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           ) : (
             <div>
               {missingFor(pendingRoute).map((name) => {
-                const property = properties.find((item) => propertyName(item) === name);
+                const property = fields.find((item) => item.name === name)?.property;
                 const values = Array.isArray(property?.validValues)
                   ? property.validValues.filter((item): item is string => typeof item === "string")
                   : [];

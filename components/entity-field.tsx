@@ -19,7 +19,11 @@ export interface FieldProperty {
   validValues?: unknown;
 }
 
-/** How a value of each field type is shown read-only. Unknown types degrade to text. */
+/**
+ * How a value is shown read-only. Display always has a form — a value the panel
+ * cannot edit is still a value to read; only *editing* refuses an unknown type
+ * (see `fieldControlOf`).
+ */
 export function formatValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
@@ -43,6 +47,86 @@ export function propertyLabel(property: FieldProperty): string {
 
 export function propertyType(property: FieldProperty): string {
   return typeof property.type === "string" ? property.type : "";
+}
+
+/**
+ * The control each field type is edited with.
+ *
+ * This is a **capability** list, not a validator, and the difference matters
+ * (`FM-RENDER` AC-4): the base owns which types exist — `SSR-000053`
+ * (DAT-SCHEMA) declares a closed set of nine — and it may add one before this
+ * panel learns to draw it. Rejecting a definition because we cannot render it
+ * would block a perfectly valid type, and any list we hard-code as "valid"
+ * drifts the day the base ships a tenth. So a type missing from this table is
+ * shown **read-only with its name** instead of a text box that pretends to be
+ * its editor; whether a type is *legal* stays the base's call, not ours.
+ *
+ * `datetime` and `user` are edited as text on purpose: the panel has no
+ * date-time picker or user search yet, and free text is the honest shape for
+ * a value the base parses (ISO 8601 / the referenced user's id or name).
+ */
+export const FIELD_CONTROLS: Record<string, "select" | "textarea" | "text" | "table"> = {
+  shorttext: "text",
+  text: "textarea",
+  number: "text",
+  date: "text",
+  datetime: "text",
+  user: "text",
+  choice: "select",
+  state: "text",
+  table: "table",
+};
+
+/** The editor for this field, or null when the panel does not know the type. */
+export function fieldControlOf(property: FieldProperty): "select" | "textarea" | "text" | "table" | null {
+  return FIELD_CONTROLS[propertyType(property)] ?? null;
+}
+
+/**
+ * One row of the form, and where it came from.
+ *
+ * `property` is the metadata entry **verbatim**, so a panel can hand it straight
+ * to a control, and a comparison script can diff the form's list against
+ * `get_metadata` without the panel having interpreted anything
+ * (`FM-RENDER` ①).
+ */
+export interface FieldDescriptor {
+  property: FieldProperty;
+  name: string;
+  /** The declared label, verbatim (`""` when the model declares none). */
+  label: string;
+  /** The declared type, verbatim. */
+  type: string;
+  /** The declared options, in the model's order. */
+  validValues: string[];
+}
+
+/**
+ * The form's field list, and the only way a panel builds one: every row is a
+ * field the type declares, in the declared order, with nothing added and
+ * nothing dropped (`FM-RENDER` ①②). A field with no name cannot be addressed, so
+ * it is skipped rather than shown unlabelled.
+ */
+export function fieldDescriptorsOf(properties: unknown): FieldDescriptor[] {
+  if (!Array.isArray(properties)) return [];
+  const descriptors: FieldDescriptor[] = [];
+  for (const raw of properties) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const property = raw as FieldProperty;
+    const name = propertyName(property);
+    if (!name) continue;
+    const validValues = Array.isArray(property.validValues)
+      ? property.validValues.filter((item): item is string => typeof item === "string")
+      : [];
+    descriptors.push({
+      property,
+      name,
+      label: typeof property.label === "string" ? property.label : "",
+      type: propertyType(property),
+      validValues,
+    });
+  }
+  return descriptors;
 }
 
 /**
@@ -370,6 +454,18 @@ export const buttonStyle = {
   whiteSpace: "nowrap",
 } as const;
 
+/** A value the panel can show but not edit, with the reason it cannot. */
+function InertField({ field, value, reason }: { field: string; value: string; reason: string }) {
+  return (
+    <div>
+      <input value={value} readOnly style={{ ...inputStyle, opacity: 0.75 }} aria-readonly="true" />
+      <div role="alert" style={{ color: danger, fontSize: 11, marginTop: 2, lineHeight: 1.4 }}>
+        {reason}（字段 {field || "?"}）：只读，无法编辑，也不会被提交。
+      </div>
+    </div>
+  );
+}
+
 /** The control a field type maps to. */
 export function FieldControl({ property, value, onChange }: {
   property: FieldProperty;
@@ -380,8 +476,22 @@ export function FieldControl({ property, value, onChange }: {
   const values = Array.isArray(property.validValues)
     ? property.validValues.filter((item): item is string => typeof item === "string")
     : [];
+  const kind = fieldControlOf(property);
 
-  if (type === "choice" && values.length > 0) {
+  // Unknown type: show the value, say whose field it is, and do not offer an
+  // editor. A free text box here is the one thing the contract forbids — it
+  // looks like the panel understood the type (`FM-RENDER` AC-2).
+  if (kind === null) {
+    return <InertField field={propertyName(property)} value={value} reason={`不认识的字段类型 “${type || "（未声明）"}”`} />;
+  }
+  // A `choice` with no declared options is a broken definition, not a free text
+  // field: accepting an arbitrary string here would let the form write a value
+  // the model does not have (same rule as above, for a type we do know).
+  if (kind === "select" && values.length === 0) {
+    return <InertField field={propertyName(property)} value={value} reason="枚举取值为空" />;
+  }
+
+  if (kind === "select" && values.length > 0) {
     return (
       <select value={value} onChange={(event) => onChange(event.target.value)} style={inputStyle}>
         <option value="">（未填）</option>
@@ -391,7 +501,7 @@ export function FieldControl({ property, value, onChange }: {
       </select>
     );
   }
-  if (type === "text") {
+  if (kind === "textarea") {
     return (
       <textarea
         value={value}
@@ -401,7 +511,7 @@ export function FieldControl({ property, value, onChange }: {
       />
     );
   }
-  if (type === "table") {
+  if (kind === "table") {
     // Rows are edited as JSON on purpose: a cell-by-cell editor is a different
     // feature, and it would have to guess at columns the server validates.
     return (

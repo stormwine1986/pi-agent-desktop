@@ -11,7 +11,15 @@ const {
   serializeTableRows,
   isTableProperty,
   propertyType,
+  // `FM-RENDER` AC-4: a field type the panel does not know must not be edited
+  // through a text box that pretends to understand it.
+  FieldControl,
+  fieldControlOf,
+  fieldDescriptorsOf,
+  FIELD_CONTROLS,
 } = await jiti.import("./entity-field.tsx");
+const React = await jiti.import("react");
+const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 
 const stepsProperty = {
   name: "steps",
@@ -89,4 +97,97 @@ test("a round trip of stored → draft → wire keeps the value", () => {
 test("missing columns still produce wire rows rather than throwing", () => {
   const bare = { name: "x", type: "table" };
   assert.deepEqual(serializeTableRows(bare, [{ anything: "1", id: "row_z" }]), [{ id: "row_z" }]);
+});
+
+const control = (property, value = "x") => renderToStaticMarkup(
+  React.createElement(FieldControl, { property, value, onChange() {} }),
+);
+
+test("every type the base declares has an editor", () => {
+  // The base's closed set (SSR-000053 DAT-SCHEMA), so a missing entry here means
+  // a valid type renders read-only.
+  for (const type of ["text", "shorttext", "number", "date", "datetime", "choice", "state", "user", "table"]) {
+    assert.notEqual(fieldControlOf({ name: "f", type }), null, type);
+  }
+  assert.equal(Object.keys(FIELD_CONTROLS).length, 9);
+});
+
+test("a type the panel does not know is read-only and names itself", () => {
+  const html = control({ name: "signature", label: "签名", type: "quantum-note" });
+  assert.match(html, /readonly/i, "the value must not be editable");
+  assert.match(html, /role="alert"/);
+  assert.match(html, /quantum-note/);
+  assert.match(html, /signature/);
+  assert.doesNotMatch(html, /<textarea/);
+});
+
+test("a field with no declared type is called out, not guessed", () => {
+  const html = control({ name: "mystery" });
+  assert.match(html, /role="alert"/);
+  assert.match(html, /未声明/);
+});
+
+test("known types still get their own editors", () => {
+  assert.doesNotMatch(control({ name: "title", type: "shorttext" }), /role="alert"/);
+  assert.match(control({ name: "notes", type: "text" }), /<textarea/);
+  assert.match(control({ name: "n", type: "number" }), /type="number"/);
+  assert.match(control({ name: "d", type: "date" }), /type="date"/);
+  const choice = control({ name: "p", type: "choice", validValues: ["高", "低"] });
+  assert.match(choice, /<select/);
+  assert.match(choice, /高/);
+});
+
+test("a choice with no declared options is read-only, not free text", () => {
+  // Broken metadata must not turn into "type anything": the form would then
+  // write a value the model does not have.
+  const html = control({ name: "priority", label: "优先级", type: "choice", validValues: [] });
+  assert.match(html, /role="alert"/);
+  assert.match(html, /枚举取值为空/);
+  assert.match(html, /priority/);
+  assert.match(html, /readonly/i);
+  assert.doesNotMatch(html, /<select|<textarea/);
+});
+
+// `FM-RENDER` AC-1: the form's field list against `get_metadata`, item by item.
+test("the form's field list is the metadata's, item by item", () => {
+  const metadata = {
+    fields: [
+      { name: "name", label: "标题", type: "shorttext", required: true, isGloballyRequired: true },
+      { name: "priority", label: "优先级", type: "choice", validValues: ["高", "中", "低"] },
+      { name: "steps", label: "步骤", type: "table", columns: [{ name: "step" }, { name: "expect" }] },
+      { name: "description", type: "text", requiredStates: ["DEFINED"] },
+      { name: "signature", label: "签名", type: "quantum-note" },
+    ],
+  };
+  const descriptors = fieldDescriptorsOf(metadata.fields);
+
+  assert.deepEqual(descriptors.map((field) => field.name), metadata.fields.map((field) => field.name));
+  for (const [index, field] of descriptors.entries()) {
+    const declared = metadata.fields[index];
+    // Nothing interpreted: label / type / options are the declared values.
+    assert.equal(field.label, typeof declared.label === "string" ? declared.label : "");
+    assert.equal(field.type, declared.type);
+    assert.deepEqual(field.validValues, Array.isArray(declared.validValues) ? declared.validValues : []);
+    // Nothing dropped: the entry travels verbatim, so flags we do not read
+    // (required, requiredStates, columns) stay available to whoever does.
+    assert.equal(field.property, declared);
+  }
+  assert.equal(descriptors[3].label, "", "a field with no label declares none");
+
+  // And what the reader sees comes out of exactly those declarations.
+  assert.match(control(descriptors[1].property), /<select/);
+  const options = control(descriptors[1].property).match(/<option value="[^"]*"/g) ?? [];
+  assert.deepEqual(
+    options.map((option) => option.slice('option value="'.length + 1, -1)).filter(Boolean),
+    metadata.fields[1].validValues,
+  );
+  assert.match(control(descriptors[3].property), /<textarea/);
+  assert.match(control(descriptors[4].property), /role="alert"/);
+});
+
+test("a metadata entry with no name is skipped, never shown unlabelled", () => {
+  const descriptors = fieldDescriptorsOf([{ label: "孤儿", type: "text" }, { name: "ok", type: "text" }]);
+  assert.deepEqual(descriptors.map((field) => field.name), ["ok"]);
+  assert.deepEqual(fieldDescriptorsOf(undefined), []);
+  assert.deepEqual(fieldDescriptorsOf("nope"), []);
 });

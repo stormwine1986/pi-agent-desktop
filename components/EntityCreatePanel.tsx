@@ -6,6 +6,8 @@ import {
   buttonStyle,
   danger,
   FieldControl,
+  fieldControlOf,
+  fieldDescriptorsOf,
   inputStyle,
   isTableDraft,
   isTableProperty,
@@ -139,6 +141,9 @@ export function EntityCreatePanel({ target, onCreated }: {
       const fields: Record<string, unknown> = {};
       for (const [name, raw] of Object.entries(draft)) {
         const property = metadata?.properties.find((item) => propertyName(item) === name);
+        // An unknown field type has no editor, so whatever sits in the draft is
+        // the value we displayed, not something the user typed (`FM-RENDER` AC-4).
+        if (property && fieldControlOf(property) === null) continue;
         if (property && isTableProperty(property)) {
           // Rows, not text: the base takes an array of objects here. An empty
           // table is simply not sent — there is nothing to create.
@@ -180,7 +185,9 @@ export function EntityCreatePanel({ target, onCreated }: {
 
   // A field of type `state` moves by route, never by typing: the base marks it
   // that way (and gives it no permissions), so it is not part of a form.
-  const properties = (metadata?.properties ?? []).filter((property) => propertyType(property) !== "state");
+  // One list, derived in one place (`FM-RENDER` ①). `state` is not editable here:
+  // it is the entity's own state machine, not a field the create form sets.
+  const fields = fieldDescriptorsOf(metadata?.properties).filter((field) => field.type !== "state");
   const emptyTypes = types !== null && types.length === 0;
 
   return (
@@ -249,8 +256,9 @@ export function EntityCreatePanel({ target, onCreated }: {
         {!type && !loading && !emptyTypes && (
           <div style={{ fontSize: 12, color: muted, padding: "4px 0" }}>先选一个类型，再填字段。</div>
         )}
-        {properties.map((property) => {
-          const name = propertyName(property);
+        {fields.map((field) => {
+          const property = field.property;
+          const name = field.name;
           const isRequired = required.has(name);
           const description = typeof property.description === "string" ? property.description : "";
           return (
