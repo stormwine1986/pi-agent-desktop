@@ -44,18 +44,6 @@ interface EntityTabState {
 /** How many entity tabs stay open; the oldest gives way first. */
 const MAX_ENTITY_TABS = 6;
 
-/**
- * The tab id for one entity.
- *
- * The server half is written the way pi namespaces a server (`-` as `_`), so a
- * key opened from a reply's link and the same key opened from a to-do row focus
- * one tab instead of two: the link can only carry the namespace spelling, while
- * the list carries the configured one.
- */
-function entityTabId(server: string | undefined, workspace: string | undefined, key: string): string {
-  return `entity:${server ? mcpServerKey(server) : "auto"}:${workspace ?? ""}:${key}`;
-}
-
 // Heavy, rarely-used surfaces are code-split out of the main bundle. The
 // config modals may never be opened at all; FileViewer drags in markdown +
 // syntax highlighting a second time and only matters once a file tab opens.
@@ -86,7 +74,6 @@ import { isPathInside } from "@/lib/file-links";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import type { EntityContextRef } from "@/lib/entity-context";
 import { PRODUCT_NAME } from "@/lib/branding";
-import { mcpServerKey } from "@/lib/mcp-server-name";
 import { isImeComposing } from "@/lib/ime";
 import {
   resolveInitialNavigation,
@@ -103,7 +90,7 @@ import { artifactPanelTab, artifactTabId, artifactTabsForSession, upsertArtifact
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsView } from "./artifacts/ArtifactsView";
 import { setArtifactOpener, useArtifactTitles } from "@/lib/artifact-store";
-import { setEntityChannel, setEntityOpener } from "@/lib/entity-opener";import { useAudio } from "@/hooks/useAudio";
+import { entityTabId, setEntityChannel, setEntityOpener } from "@/lib/entity-opener";import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import {
@@ -1802,16 +1789,20 @@ export function AppShell() {
   /**
    * Opens (or focuses) one entity beside the conversation.
    *
-   * The id is the channel + space + key, so the same entity opened from a list
-   * row and from a key in a reply is one tab, not two. Tabs are capped: a
+   * The id is the folder + channel + space + key, so the same entity opened from
+   * a list row and from a key in a reply is one tab, not two. Tabs are capped: a
    * conversation that mentions a dozen keys must not fill the strip.
+   *
+   * `fromCwd` says which folder the request came through: a to-do row belongs to
+   * the tab that fetched it, a relation row to the panel it was clicked in, and
+   * a reply's link to the conversation being read. The channel in a link is the
+   * *writer's* `mcp.json`, so it must be resolved against the reader's folder —
+   * never against whichever panel happened to be open (`FM-LINK`). A chat that
+   * owns a folder resolves the same way; a chat without one has no `mcp.json`
+   * to read, so it cannot open an entity at all.
    */
-  const handleOpenEntity = useCallback((ref: { server?: string; workspace?: string; key: string }) => {
-    // The list belongs to a tab, and that tab's cwd is the folder whose
-    // `mcp.json` named the server — the same one the rows were fetched through.
-    // A chat that owns a folder resolves the same way; a chat without one has no
-    // `mcp.json` to read, so it cannot open an entity at all.
-    const cwd = activeViewsTab?.cwd ?? workbenchCwd;
+  const handleOpenEntity = useCallback((ref: { server?: string; workspace?: string; key: string }, fromCwd?: string) => {
+    const cwd = fromCwd ?? workbenchCwd;
     if (!cwd) {
       // Silence here looks like a dead link, which reads as a broken app rather
       // than "this conversation has no project".
@@ -1822,7 +1813,7 @@ export function AppShell() {
     }
     // A link that named no channel keeps "auto": the panel asks the project's
     // servers which one holds the key, so one entity is one tab either way.
-    const id = entityTabId(ref.server, ref.workspace, ref.key);
+    const id = entityTabId(cwd, ref.server, ref.workspace, ref.key);
     setEntityTabs((tabs) => {
       if (tabs.some((tab) => tab.id === id)) return tabs;
       const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, key: ref.key }];
@@ -1831,7 +1822,7 @@ export function AppShell() {
     setActiveFileTabId(id);
     setRightPanelOpen(true);
     if (isMobile) setSidebarOpen(false);
-  }, [activeViewsTab?.cwd, isMobile, workbenchCwd]);
+  }, [isMobile, workbenchCwd]);
 
   // A reply's `entity-item:` link opens through this opener (lib/entity-opener).
   // A link that named its channel becomes the fallback for later channel-less
@@ -1867,7 +1858,7 @@ export function AppShell() {
     setEntityTabs((tabs) => {
       const target = tabs.find((tab) => tab.id === tabId);
       if (!target?.server || !target.workspace) return tabs;
-      const id = entityTabId(target.server, target.workspace, key);
+      const id = entityTabId(target.cwd, target.server, target.workspace, key);
       if (tabs.some((tab) => tab.id === id && tab.id !== tabId)) {
         return tabs.filter((tab) => tab.id !== tabId);
       }
@@ -1879,7 +1870,7 @@ export function AppShell() {
       if (current !== tabId) return current;
       const target = entityTabs.find((tab) => tab.id === tabId);
       return target?.server && target.workspace
-        ? entityTabId(target.server, target.workspace, key)
+        ? entityTabId(target.cwd, target.server, target.workspace, key)
         : current;
     });
   }, [entityTabs]);
@@ -3421,7 +3412,7 @@ export function AppShell() {
             <ViewsPanel
               cwd={activeViewsTab.cwd}
               onBringToChat={handleBringEntityToChat}
-              onOpenEntity={handleOpenEntity}
+              onOpenEntity={(ref) => handleOpenEntity(ref, activeViewsTab.cwd)}
               onCreateEntity={handleCreateEntity}
             />
           ) : activeEntityTab?.create && activeEntityTab.server && activeEntityTab.workspace ? (
@@ -3435,7 +3426,11 @@ export function AppShell() {
               onCreated={(key) => handleEntityCreated(activeEntityTab.id, key)}
             />
           ) : activeEntityTab ? (
-            <EntityPanel key={activeEntityTab.id} target={activeEntityTab} onOpenEntity={handleOpenEntity} />
+            <EntityPanel
+              key={activeEntityTab.id}
+              target={activeEntityTab}
+              onOpenEntity={(ref) => handleOpenEntity(ref, activeEntityTab.cwd)}
+            />
           ) : activeFileTab?.filePath ? (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}

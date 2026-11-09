@@ -14,10 +14,36 @@
 // falls back to the channel used last, so a conversation about one project does
 // not have to repeat it in every link.
 
+import { mcpServerKey } from "./mcp-server-name";
+
 /** Where a link points when it omits the channel. */
 export interface EntityChannel {
   server: string;
   workspace: string;
+}
+
+/**
+ * The tab id for one entity.
+ *
+ * The server half is written the way pi namespaces a server (`-` as `_`), so a
+ * key opened from a reply's link and the same key opened from a to-do row focus
+ * one tab instead of two: the link can only carry the namespace spelling, while
+ * the list carries the configured one.
+ *
+ * The folder is part of the identity too. The same reply can be read in two
+ * projects, and each has its own `mcp.json`: `entity-demo-system-alice` in one,
+ * `entity-base` in the other, with different tokens. A tab keyed only by channel
+ * and key quietly reopened the *other* project's tab — same title, same key, the
+ * other `mcp.json` behind it — which is how one key came to look "sometimes
+ * working, sometimes not" while the folder in front of the reader was correct.
+ */
+export function entityTabId(
+  cwd: string,
+  server: string | undefined,
+  workspace: string | undefined,
+  key: string,
+): string {
+  return `entity:${cwd}:${server ? mcpServerKey(server) : "auto"}:${workspace ?? ""}:${key}`;
 }
 
 export interface EntityItemRequest {

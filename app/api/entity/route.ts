@@ -4,6 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { globalMcpConfigPath, projectMcpConfigPath } from "@/lib/mcp-config-read";
 import { asRecord, asStrings, availableRoutesOf, linkOptionsOf, rolesIn, writableFieldsOf, type AvailableRoute, type LinkOption } from "@/lib/entity-permissions";
+import { sameMcpServer } from "@/lib/mcp-server-name";
 import { acceptedKey } from "@/lib/idempotency";
 
 export const dynamic = "force-dynamic";
@@ -75,6 +76,17 @@ interface Target {
   key: string;
 }
 
+/**
+ * A failed read. `code` is what the panel needs to say the right thing:
+ * `channel` is wiring (`mcp.json`), the other two are the entity or its type
+ * not arriving — only there does "元数据不齐，表单不渲染" (FM-META ①) apply.
+ */
+interface Failure {
+  error: string;
+  status: number;
+  code?: "channel" | "entity" | "metadata";
+}
+
 /** Every server named by the project's and the global `mcp.json`, project first. */
 function candidateServers(cwd: string): string[] {
   const names: string[] = [];
@@ -91,6 +103,14 @@ function candidateServers(cwd: string): string[] {
   return names;
 }
 
+interface Attempt {
+  name: string;
+  target?: McpHttpTarget;
+  /** The entity the server answered with, which is what names its space. */
+  entity?: Record<string, unknown>;
+  error?: string;
+}
+
 /**
  * Works out which server answers for this key.
  *
@@ -98,36 +118,86 @@ function candidateServers(cwd: string): string[] {
  * as plain text does not, so the servers this project declares are asked in
  * turn and the first one holding the entity wins. The entity carries its own
  * workspace, so only the server has to be guessed.
+ *
+ * A named channel this project does not configure is a hint, not a demand.
+ * Every person's `.pi/mcp.json` names its own endpoint (`entity-demo-system-`
+ * `alice` / `-bob` / `-evan`), and the same stack is often configured under a
+ * third name (`entity-base`), so a reply carried from one project into another
+ * used to be unopenable even though this project could read the entity per-
+ * fectly well. The named server still goes first when it exists, and the space
+ * a link carries breaks ties between identical keys on different stacks.
  */
 async function pickTarget(
   cwd: string,
   key: string,
   server: string | null,
-): Promise<Target | { error: string; status: number }> {
+  workspace: string | null,
+): Promise<Target | Failure> {
   const agentDir = getAgentDir();
-  const names = server ? [server] : candidateServers(cwd);
+  const names = candidateServers(cwd);
   if (names.length === 0) {
-    return { error: "这个项目没有配置任何 MCP 服务器，无法确定这条实体在哪", status: 400 };
+    return { error: "这个项目没有配置任何 MCP 服务器，无法确定这条实体在哪", status: 400, code: "channel" };
   }
 
-  const attempts = await Promise.all(names.map(async (name) => {
+  const ordered = server
+    ? [
+      ...names.filter((name) => sameMcpServer(name, server)),
+      ...names.filter((name) => !sameMcpServer(name, server)),
+    ]
+    : names;
+
+  const attempts = await Promise.all(ordered.map(async (name): Promise<Attempt> => {
     const resolved = resolveMcpTarget(agentDir, cwd, name);
     if (!resolved.ok) return { name, error: resolved.error };
     const found = await callMcpTool(resolved.target, "get", { id: key, includeAttachments: false });
-    return found.ok && unwrapEntity(found.value)
-      ? { name, target: resolved.target as McpHttpTarget | undefined }
-      : { name, error: found.ok ? "没有这条实体" : found.error, target: undefined };
+    const entity = found.ok ? unwrapEntity(found.value) : null;
+    return entity
+      ? { name, target: resolved.target, entity }
+      : { name, error: found.ok ? "没有这条实体" : found.error };
   }));
 
-  const hit = attempts.find((attempt) => attempt.target !== undefined);
-  if (hit?.target) return { target: hit.target, server: hit.name, workspace: null, key };
-  if (server) {
-    return { error: attempts[0]?.error ?? `服务器 ${server} 没有这条实体`, status: 502 };
+  const hits = attempts.filter((attempt) => attempt.target !== undefined);
+  // The space disambiguates identical keys: the demo stack and the test stack
+  // hold the same kinds of keys, and a link says which one it means.
+  const scoped = workspace
+    ? hits.filter((attempt) => text(attempt.entity?.workspaceId) === workspace)
+    : [];
+  // One hit is the answer even when the link's space disagrees (a stale or
+  // mistyped space is not a reason to withhold the only entity there is); two
+  // hits with no matching space are a question the caller has to answer.
+  const hit = scoped[0] ?? (hits.length === 1 ? hits[0] : undefined);
+  if (hit?.target) {
+    return {
+      target: hit.target,
+      server: hit.name,
+      workspace: text(hit.entity?.workspaceId) || workspace,
+      key,
+    };
   }
-  return { error: `没有哪个服务器认得 ${key}`, status: 404 };
+
+  const named = server ? attempts.find((attempt) => sameMcpServer(attempt.name, server)) : undefined;
+  if (named) return { error: named.error ?? `服务器 ${named.name} 没有这条实体`, status: 502, code: "entity" };
+
+  if (hits.length > 1) {
+    const spaces = hits.map((attempt) => text(attempt.entity?.workspaceId) || attempt.name);
+    return {
+      error: `${hits.length} 个 server 都认得 ${key}（${spaces.join("、")}），链接里的空间${workspace ? ` ${workspace}` : ""}不在其中，无法确定打开哪一个`,
+      status: 409,
+      code: "channel",
+    };
+  }
+
+  const missing = server
+    ? `这个项目没有名为 "${server}" 的 server（已配置：${names.join("、")}），`
+    : "";
+  return {
+    error: `${missing}也没有哪个 server 认得 ${key}。链接里的 server 是写它的那个项目的 mcp.json 名字，改成本项目的名字、或回到那个项目打开。`,
+    status: 404,
+    code: "channel",
+  };
 }
 
-function resolveTarget(search: URLSearchParams): Promise<Target | { error: string; status: number }> | Target | { error: string; status: number } {
+function resolveTarget(search: URLSearchParams): Promise<Target | Failure> | Target | Failure {
   const cwd = search.get("cwd");
   const server = search.get("server");
   const workspace = search.get("workspace");
@@ -137,7 +207,7 @@ function resolveTarget(search: URLSearchParams): Promise<Target | { error: strin
   if (!key) return { error: "key is required", status: 400 };
 
   const resolved = server ? resolveMcpTarget(getAgentDir(), cwd, server) : null;
-  if (!resolved?.ok || !server) return pickTarget(cwd, key, server);
+  if (!resolved?.ok || !server) return pickTarget(cwd, key, server, workspace);
   // The configured spelling: a link carries pi's namespace (`a_b`) for a server
   // `mcp.json` names `a-b`, and every follow-up request should name the real entry.
   return { target: resolved.target, server: resolved.target.name, workspace, key };
@@ -148,20 +218,25 @@ async function loadEntity(target: McpHttpTarget, server: string, workspace: stri
   // `get` rejects a `workspaceId` (it answers nothing), so it is not passed; the
   // entity reports its own.
   const entityResult = await callMcpTool(target, "get", { id: key, includeAttachments: false });
-  if (!entityResult.ok) return { error: entityResult.error };
+  if (!entityResult.ok) return { error: entityResult.error, code: "entity" as const };
 
   const entity = unwrapEntity(entityResult.value);
-  if (!entity) return { error: "服务器没有返回这条实体" };
+  if (!entity) return { error: "服务器没有返回这条实体", code: "entity" as const };
 
   const type = text(entity.type);
-  if (!type) return { error: "无法确定实体类型" };
-  const scope = workspace || text(entity.workspaceId);
+  if (!type) return { error: "无法确定实体类型", code: "entity" as const };
+  // The entity's own space wins over the one the link claims: a stale or foreign
+  // link must not relabel a readable entity into the wrong space, which would
+  // also judge this reader's roles against a space it holds nothing in.
+  const scope = text(entity.workspaceId) || workspace || "";
 
   const [metadataResult, meResult] = await Promise.all([
     callMcpTool(target, "get_metadata", { type }),
     callMcpTool(target, "about_me", {}),
   ]);
-  if (!metadataResult.ok) return { error: metadataResult.error };
+  // The type definition is what the form is built from, so this is the one
+  // failure the panel explains as "元数据不齐" (FM-META ①).
+  if (!metadataResult.ok) return { error: metadataResult.error, code: "metadata" as const };
 
   const metadata = asRecord(metadataResult.value) ?? {};
   const fields = asRecord(entity.fields) ?? {};
@@ -193,10 +268,12 @@ async function loadEntity(target: McpHttpTarget, server: string, workspace: stri
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const resolved = await resolveTarget(url.searchParams);
-  if ("error" in resolved) return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+  if ("error" in resolved) {
+    return NextResponse.json({ error: resolved.error, code: resolved.code }, { status: resolved.status });
+  }
 
   const loaded = await loadEntity(resolved.target, resolved.server, resolved.workspace, resolved.key);
-  if ("error" in loaded) return NextResponse.json({ error: loaded.error }, { status: 502 });
+  if ("error" in loaded) return NextResponse.json({ error: loaded.error, code: loaded.code }, { status: 502 });
   return NextResponse.json(loaded.payload);
 }
 
@@ -211,7 +288,9 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const resolved = await resolveTarget(url.searchParams);
-  if ("error" in resolved) return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+  if ("error" in resolved) {
+    return NextResponse.json({ error: resolved.error, code: resolved.code }, { status: resolved.status });
+  }
 
   let body: { fields?: unknown; expectedRevision?: unknown; targetState?: unknown; idempotencyKey?: unknown };
   try {
@@ -251,6 +330,6 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const reloaded = await loadEntity(resolved.target, resolved.server, resolved.workspace, resolved.key);
-  if ("error" in reloaded) return NextResponse.json({ error: reloaded.error }, { status: 502 });
+  if ("error" in reloaded) return NextResponse.json({ error: reloaded.error, code: reloaded.code }, { status: 502 });
   return NextResponse.json(reloaded.payload);
 }

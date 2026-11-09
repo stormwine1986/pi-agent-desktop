@@ -160,6 +160,14 @@ export function EntityPanel({ target, onOpenEntity }: {
 }) {
   const [data, setData] = useState<EntityResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Why the read failed, when the server says: only a missing type definition or
+  // a missing entity is an FM-META problem worth explaining that way. A channel
+  // the project does not configure is a wiring answer, not a form-requirements one.
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  // A read that failed stays failed until the tab is closed unless the reader can
+  // ask again: a wrong folder, a restarted base or a slow first load is worth one
+  // more attempt before giving up on the key.
+  const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<DraftMap>({});
@@ -209,8 +217,12 @@ export function EntityPanel({ target, onOpenEntity }: {
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`/api/entity?${query}`, { cache: "no-store", signal });
-    const body = await response.json() as EntityResponse & { error?: string };
-    if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+    const body = await response.json() as EntityResponse & { error?: string; code?: string };
+    if (!response.ok) {
+      const failure = new Error(body.error ?? `HTTP ${response.status}`) as Error & { code?: string };
+      failure.code = body.code;
+      throw failure;
+    }
     return body;
   }, [query]);
 
@@ -218,6 +230,7 @@ export function EntityPanel({ target, onOpenEntity }: {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
+    setErrorCode(null);
     void load(controller.signal)
       .then((body) => {
         setData(body);
@@ -226,12 +239,13 @@ export function EntityPanel({ target, onOpenEntity }: {
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return;
         setError(cause instanceof Error ? cause.message : String(cause));
+        setErrorCode(cause instanceof Error ? (cause as Error & { code?: string }).code ?? null : null);
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [load]);
+  }, [load, attempt]);
 
   // Loaded once the entity is known: the traces need the resolved channel, which
   // a channel-less link only learns after the first read.
@@ -597,9 +611,14 @@ export function EntityPanel({ target, onOpenEntity }: {
     return (
       <div style={{ padding: 12, fontSize: 12, color: danger }}>
         <div>{target.key}：{error}</div>
-        <div style={{ marginTop: 6, color: muted }}>
-          字段可能读得到，但类型定义或实体本身没取到；表单要求元数据齐备，缺一条不渲染（FM-META ①）。
-        </div>
+        {(errorCode === "metadata" || errorCode === "entity") && (
+          <div style={{ marginTop: 6, color: muted }}>
+            字段可能读得到，但类型定义或实体本身没取到；表单要求元数据齐备，缺一条不渲染（FM-META ①）。
+          </div>
+        )}
+        <button type="button" onClick={() => setAttempt((count) => count + 1)} style={{ ...buttonStyle, marginTop: 8 }}>
+          重新读取
+        </button>
       </div>
     );
   }
