@@ -35,6 +35,8 @@ interface EntityTabState {
   /** Absent when the link named no channel; the panel resolves it from the project. */
   server?: string;
   workspace?: string;
+  /** The environment the link asked for, when it carried one (ENV-RESOLVE 1). */
+  instanceId?: string;
   /** Empty while a new entity is being created in this tab. */
   key: string;
   /** This tab is a create form, not an entity. */
@@ -1801,7 +1803,7 @@ export function AppShell() {
    * owns a folder resolves the same way; a chat without one has no `mcp.json`
    * to read, so it cannot open an entity at all.
    */
-  const handleOpenEntity = useCallback((ref: { server?: string; workspace?: string; key: string }, fromCwd?: string) => {
+  const handleOpenEntity = useCallback((ref: { server?: string; workspace?: string; key: string; instanceId?: string }, fromCwd?: string) => {
     const cwd = fromCwd ?? workbenchCwd;
     if (!cwd) {
       // Silence here looks like a dead link, which reads as a broken app rather
@@ -1811,12 +1813,23 @@ export function AppShell() {
       );
       return;
     }
-    // A link that named no channel keeps "auto": the panel asks the project's
-    // servers which one holds the key, so one entity is one tab either way.
+    // A link that named no channel keeps "auto": the panel resolves it from the
+    // project's servers, so one entity is one tab either way. The environment a
+    // link asked for is *not* part of the id: the same key and space are the same
+    // entity, and a link that asks for another environment is refused by the
+    // read rather than opening a second tab for it (ENV-RESOLVE 4).
     const id = entityTabId(cwd, ref.server, ref.workspace, ref.key);
     setEntityTabs((tabs) => {
-      if (tabs.some((tab) => tab.id === id)) return tabs;
-      const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, key: ref.key }];
+      const existing = tabs.find((tab) => tab.id === id);
+      if (existing) {
+        // A newer link may carry the environment declaration the open tab was
+        // written without; the panel re-reads when it changes. An older link
+        // never clears one.
+        const instanceId = ref.instanceId ?? existing.instanceId;
+        if (instanceId === existing.instanceId) return tabs;
+        return tabs.map((tab) => (tab.id === id ? { ...tab, instanceId } : tab));
+      }
+      const next = [...tabs, { id, cwd, server: ref.server, workspace: ref.workspace, instanceId: ref.instanceId, key: ref.key }];
       return next.length > MAX_ENTITY_TABS ? next.slice(next.length - MAX_ENTITY_TABS) : next;
     });
     setActiveFileTabId(id);

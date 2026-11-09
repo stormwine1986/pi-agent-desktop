@@ -13,6 +13,15 @@
 // is what a reply can build from any tool result. The short one (`entity-item:MR-000123`)
 // falls back to the channel used last, so a conversation about one project does
 // not have to repeat it in every link.
+//
+// A link may also carry the environment declaration it was written against:
+//
+//   [MR-000123](entity-item:entity-base/ws_manhu/MR-000123?instanceId=ins_demo)
+//
+// That value says *which* environment the writer meant (`SSR-000092` ENV-RESOLVE
+// 1); it is not evidence that the environment the reader reaches really is that
+// one. Links without it — every link written before this existed — keep working
+// and are marked "未验真" by the panel.
 
 import { mcpServerKey } from "./mcp-server-name";
 
@@ -51,6 +60,16 @@ export interface EntityItemRequest {
   server?: string;
   workspace?: string;
   key: string;
+  /** The environment the writer meant, when the link carries it. */
+  instanceId?: string;
+}
+
+/** What a link points at, before the panel resolves anything. */
+export interface ParsedEntityItem {
+  server?: string;
+  workspace?: string;
+  key: string;
+  instanceId?: string;
 }
 
 const PREFIX = "entity-item:";
@@ -68,16 +87,39 @@ export function isEntityItemHref(href: string | undefined | null): href is strin
  *
  * `workspace/key` is accepted as well as `server/workspace/key`: a reply inside
  * one project usually knows the space from context and only needs the channel
- * prefix left off.
+ * prefix left off. A `?instanceId=` query names the environment; anything else
+ * in the query is ignored rather than guessed at.
  */
-export function parseEntityItemHref(href: string): { server?: string; workspace?: string; key: string } | null {
+export function parseEntityItemHref(href: string): ParsedEntityItem | null {
   if (!isEntityItemHref(href)) return null;
   const rest = href.slice(PREFIX.length).replace(/^\/+/, "").trim();
   if (!rest) return null;
-  const parts = rest.split("/").filter((part) => part.length > 0);
-  if (parts.length === 1) return { key: parts[0] };
-  if (parts.length === 2) return { workspace: parts[0], key: parts[1] };
-  return { server: parts[0], workspace: parts[1], key: parts.slice(2).join("/") };
+  const hashAt = rest.indexOf("#");
+  const withoutHash = hashAt >= 0 ? rest.slice(0, hashAt) : rest;
+  const queryAt = withoutHash.indexOf("?");
+  const path = (queryAt >= 0 ? withoutHash.slice(0, queryAt) : withoutHash).trim();
+  const query = queryAt >= 0 ? withoutHash.slice(queryAt + 1) : "";
+
+  const parts = path.split("/").filter((part) => part.length > 0);
+  if (parts.length === 0) return null;
+
+  const raw = query ? new URLSearchParams(query).get("instanceId")?.trim() : undefined;
+  const declared = raw ? { instanceId: raw } : {};
+  if (parts.length === 1) return { key: parts[0], ...declared };
+  if (parts.length === 2) return { workspace: parts[0], key: parts[1], ...declared };
+  return { server: parts[0], workspace: parts[1], key: parts.slice(2).join("/"), ...declared };
+}
+
+/**
+ * The href for one entity, so a reply can write the declaration it opened with.
+ *
+ * Omitted parts stay omitted (the short forms above), so this does not force a
+ * channel into a link that was fine without one.
+ */
+export function entityItemHref(input: { server?: string; workspace?: string; key: string; instanceId?: string }): string {
+  const path = [input.server, input.workspace, input.key].filter((part) => Boolean(part)).join("/");
+  const suffix = input.instanceId ? `?instanceId=${encodeURIComponent(input.instanceId)}` : "";
+  return `${PREFIX}${path}${suffix}`;
 }
 
 /** Remembers which channel the current context reads from, for short links. */
@@ -110,6 +152,9 @@ export function openEntityItemLink(href: string): boolean {
     server: parsed.server ?? lastChannel?.server,
     workspace: parsed.workspace ?? lastChannel?.workspace,
     key: parsed.key,
+    // Kept absent when the link carried none: "no declaration" is not an empty
+    // one, and older links must reach the opener exactly as before.
+    ...(parsed.instanceId ? { instanceId: parsed.instanceId } : {}),
   });
   return true;
 }

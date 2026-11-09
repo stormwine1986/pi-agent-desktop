@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mcpServerKey } from "./mcp-server-name";
@@ -26,6 +27,21 @@ export interface McpHttpTarget {
   headers: Record<string, string>;
   /** Which file defined the entry, for error messages. */
   source: string;
+  /**
+   * Digest of the entry as configured (`source`, name, url, headers). A change of
+   * any of them is a different connection to this app, so a cached environment
+   * identity (`readServerIdentity`) must not survive it — that is the
+   * "配置变更即失效" half of ENV-RESOLVE ②.
+   */
+  fingerprint: string;
+  /**
+   * Optional deployment pin: `instanceId` written on the entry, e.g.
+   * `{ "url": "…", "instanceId": "ins_demo" }`. It is the only comparator for
+   * "is this the environment this project means" that does not come from the
+   * request (ENV-RESOLVE ④, SSR-000091 AC-6): a link's id only says which one
+   * the writer wanted, never what is true.
+   */
+  pinnedInstanceId?: string;
 }
 
 export type McpTargetResult = { ok: true; target: McpHttpTarget } | { ok: false; error: string };
@@ -131,6 +147,10 @@ export function resolveMcpTarget(agentDir: string, cwd: string, serverName: stri
     return { ok: false, error: `server "${name}" 的 url 必须是 http(s)` };
   }
 
+  const pinnedInstanceId = typeof raw.instanceId === "string" && raw.instanceId.trim()
+    ? raw.instanceId.trim()
+    : undefined;
+
   const headers: Record<string, string> = {};
   const rawHeaders = raw.headers;
   if (rawHeaders !== undefined) {
@@ -147,11 +167,64 @@ export function resolveMcpTarget(agentDir: string, cwd: string, serverName: stri
     }
   }
 
-  return { ok: true, target: { name, url: url.toString(), headers, source } };
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([source, name, url.toString(), headers]))
+    .digest("hex")
+    .slice(0, 32);
+
+  return {
+    ok: true,
+    target: {
+      name,
+      url: url.toString(),
+      headers,
+      source,
+      fingerprint,
+      ...(pinnedInstanceId ? { pinnedInstanceId } : {}),
+    },
+  };
+}
+
+/**
+ * What the connection has learned about the environment, per session so repeat
+ * reads skip the handshake, and per `(cwd, server)` so a resolved link costs one
+ * read instead of one probe per configured entry (ENV-RESOLVE AC-6).
+ */
+export interface McpServerIdentityReading {
+  /** The `initialize` result's `serverInfo`, verbatim; null when unavailable. */
+  serverInfo: Record<string, unknown> | null;
+  /** Whether the value came from a live session (freshest) or the cache. */
+  fromSession: boolean;
 }
 
 /** Session ids by server, so repeat refreshes skip the handshake. */
-const sessions = new Map<string, string>();
+const sessions = new Map<string, { id: string; serverInfo: Record<string, unknown> | null }>();
+
+interface IdentityCacheEntry {
+  fingerprint: string;
+  serverInfo: Record<string, unknown> | null;
+}
+
+/**
+ * `(cwd, server) → 声明的身份`, on `globalThis` for the same reason the session
+ * registry is: a route module can be instantiated twice, and an identity that
+ * vanished on reload would be re-handshaked for every read.
+ */
+const identityCacheSymbol = Symbol.for("pi-web:mcp-identity");
+const identityCache: Map<string, IdentityCacheEntry> = (() => {
+  const holder = globalThis as Record<symbol, unknown>;
+  const existing = holder[identityCacheSymbol];
+  if (existing instanceof Map) return existing as Map<string, IdentityCacheEntry>;
+  const fresh = new Map<string, IdentityCacheEntry>();
+  holder[identityCacheSymbol] = fresh;
+  return fresh;
+})();
+
+/** Test seam: forget everything a fixture taught this process. */
+export function resetMcpIdentityCache(): void {
+  identityCache.clear();
+  sessions.clear();
+}
 
 function sessionKey(target: McpHttpTarget): string {
   return `${target.url}\u0000${JSON.stringify(target.headers)}`;
@@ -211,7 +284,7 @@ async function rpc(
   id: number,
   signal: AbortSignal,
 ): Promise<RpcOutcome & { status: number }> {
-  const sessionId = sessions.get(sessionKey(target));
+  const sessionId = sessions.get(sessionKey(target))?.id;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
@@ -283,6 +356,18 @@ export async function callMcpTool(
     sessions.delete(key);
   }
 
+  const init = await initializeSession(target, signal);
+  if (!init.ok) return { ok: false, error: init.error };
+
+  return callTool(1);
+}
+
+/** One `initialize`, remembered with its session and its declared identity. */
+async function initializeSession(
+  target: McpHttpTarget,
+  signal: AbortSignal,
+): Promise<{ ok: true; serverInfo: Record<string, unknown> | null } | { ok: false; error: string }> {
+  const key = sessionKey(target);
   const init = await rpc(
     target,
     {
@@ -299,7 +384,11 @@ export async function callMcpTool(
     signal,
   );
   if (init.error) return { ok: false, error: init.error };
-  if (init.sessionId) sessions.set(key, init.sessionId);
+  const result = init.result as { serverInfo?: unknown } | undefined;
+  const serverInfo = typeof result?.serverInfo === "object" && result.serverInfo !== null
+    ? result.serverInfo as Record<string, unknown>
+    : null;
+  if (init.sessionId) sessions.set(key, { id: init.sessionId, serverInfo });
 
   // Notification: no id, no response expected — failures here are not fatal.
   await fetch(target.url, {
@@ -314,7 +403,45 @@ export async function callMcpTool(
     signal,
   }).catch(() => undefined);
 
-  return callTool(1);
+  return { ok: true, serverInfo };
+}
+
+/**
+ * The environment identity this connection declares (ENV-RESOLVE ②).
+ *
+ * The primary source is `initialize.serverInfo._meta.instanceId`: it arrives with
+ * the handshake, once per connection, before any tool call. A live session owns
+ * the newest reading — a reconnect after a redeploy replaces it, so the value is
+ * not frozen at process start. Only when no session is live does the
+ * `(cwd, server)` cache answer, and only while the config still hashes to the
+ * same fingerprint; a changed entry is a different connection and re-handshakes.
+ *
+ * This never calls `about_me` or `/version`: they are the per-session secondary
+ * and the ops/HTTP surface respectively, and making them the decision source is
+ * explicitly out of bounds (答复 evan 2026-11-09 ④).
+ */
+export async function readServerIdentity(
+  target: McpHttpTarget,
+  cwd: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: true; reading: McpServerIdentityReading } | { ok: false; error: string }> {
+  const cacheKey = `${cwd}\u0000${target.name}`;
+  const live = sessions.get(sessionKey(target));
+  if (live) {
+    identityCache.set(cacheKey, { fingerprint: target.fingerprint, serverInfo: live.serverInfo });
+    return { ok: true, reading: { serverInfo: live.serverInfo, fromSession: true } };
+  }
+
+  const cached = identityCache.get(cacheKey);
+  if (cached && cached.fingerprint === target.fingerprint) {
+    return { ok: true, reading: { serverInfo: cached.serverInfo, fromSession: false } };
+  }
+
+  const signal = AbortSignal.timeout(timeoutMs);
+  const init = await initializeSession(target, signal);
+  if (!init.ok) return { ok: false, error: init.error };
+  identityCache.set(cacheKey, { fingerprint: target.fingerprint, serverInfo: init.serverInfo });
+  return { ok: true, reading: { serverInfo: init.serverInfo, fromSession: true } };
 }
 
 function isSessionExpired(error: string | undefined): boolean {

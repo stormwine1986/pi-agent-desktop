@@ -1,9 +1,20 @@
 import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
+import { callMcpTool, readServerIdentity, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { globalMcpConfigPath, projectMcpConfigPath } from "@/lib/mcp-config-read";
 import { asRecord, asStrings, availableRoutesOf, linkOptionsOf, rolesIn, writableFieldsOf, type AvailableRoute, type LinkOption } from "@/lib/entity-permissions";
+import {
+  declaredIdentityOf,
+  identityFrom,
+  identityMismatchRefusal,
+  judgeConsistency,
+  judgeIdentity,
+  type EntityIdentity,
+  type IdentityCandidate,
+  type IdentityRefusal,
+  type ServerIdentity,
+} from "@/lib/entity-identity";
 import { sameMcpServer } from "@/lib/mcp-server-name";
 import { acceptedKey } from "@/lib/idempotency";
 
@@ -51,6 +62,12 @@ export interface EntityResponse {
    * it happens to have seen linked already.
    */
   linkOptions: LinkOption[];
+  /**
+   * Which environment answered, and how far that was checked (ENV-RESOLVE 4/5).
+   * The panel shows the verdict; the ids are kept so a wrong opening can be
+   * attributed afterwards instead of guessed at.
+   */
+  identity: EntityIdentity;
 }
 
 function text(value: unknown): string {
@@ -72,19 +89,29 @@ function unwrapEntity(value: unknown): Record<string, unknown> | null {
 interface Target {
   target: McpHttpTarget;
   server: string;
-  workspace: string | null;
+  workspace: string;
   key: string;
+  /** How far the environment was checked, and what was compared. */
+  identity: EntityIdentity;
+  /** Already read while resolving, so opening does not read the same key twice. */
+  entity?: Record<string, unknown>;
 }
 
 /**
  * A failed read. `code` is what the panel needs to say the right thing:
- * `channel` is wiring (`mcp.json`), the other two are the entity or its type
- * not arriving — only there does "元数据不齐，表单不渲染" (FM-META ①) apply.
+ * `channel` is wiring (`mcp.json`), `entity` / `metadata` are the entity or its
+ * type not arriving (only there does "元数据不齐，表单不渲染" (FM-META ①) apply),
+ * and `instance-mismatch` is an environment that is not the one the link asked
+ * for — nothing is opened then (ENV-RESOLVE ④).
  */
 interface Failure {
   error: string;
   status: number;
-  code?: "channel" | "entity" | "metadata";
+  code?: "channel" | "entity" | "metadata" | "instance-mismatch";
+  /** Set for `instance-mismatch`: what was required and what answered. */
+  expected?: string;
+  actual?: string;
+  candidates?: IdentityCandidate[];
 }
 
 /** Every server named by the project's and the global `mcp.json`, project first. */
@@ -106,32 +133,108 @@ function candidateServers(cwd: string): string[] {
 interface Attempt {
   name: string;
   target?: McpHttpTarget;
+  /** null when the endpoint declared no identity (older deployment). */
+  identity: ServerIdentity | null;
+  /** Why the handshake did not produce a `serverInfo`, when it did not. */
+  handshakeError?: string;
   /** The entity the server answered with, which is what names its space. */
   entity?: Record<string, unknown>;
   error?: string;
 }
 
+/** One configured entry, with the environment it says it is. */
+async function describeServer(cwd: string, agentDir: string, name: string): Promise<Attempt> {
+  const resolved = resolveMcpTarget(agentDir, cwd, name);
+  if (!resolved.ok) return { name, identity: null, handshakeError: resolved.error };
+  const handshake = await readServerIdentity(resolved.target, cwd);
+  if (!handshake.ok) {
+    return { name: resolved.target.name, target: resolved.target, identity: null, handshakeError: handshake.error };
+  }
+  return {
+    name: resolved.target.name,
+    target: resolved.target,
+    identity: declaredIdentityOf(handshake.reading.serverInfo),
+  };
+}
+
+function refusalFailure(refusal: IdentityRefusal): Failure {
+  return {
+    error: refusal.error,
+    status: refusal.status,
+    code: "instance-mismatch",
+    expected: refusal.expected,
+    actual: refusal.actual,
+    candidates: refusal.candidates,
+  };
+}
+
+/** Every entry that said which environment it is, for a refusal's copy. */
+function declarationsOf(attempts: Attempt[]): IdentityCandidate[] {
+  return attempts
+    .filter((attempt) => attempt.identity)
+    .map((attempt) => ({
+      server: attempt.name,
+      instanceId: attempt.identity?.instanceId,
+      ...(attempt.identity?.instanceName ? { instanceName: attempt.identity.instanceName } : {}),
+      ...(attempt.target?.pinnedInstanceId ? { pin: attempt.target.pinnedInstanceId } : {}),
+    }));
+}
+
 /**
- * Works out which server answers for this key.
+ * Reads the entity through the entry the declaration belongs to.
  *
- * A link written by a conversation names its channel; a key the reader clicked
- * as plain text does not, so the servers this project declares are asked in
- * turn and the first one holding the entity wins. The entity carries its own
- * workspace, so only the server has to be guessed.
+ * A probe may already have the entity; then it is not fetched a second time
+ * (AC-6). A refused identity never reaches a read, so a mismatched environment
+ * cannot answer "here it is" and look opened.
+ */
+async function openOn(
+  attempt: Attempt,
+  identity: EntityIdentity,
+  workspace: string | null,
+  key: string,
+  entity?: Record<string, unknown>,
+): Promise<Target | Failure> {
+  if (!attempt.target) return { error: attempt.handshakeError ?? "这个 server 没有可用的地址", status: 502, code: "channel" };
+  let loaded = entity;
+  if (!loaded) {
+    const found = await callMcpTool(attempt.target, "get", { id: key, includeAttachments: false });
+    if (!found.ok) return { error: found.error, status: 502, code: "entity" };
+    loaded = unwrapEntity(found.value) ?? undefined;
+    if (!loaded) return { error: "服务器没有返回这条实体", status: 502, code: "entity" };
+  }
+  return {
+    target: attempt.target,
+    server: attempt.name,
+    workspace: text(loaded.workspaceId) || workspace || "",
+    key,
+    identity,
+    entity: loaded,
+  };
+}
+
+/**
+ * Works out which server answers for this key — by declaration, not by luck.
  *
- * A named channel this project does not configure is a hint, not a demand.
- * Every person's `.pi/mcp.json` names its own endpoint (`entity-demo-system-`
- * `alice` / `-bob` / `-evan`), and the same stack is often configured under a
- * third name (`entity-base`), so a reply carried from one project into another
- * used to be unopenable even though this project could read the entity per-
- * fectly well. The named server still goes first when it exists, and the space
- * a link carries breaks ties between identical keys on different stacks.
+ * The order, none of which may be skipped (ENV-RESOLVE ②):
+ * 1. this project's `mcp.json` decides which entries exist at all, and the link's
+ *    channel names the first candidate;
+ * 2. each entry's environment is read from its handshake (`initialize`), cached
+ *    per `(cwd, server)` and invalidated by any change to the entry;
+ * 3. an `instanceId` on the link selects the entry that declares it — a mismatch
+ *    is refused, never resolved by "the only hit" (the guess this replaces);
+ * 4. only an environment that declares *nothing* is probed by workspace + key:
+ *    one hit may open (labelled degraded), several are refused with the list.
+ *
+ * A named channel this project does not configure is still a hint, not a
+ * demand: every person's `.pi/mcp.json` names its own endpoint, so a reply
+ * carried from another project must stay openable — that is the degraded path.
  */
 async function pickTarget(
   cwd: string,
   key: string,
   server: string | null,
   workspace: string | null,
+  requested: string | null,
 ): Promise<Target | Failure> {
   const agentDir = getAgentDir();
   const names = candidateServers(cwd);
@@ -145,20 +248,103 @@ async function pickTarget(
       ...names.filter((name) => !sameMcpServer(name, server)),
     ]
     : names;
+  const namedName = server ? names.find((name) => sameMcpServer(name, server)) : undefined;
 
-  const attempts = await Promise.all(ordered.map(async (name): Promise<Attempt> => {
-    const resolved = resolveMcpTarget(agentDir, cwd, name);
-    if (!resolved.ok) return { name, error: resolved.error };
-    const found = await callMcpTool(resolved.target, "get", { id: key, includeAttachments: false });
+  /**
+   * Every entry, handshaked once. Deliberately lazy: opening through the entry
+   * the link names must not connect to the rest of the project's servers, or one
+   * open would cost one handshake per configured entry (AC-6).
+   */
+  const describeAll = async () => {
+    const attempts = await Promise.all(ordered.map((name) => describeServer(cwd, agentDir, name)));
+    const usable = attempts.filter((attempt) => attempt.target !== undefined);
+    return { attempts, usable, declarations: declarationsOf(usable) };
+  };
+
+  // The named entry, on its own: one handshake for the environment it declares.
+  if (namedName) {
+    const named = await describeServer(cwd, agentDir, namedName);
+    const declaresRequested = requested !== null && named.identity?.instanceId === requested;
+    if (declaresRequested || (requested === null && named.identity)) {
+      const decided = judgeIdentity({
+        server: named.name,
+        actual: named.identity,
+        requested,
+        pinned: named.target?.pinnedInstanceId,
+      });
+      if (!decided.ok) return refusalFailure(decided.refusal);
+      return openOn(named, decided.identity, workspace, key);
+    }
+  }
+
+  const { attempts, usable, declarations } = await describeAll();
+  const named = namedName ? usable.find((attempt) => sameMcpServer(attempt.name, namedName)) : undefined;
+
+  // 3. The link's declaration selects the environment before any key probing.
+  if (requested) {
+    const match = usable.find((attempt) => attempt.identity?.instanceId === requested);
+    if (match) {
+      const decided = judgeIdentity({
+        server: match.name,
+        actual: match.identity,
+        requested,
+        pinned: match.target?.pinnedInstanceId,
+        candidates: declarations,
+      });
+      if (!decided.ok) return refusalFailure(decided.refusal);
+      return openOn(match, decided.identity, workspace, key);
+    }
+    if (named?.identity) {
+      // The entry the link names says it is another environment: refuse with its
+      // own reason (a contradicting pin is named as a pin, not as a stranger).
+      const decided = judgeIdentity({
+        server: named.name,
+        actual: named.identity,
+        requested,
+        pinned: named.target?.pinnedInstanceId,
+        candidates: declarations,
+      });
+      if (!decided.ok) return refusalFailure(decided.refusal);
+    } else if (!named && declarations.length > 0) {
+      // No channel to fall back on, and every environment that says anything
+      // says something else: there is no safe choice to make here.
+      return refusalFailure(identityMismatchRefusal({
+        server: "已配置的 server",
+        why: "链接要求的环境与已配置 server 自报的环境都不一致",
+        expected: requested,
+        actual: declarations[0]?.instanceId ?? "(未声明)",
+        candidates: declarations,
+      }));
+    }
+    // Otherwise the environment declares nothing (older deployment): fall through
+    // to the probing path below, which opens but labels the result as degraded.
+  }
+
+  // 1./2. The project's own entry answers when it declares a matching identity.
+  if (named?.identity) {
+    const decided = judgeIdentity({
+      server: named.name,
+      actual: named.identity,
+      requested,
+      pinned: named.target?.pinnedInstanceId,
+      candidates: declarations,
+    });
+    if (!decided.ok) return refusalFailure(decided.refusal);
+    return openOn(named, decided.identity, workspace, key);
+  }
+
+  // 4. No entry of this project answers, or none declares an identity: probe.
+  const probed = await Promise.all(usable.map(async (attempt): Promise<Attempt> => {
+    const found = await callMcpTool(attempt.target!, "get", { id: key, includeAttachments: false });
     const entity = found.ok ? unwrapEntity(found.value) : null;
     return entity
-      ? { name, target: resolved.target, entity }
-      : { name, error: found.ok ? "没有这条实体" : found.error };
+      ? { ...attempt, entity }
+      : { ...attempt, error: found.ok ? "没有这条实体" : found.error };
   }));
 
-  const hits = attempts.filter((attempt) => attempt.target !== undefined);
-  // The space disambiguates identical keys: the demo stack and the test stack
-  // hold the same kinds of keys, and a link says which one it means.
+  const hits = probed.filter((attempt) => attempt.entity !== undefined);
+  // The space narrows identical keys: the demo stack and the test stack hold the
+  // same kinds of keys, and a link says which one it means.
   const scoped = workspace
     ? hits.filter((attempt) => text(attempt.entity?.workspaceId) === workspace)
     : [];
@@ -166,22 +352,34 @@ async function pickTarget(
   // mistyped space is not a reason to withhold the only entity there is); two
   // hits with no matching space are a question the caller has to answer.
   const hit = scoped[0] ?? (hits.length === 1 ? hits[0] : undefined);
-  if (hit?.target) {
-    return {
-      target: hit.target,
+  if (hit) {
+    const decided = judgeIdentity({
       server: hit.name,
-      workspace: text(hit.entity?.workspaceId) || workspace,
-      key,
+      actual: hit.identity,
+      requested,
+      pinned: hit.target?.pinnedInstanceId,
+      candidates: declarations,
+    });
+    if (!decided.ok) return refusalFailure(decided.refusal);
+    return openOn(hit, decided.identity, workspace, key, hit.entity);
+  }
+
+  const namedAttempt = server ? attempts.find((attempt) => sameMcpServer(attempt.name, server)) : undefined;
+  if (namedAttempt) {
+    return {
+      error: namedAttempt.handshakeError ?? namedAttempt.error ?? `服务器 ${namedAttempt.name} 没有这条实体`,
+      status: 502,
+      code: "entity",
     };
   }
 
-  const named = server ? attempts.find((attempt) => sameMcpServer(attempt.name, server)) : undefined;
-  if (named) return { error: named.error ?? `服务器 ${named.name} 没有这条实体`, status: 502, code: "entity" };
-
   if (hits.length > 1) {
-    const spaces = hits.map((attempt) => text(attempt.entity?.workspaceId) || attempt.name);
+    const spaces = hits.map((attempt) => {
+      const id = attempt.identity?.instanceId;
+      return `${text(attempt.entity?.workspaceId) || attempt.name}${id ? `（instanceId=${id}）` : "（未声明身份）"}`;
+    });
     return {
-      error: `${hits.length} 个 server 都认得 ${key}（${spaces.join("、")}），链接里的空间${workspace ? ` ${workspace}` : ""}不在其中，无法确定打开哪一个`,
+      error: `${hits.length} 个 server 都认得 ${key}（${spaces.join("、")}），链接里的空间${workspace ? ` ${workspace}` : ""}不在其中，且没有可对照的 instanceId，无法确定打开哪一个`,
       status: 409,
       code: "channel",
     };
@@ -197,52 +395,87 @@ async function pickTarget(
   };
 }
 
-function resolveTarget(search: URLSearchParams): Promise<Target | Failure> | Target | Failure {
+async function resolveTarget(search: URLSearchParams): Promise<Target | Failure> {
   const cwd = search.get("cwd");
   const server = search.get("server");
   const workspace = search.get("workspace");
   const key = search.get("key");
+  // What the link asked for (ENV-RESOLVE ①). A selector, never evidence: it is
+  // compared against a declaration, it does not replace one (AC-8).
+  const requested = search.get("instanceId");
 
   if (!cwd) return { error: "cwd is required", status: 400 };
   if (!key) return { error: "key is required", status: 400 };
 
-  const resolved = server ? resolveMcpTarget(getAgentDir(), cwd, server) : null;
-  if (!resolved?.ok || !server) return pickTarget(cwd, key, server, workspace);
-  // The configured spelling: a link carries pi's namespace (`a_b`) for a server
-  // `mcp.json` names `a-b`, and every follow-up request should name the real entry.
-  return { target: resolved.target, server: resolved.target.name, workspace, key };
+  return pickTarget(cwd, key, server, workspace, requested);
 }
 
-/** Reads the entity, its type definition and this reader's roles in one go. */
-async function loadEntity(target: McpHttpTarget, server: string, workspace: string | null, key: string) {
+/**
+ * Reads the entity, its type definition and this reader's roles in one go.
+ *
+ * The environment was judged before the read (`pickTarget`); this is where the
+ * second source is compared. `about_me` is the per-session secondary evidence
+ * (ENV-RESOLVE 2), and a connection whose two surfaces disagree has no coherent
+ * identity to trust — so it is refused here rather than displayed as if it were
+ * the environment the link asked for.
+ */
+async function loadEntity(target: Target): Promise<{ payload: EntityResponse } | Failure> {
+  const { server, workspace, key } = target;
   // `get` rejects a `workspaceId` (it answers nothing), so it is not passed; the
   // entity reports its own.
-  const entityResult = await callMcpTool(target, "get", { id: key, includeAttachments: false });
-  if (!entityResult.ok) return { error: entityResult.error, code: "entity" as const };
-
-  const entity = unwrapEntity(entityResult.value);
-  if (!entity) return { error: "服务器没有返回这条实体", code: "entity" as const };
+  let entity = target.entity;
+  if (!entity) {
+    const entityResult = await callMcpTool(target.target, "get", { id: key, includeAttachments: false });
+    if (!entityResult.ok) return { error: entityResult.error, code: "entity", status: 502 };
+    entity = unwrapEntity(entityResult.value) ?? undefined;
+    if (!entity) return { error: "服务器没有返回这条实体", code: "entity", status: 502 };
+  }
 
   const type = text(entity.type);
-  if (!type) return { error: "无法确定实体类型", code: "entity" as const };
+  if (!type) return { error: "无法确定实体类型", code: "entity", status: 502 };
   // The entity's own space wins over the one the link claims: a stale or foreign
   // link must not relabel a readable entity into the wrong space, which would
   // also judge this reader's roles against a space it holds nothing in.
   const scope = text(entity.workspaceId) || workspace || "";
 
   const [metadataResult, meResult] = await Promise.all([
-    callMcpTool(target, "get_metadata", { type }),
-    callMcpTool(target, "about_me", {}),
+    callMcpTool(target.target, "get_metadata", { type }),
+    callMcpTool(target.target, "about_me", {}),
   ]);
   // The type definition is what the form is built from, so this is the one
-  // failure the panel explains as "元数据不齐" (FM-META ①).
-  if (!metadataResult.ok) return { error: metadataResult.error, code: "metadata" as const };
+  // failure the panel explains as "元数据不齐" (FM-META 1).
+  if (!metadataResult.ok) return { error: metadataResult.error, code: "metadata", status: 502 };
+
+  const primary: ServerIdentity | null = target.identity.instanceId
+    ? { instanceId: target.identity.instanceId, instanceName: target.identity.instanceName }
+    : null;
+  const secondary = meResult.ok ? identityFrom(meResult.value) : null;
+  const conflict = judgeConsistency({ server, primary, secondary });
+  if (conflict) return refusalFailure(conflict);
 
   const metadata = asRecord(metadataResult.value) ?? {};
   const fields = asRecord(entity.fields) ?? {};
   const hiddenFields = asStrings(entity.hiddenFields);
   const state = text(entity.state) || text(fields.state);
   const roles = meResult.ok ? rolesIn(meResult.value, scope) : [];
+
+  // The panel and the log both read this: which id was compared with what, and
+  // which verdict followed (ENV-RESOLVE 5). Never extend the claim beyond what
+  // was actually compared.
+  let identity = target.identity;
+  if (primary && secondary) {
+    identity = { ...identity, detail: `${identity.detail}（initialize 与 about_me 两处同值）` };
+  } else if (primary && meResult.ok) {
+    identity = { ...identity, detail: `${identity.detail}（about_me 没有给出身份，未作判定主源）` };
+  } else if (!primary && secondary) {
+    identity = {
+      ...identity,
+      detail: `${identity.detail} about_me 自报 instanceId=${secondary.instanceId}，但 initialize 未声明，不能相互印证。`,
+    };
+  }
+  if (identity.verdict !== "verified") {
+    console.info(`[entity] ${key} @ ${server}: instanceId=${identity.instanceId ?? "(未声明)"} expected=${identity.expected ?? "(无)"} verdict=${identity.verdict}`);
+  }
 
   const payload: EntityResponse = {
     server,
@@ -261,19 +494,31 @@ async function loadEntity(target: McpHttpTarget, server: string, workspace: stri
     writableFields: writableFieldsOf(metadata, state, roles),
     routes: availableRoutesOf(metadata, state, roles),
     linkOptions: linkOptionsOf(metadata, state, roles),
+    identity,
   };
   return { payload };
+}
+
+/** The JSON body of a failure; an absent field stays absent rather than null. */
+function failureBody(failure: Failure): Record<string, unknown> {
+  return {
+    error: failure.error,
+    ...(failure.code ? { code: failure.code } : {}),
+    ...(failure.expected !== undefined ? { expected: failure.expected } : {}),
+    ...(failure.actual !== undefined ? { actual: failure.actual } : {}),
+    ...(failure.candidates ? { candidates: failure.candidates } : {}),
+  };
 }
 
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const resolved = await resolveTarget(url.searchParams);
-  if ("error" in resolved) {
-    return NextResponse.json({ error: resolved.error, code: resolved.code }, { status: resolved.status });
+  if (!("target" in resolved)) {
+    return NextResponse.json(failureBody(resolved), { status: resolved.status });
   }
 
-  const loaded = await loadEntity(resolved.target, resolved.server, resolved.workspace, resolved.key);
-  if ("error" in loaded) return NextResponse.json({ error: loaded.error, code: loaded.code }, { status: 502 });
+  const loaded = await loadEntity(resolved);
+  if (!("payload" in loaded)) return NextResponse.json(failureBody(loaded), { status: loaded.status });
   return NextResponse.json(loaded.payload);
 }
 
@@ -288,8 +533,8 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const resolved = await resolveTarget(url.searchParams);
-  if ("error" in resolved) {
-    return NextResponse.json({ error: resolved.error, code: resolved.code }, { status: resolved.status });
+  if (!("target" in resolved)) {
+    return NextResponse.json(failureBody(resolved), { status: resolved.status });
   }
 
   let body: { fields?: unknown; expectedRevision?: unknown; targetState?: unknown; idempotencyKey?: unknown };
@@ -329,7 +574,7 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({ error: result.error, conflict }, { status: conflict ? 409 : 502 });
   }
 
-  const reloaded = await loadEntity(resolved.target, resolved.server, resolved.workspace, resolved.key);
-  if ("error" in reloaded) return NextResponse.json({ error: reloaded.error, code: reloaded.code }, { status: 502 });
+  const reloaded = await loadEntity(resolved);
+  if (!("payload" in reloaded)) return NextResponse.json(failureBody(reloaded), { status: reloaded.status });
   return NextResponse.json(reloaded.payload);
 }

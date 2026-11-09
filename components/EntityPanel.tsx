@@ -68,6 +68,18 @@ interface EntityResponse {
   routes: AvailableRoute[];
   /** Relations this type declares, with this reader's right to create each. */
   linkOptions: LinkOption[];
+  /**
+   * Which environment answered, and how far it was checked (ENV-RESOLVE 4/5).
+   * `verdict` decides the label; the ids make a wrong opening attributable.
+   */
+  identity: {
+    verdict: "verified" | "unverified" | "degraded";
+    instanceId?: string;
+    instanceName?: string;
+    expected?: string;
+    source: "link" | "config" | "none";
+    detail: string;
+  };
 }
 
 /** A transition the base allows from the current state. */
@@ -83,6 +95,8 @@ export interface EntityTarget {
   /** Absent when the link named no channel: the server resolves it. */
   server?: string;
   workspace?: string;
+  /** The environment the link asked for, when it carried one. */
+  instanceId?: string;
   key: string;
 }
 
@@ -209,11 +223,14 @@ export function EntityPanel({ target, onOpenEntity }: {
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ cwd: target.cwd, key: target.key });
-    // Left out when unknown: the route then asks the project's servers.
+    // Left out when unknown: the route then resolves it from the project.
     if (target.server) params.set("server", target.server);
     if (target.workspace) params.set("workspace", target.workspace);
+    // The environment the link asked for; the route refuses a mismatch instead
+    // of opening whatever happens to answer (ENV-RESOLVE 3/4).
+    if (target.instanceId) params.set("instanceId", target.instanceId);
     return params;
-  }, [target.cwd, target.server, target.workspace, target.key]);
+  }, [target.cwd, target.server, target.workspace, target.instanceId, target.key]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`/api/entity?${query}`, { cache: "no-store", signal });
@@ -611,6 +628,12 @@ export function EntityPanel({ target, onOpenEntity }: {
     return (
       <div style={{ padding: 12, fontSize: "var(--fs-caption)", color: danger }}>
         <div>{target.key}：{error}</div>
+        {errorCode === "instance-mismatch" && (
+          <div style={{ marginTop: 6, color: muted }}>
+            这是环境身份判定，不是读失败：链接要求的环境和当前 mcp.json 指向的不是同一套，
+            工作台不会在没核对过的环境里打开（ENV-RESOLVE ④）。
+          </div>
+        )}
         {(errorCode === "metadata" || errorCode === "entity") && (
           <div style={{ marginTop: 6, color: muted }}>
             字段可能读得到，但类型定义或实体本身没取到；表单要求元数据齐备，缺一条不渲染（FM-META ①）。
@@ -716,6 +739,34 @@ export function EntityPanel({ target, onOpenEntity }: {
           }}
         >
           {data.typeLabel || data.type} · {data.state} · r{data.revision}
+        </span>
+        {/* The environment verdict is part of the identity of what is on screen:
+            "opened" alone cannot tell a checked environment from a guessed one
+            (ENV-RESOLVE 4/5). The tooltip carries the ids for attribution. */}
+        <span
+          title={[
+            data.identity.detail,
+            `server: ${data.server}`,
+            `instanceId: ${data.identity.instanceId ?? "（未声明）"}`,
+            `expected: ${data.identity.expected ?? "（无对照）"}`,
+            `source: ${data.identity.source}`,
+          ].join(" | ")}
+          style={{
+            flexShrink: 0,
+            fontSize: "var(--fs-micro)",
+            color: data.identity.verdict === "verified" ? muted : danger,
+            border: `1px solid ${line}`,
+            borderRadius: 4,
+            padding: "0 4px",
+            whiteSpace: "nowrap",
+            cursor: "help",
+          }}
+        >
+          {data.identity.verdict === "verified"
+            ? "身份已核对"
+            : data.identity.verdict === "unverified"
+              ? "未验真"
+              : "未声明（降级）"}
         </span>
       </div>
 
