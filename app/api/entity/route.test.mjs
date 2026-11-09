@@ -541,3 +541,108 @@ test("changing the entry to another environment invalidates the cached identity"
   assert.equal(fresh.body.identity.instanceId, "ins_test");
   assert.equal(handshakes.includes("http://id11b.example/mcp"), true);
 });
+
+// --- One key, one space, two undeclared endpoints (DEFECT-000084) -------------
+//
+// The space narrows identical keys, so `workspace + key` was treated as "one
+// hit". Two older deployments that share both — same space, same key naming
+// scheme, neither declaring an environment — narrow nothing, and the old code
+// opened `hits[0]`: whichever `mcp.json` wrote first. It looked opened and
+// belonged to the wrong stack (AR-000011 / SSR-000092 ④).
+
+/** Both stubs hold the same key in the same space and declare no identity. */
+function sameSpaceTie(urls) {
+  for (const url of urls) {
+    entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+  }
+}
+
+test("two undeclared endpoints sharing a space and key are refused with the candidates", async (t) => {
+  const cwd = await project(t, { "stub-first": "http://tie1a.example/mcp", "stub-second": "http://tie1b.example/mcp" });
+  sameSpaceTie(["http://tie1a.example/mcp", "http://tie1b.example/mcp"]);
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  assert.equal(status, 409);
+  assert.equal(body.code, "channel");
+  // A refusal opens nothing: no entity, no server, no verdict to misread.
+  assert.equal(body.key, undefined);
+  assert.equal(body.server, undefined);
+  assert.equal(body.identity, undefined);
+  assert.equal(body.candidates.length, 2);
+  assert.deepEqual(body.candidates.map((candidate) => candidate.server).sort(), ["stub-first", "stub-second"]);
+  for (const candidate of body.candidates) {
+    assert.equal(candidate.workspace, "ws_entity_base");
+    // "未声明" is an absent key, never `null` or a placeholder.
+    assert.equal(candidate.instanceId, undefined);
+  }
+  // Actionable: every entry, its space, and that neither declares anything.
+  assert.match(body.error, /stub-first/);
+  assert.match(body.error, /stub-second/);
+  assert.match(body.error, /ws_entity_base/);
+  assert.match(body.error, /未声明身份/);
+  assert.match(body.error, /instanceId/);
+});
+
+test("the same tie answers identically whichever order mcp.json lists the entries in", async (t) => {
+  const servers = [["stub-first", "http://tie2a.example/mcp"], ["stub-second", "http://tie2b.example/mcp"]];
+  sameSpaceTie(servers.map(([, url]) => url));
+
+  const forward = await project(t, Object.fromEntries(servers));
+  const first = await read(forward, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  const reversed = await project(t, Object.fromEntries([...servers].reverse()));
+  const second = await read(reversed, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  assert.equal(first.status, 409);
+  assert.equal(second.status, 409);
+  // The whole body, not just the status: write order must not survive into the
+  // answer — that is the defect, not a formatting detail.
+  assert.deepEqual(second.body, first.body);
+});
+
+test("naming one of the tied entries still opens that one", async (t) => {
+  // The link's `server` is this project's own entry name, so it is an
+  // instruction; every other way of breaking the tie is write order.
+  const servers = [["stub-first", "http://tie3a.example/mcp"], ["stub-second", "http://tie3b.example/mcp"]];
+  sameSpaceTie(servers.map(([, url]) => url));
+  const cwd = await project(t, Object.fromEntries(servers));
+
+  for (const [name] of servers) {
+    const { status, body } = await read(cwd, { server: name, workspace: "ws_entity_base", key: "SSR-000033" });
+    assert.equal(status, 200);
+    assert.equal(body.server, name);
+    assert.equal(body.identity.verdict, "degraded");
+  }
+});
+
+test("a space that narrows three hits down to two still names only those two", async (t) => {
+  const cwd = await project(t, {
+    "stub-a": "http://tie4a.example/mcp",
+    "stub-b": "http://tie4b.example/mcp",
+    "stub-c": "http://tie4c.example/mcp",
+  });
+  sameSpaceTie(["http://tie4a.example/mcp", "http://tie4b.example/mcp"]);
+  entities.set("http://tie4c.example/mcp", new Map([["SSR-000033", entity("SSR-000033", "ws_other")]]));
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  assert.equal(status, 409);
+  assert.equal(body.code, "channel");
+  // The third stack lives elsewhere and is not a candidate for this link.
+  assert.deepEqual(body.candidates.map((candidate) => candidate.server).sort(), ["stub-a", "stub-b"]);
+  assert.equal(body.error.includes("stub-c"), false);
+});
+
+test("one hit among several entries opening the key is still opened, degraded", async (t) => {
+  // The fix must not turn "one stack holds it" into "several might": only a
+  // second hit in the same space is a tie.
+  const cwd = await project(t, { "stub-a": "http://tie5a.example/mcp", "stub-b": "http://tie5b.example/mcp" });
+  entities.set("http://tie5a.example/mcp", new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  assert.equal(status, 200);
+  assert.equal(body.server, "stub-a");
+  assert.equal(body.identity.verdict, "degraded");
+});

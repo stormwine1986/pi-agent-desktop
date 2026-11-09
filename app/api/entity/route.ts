@@ -168,6 +168,53 @@ function refusalFailure(refusal: IdentityRefusal): Failure {
   };
 }
 
+/**
+ * The probed hits, as a refusal reports them: which entry answered, which space
+ * it answered in, and whether it declares an environment at all.
+ *
+ * Sorted, deliberately: a refusal must read the same whatever order the entries
+ * are written in — write order deciding the answer is the defect this refusal
+ * exists to stop (`SSR-000092` ③).
+ */
+function hitCandidates(attempts: Attempt[]): IdentityCandidate[] {
+  return attempts
+    .map((attempt): IdentityCandidate => ({
+      server: attempt.name,
+      workspace: text(attempt.entity?.workspaceId),
+      ...(attempt.identity?.instanceId ? { instanceId: attempt.identity.instanceId } : {}),
+      ...(attempt.identity?.instanceName ? { instanceName: attempt.identity.instanceName } : {}),
+      ...(attempt.target?.pinnedInstanceId ? { pin: attempt.target.pinnedInstanceId } : {}),
+    }))
+    .sort((a, b) => (a.workspace ?? "").localeCompare(b.workspace ?? "") || a.server.localeCompare(b.server));
+}
+
+function candidateLine(candidate: IdentityCandidate): string {
+  const space = candidate.workspace ? `空间 ${candidate.workspace}` : "空间未知";
+  const environment = candidate.instanceId ? `instanceId=${candidate.instanceId}` : "未声明身份";
+  return `${candidate.server}（${space}，${environment}）`;
+}
+
+/**
+ * Several entries hold the key and nothing tells them apart.
+ *
+ * Two older deployments that share a space and a key naming scheme are
+ * indistinguishable by `(workspace, key)`, and with no declaration to compare
+ * the only thing left is `mcp.json` write order — an open that "looks opened but
+ * belongs elsewhere", which `AR-000011` / `SSR-000092` ④ forbid. So the answer
+ * is a refusal that names every candidate, never `scoped[0]`.
+ */
+function ambiguousHits(key: string, workspace: string | null, hits: Attempt[], scoped: Attempt[]): Failure {
+  const candidates = hitCandidates(scoped.length > 0 ? scoped : hits);
+  const listed = candidates.map(candidateLine).join("、");
+  const fix = "请给其中一条加 instanceId（mcp.json 里 pin，或部署时声明），或改用带 instanceId 的链接。";
+  const error = scoped.length > 1
+    ? `${scoped.length} 个 server 在空间 ${workspace} 里都认得 ${key}（${listed}），按书写顺序挑一个就是归属出错，无法确定打开哪一个。${fix}`
+    : workspace
+      ? `${hits.length} 个 server 都认得 ${key}（${listed}），链接里的空间 ${workspace} 与它们都不一致，也没有可对照的 instanceId，无法确定打开哪一个。${fix}`
+      : `${hits.length} 个 server 都认得 ${key}（${listed}），链接没有指明空间，也没有可对照的 instanceId，无法确定打开哪一个。${fix}`;
+  return { error, status: 409, code: "channel", candidates };
+}
+
 /** Every entry that said which environment it is, for a refusal's copy. */
 function declarationsOf(attempts: Attempt[]): IdentityCandidate[] {
   return attempts
@@ -223,7 +270,8 @@ async function openOn(
  * 3. an `instanceId` on the link selects the entry that declares it — a mismatch
  *    is refused, never resolved by "the only hit" (the guess this replaces);
  * 4. only an environment that declares *nothing* is probed by workspace + key:
- *    one hit may open (labelled degraded), several are refused with the list.
+ *    one hit may open (labelled degraded), several are refused with the list —
+ *    same space included; only the entry the link names may break that tie.
  *
  * A named channel this project does not configure is still a hint, not a
  * demand: every person's `.pi/mcp.json` names its own endpoint, so a reply
@@ -349,9 +397,17 @@ async function pickTarget(
     ? hits.filter((attempt) => text(attempt.entity?.workspaceId) === workspace)
     : [];
   // One hit is the answer even when the link's space disagrees (a stale or
-  // mistyped space is not a reason to withhold the only entity there is); two
-  // hits with no matching space are a question the caller has to answer.
-  const hit = scoped[0] ?? (hits.length === 1 ? hits[0] : undefined);
+  // mistyped space is not a reason to withhold the only entity there is).
+  // Several hits in one space are a tie the space cannot break: the one thing
+  // that may break it is the entry the link names, because that name is this
+  // project's own instruction — everything else is write order, which is not an
+  // answer (see `ambiguousHits`).
+  const namedHit = scoped.length > 1 && server
+    ? scoped.find((attempt) => sameMcpServer(attempt.name, server))
+    : undefined;
+  const hit = namedHit
+    ?? (scoped.length === 1 ? scoped[0] : undefined)
+    ?? (hits.length === 1 ? hits[0] : undefined);
   if (hit) {
     const decided = judgeIdentity({
       server: hit.name,
@@ -373,17 +429,7 @@ async function pickTarget(
     };
   }
 
-  if (hits.length > 1) {
-    const spaces = hits.map((attempt) => {
-      const id = attempt.identity?.instanceId;
-      return `${text(attempt.entity?.workspaceId) || attempt.name}${id ? `（instanceId=${id}）` : "（未声明身份）"}`;
-    });
-    return {
-      error: `${hits.length} 个 server 都认得 ${key}（${spaces.join("、")}），链接里的空间${workspace ? ` ${workspace}` : ""}不在其中，且没有可对照的 instanceId，无法确定打开哪一个`,
-      status: 409,
-      code: "channel",
-    };
-  }
+  if (hits.length > 1) return ambiguousHits(key, workspace, hits, scoped);
 
   const missing = server
     ? `这个项目没有名为 "${server}" 的 server（已配置：${names.join("、")}），`

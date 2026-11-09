@@ -52,6 +52,17 @@ opened in a second tab.
    are refused with the candidates. A missing declaration never kills an older
    deployment.
 
+The space narrows a key but does not settle a tie. Two older deployments that
+share a space *and* a key naming scheme are indistinguishable by
+`workspace + key`; that case used to open whichever entry `mcp.json` listed
+first, which is an open that looks opened and belongs elsewhere. It is refused
+(`409`, `code: "channel"`) with every candidate named (`server`, space, and
+`instanceId` or 未声明), sorted so the answer does not depend on write order. The
+one thing that may break such a tie is the entry the link names (`server`): that
+name is this project's own entry, an instruction rather than a guess, and it is
+the same precedence step 1 already gives the named channel. A named entry that
+does not hold the key breaks nothing — the refusal stands.
+
 The pin (`instanceId` key on an `mcp.json` server entry) is the only comparator
 that does not come from the request. A link that contradicts the pin is refused
 before any read; a pin the endpoint contradicts is refused likewise.
@@ -101,6 +112,7 @@ named entry to probe.
 whose `initialize` can declare `_meta` per url. It pins: same space+key in two
 environments selected by declaration, AC-2 (two entries, one `instanceId`),
 refusal listing both, pin mismatch both directions, `未验真`, degraded legacy,
-multi-hit refusal, `initialize` vs `about_me` contradiction, one read + no second
-handshake when cached, and config-change invalidation. The pure cases live in
-`lib/entity-identity.test.mjs`.
+multi-hit refusal (including two undeclared endpoints sharing one space and key,
+and its independence from `mcp.json` write order), `initialize` vs `about_me`
+contradiction, one read + no second handshake when cached, and config-change
+invalidation. The pure cases live in `lib/entity-identity.test.mjs`.
