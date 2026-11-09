@@ -4354,6 +4354,18 @@ html.dark {
   animation: native-modal-in var(--dur-base) var(--ease-sheet) both;
 }
 
+/* Small print in the bottom-left corner of the settings dialog (fork-only text,
+   so the rule lives here rather than in upstream's app/settings.css). */
+.settings-dialog-footnote {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 14px 6px;
+  font-size: var(--fs-micro);
+  line-height: 1.4;
+  color: var(--text-muted);
+  user-select: none;
+}
+
 .settings-dialog-surface .config-switch[aria-checked="true"] {
   border-color: var(--settings-control-on);
   background: var(--settings-control-on);

@@ -6,7 +6,9 @@
 2. `earendil-works/pi`
 3. `agegr/pi-web`
 
-The settings screen checks only the latest stable `stormwine1986/pi-agent-desktop` GitHub Release, at most once a week. If the installed desktop app version is older, its single **Upgrade** button downloads that signed release, installs the complete app, and restarts it. It never replaces JavaScript or dependencies inside an already installed signed app.
+The settings screen used to check the latest stable `stormwine1986/pi-agent-desktop` GitHub Release, at most once a week, and offer a single **Upgrade** button that downloaded that signed release, installed the complete app and restarted it. `fe47efa` removed that button, the background check and the `UpdateReminder` popup: this build is distributed by hand, so the check only ever answered "you're on the latest version". Settings › General now shows the current version and nothing else.
+
+The updater machinery is still in the tree and dormant — the Tauri updater plugin, `lib/desktop-updater.ts` (`installLatestDesktopRelease`) and `app/api/updates/` (version metadata and the release mirror). Nothing in the app calls them. Re-wiring a button means restoring the mid-install guard too: `SettingsPanel` must not close on Escape or a backdrop click while an install runs (see `docs/agents/fork-ui.md`). Local builds deliberately do not register the updater plugin, so they cannot accept an update payload either way.
 
 ## Automatic component sync
 
