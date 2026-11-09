@@ -56,6 +56,17 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
 
 ---
 
+## Entity 台账（演示系统）
+
+本仓库同时是 Entity 团队的工作台。台账数据不在本进程里，而在**演示系统**（`entity-demo-system`，准生产）中，通过 MCP 端点读写：
+
+- **`entity-base` 就是演示系统的入口，也是台账的访问端点。** 工作空间 `ws_entity_base`（「Entity Base」）里的 SR / SSR / MR / OR / PCA / AR / Defect / SSYS / TC / Evidence 都经它读写。链接里的 `entity-item:entity-base/ws_entity_base/<key>` 指的就是这里。
+- **同一个栈在本仓库的 `.pi/mcp.json` 里叫 `entity-demo-system-evan`**（各项目、各人用自己的条目名，pi 把配置里的 `-` 写成 `_`）；`entity-base`、`entity-demo-system-*` 指向同一套演示栈（如 `http://10.8.0.125:3100/entity/mcp`）。**名字随项目的 `mcp.json` 变，不要凭名字判定环境**——同名的 `entity-base` 在 `workbench-test` 里指向的是测试栈（`localhost:3000`）。
+- 区分三个同名物：`D:\projects\entity-base` 是本地项目目录（不是接口），`ws_entity_base` 是工作空间 id（不是端点），`entity-demo-system-*` 是按人的端点名（不是环境 id——这才是实例标识一直缺位的根因，见 SSR-000091 / SSR-000092）。
+- **台账是准生产：只在用户明确要求时写入**；要造数据、复现缺陷，去 manhu 测试环境（`manhu-*` 端点，`ws_manhu`）。读实体前必须现场查（`get` 会带 `revision`/`modifiedAt`），不引用上文或记忆里的旧值。
+
+---
+
 ## File Map
 
 ```
