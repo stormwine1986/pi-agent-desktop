@@ -150,8 +150,13 @@ Safe to edit freely; upstream never touches them. Full list in the manifest's
 `forkOwnedPaths`. Broadly: `src-tauri/`, `desktop/`, `scripts/`, `.github/workflows/`,
 `app/native-theme.css`, `app/api/updates/`, `lib/branding.ts`, `lib/app-updates.ts`,
 `lib/desktop-updater.ts`, `lib/desktop-window.ts`, and the desktop-only components
-(`ProjectPicker`, `UpdateReminder`, `AppUpdatesSection`, `components/desktop/*`,
-`path-ui`).
+(`ProjectPicker`, `AppUpdatesSection`, `components/desktop/*`, `path-ui`).
+
+The **Entity workbench** is fork-owned in the same way — `lib/entity-*.ts`,
+`lib/views/**`, `app/api/entity/`, `app/api/views/`, `EntityPanel`,
+`EntityCreatePanel`, `entity-field`, `ViewsPanel`, `docs/entity/`. It talks to entity
+stacks over MCP and upstream ships none of it, so it carries no merge risk; it is
+listed so the inventory stays a complete answer to "what does this fork add".
 
 ## Deliberate decisions that look like mistakes
 
