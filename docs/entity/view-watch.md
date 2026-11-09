@@ -3,7 +3,7 @@
 > **已归档，不再是最新口径。** 现行契约见 `SR-000032` 与 `SSR-000089`（VW-WATCH）/ `SSR-000090`（VW-CLAIM）/
 > `SSR-000066`（VW-CFG）。本文保留的是**推理过程**，不是可照着配的说明书。
 >
-> 一句话：**给一条视图配上 `watch`，视图里还有待处理的实体，就把最老的那条派给指定项目开一个会话去做；同一个项目同时最多一个会话在跑。**
+> 一句话：**给一条视图配上 `watch`，视图里还有待处理的实体，就把最老的那条派给指定项目开一个会话去做；同一个项目同时最多一个会话在跑——只算泵自己起的会话，人工续跑的会话不算（见 §10）**。
 
 ## 与现状的冲突（2026-11-08）
 
@@ -238,7 +238,7 @@ pump(project, view):
   if 该 view 的泵正在跑                   → return     # 单飞（同一 tick 内重复进来）
   if 上一轮距今 < intervalSec             → return
   if 全局 watch 会话数 >= MAX_CONCURRENT_WATCH_RUNS → return
-  if view.watch.project 有 running 会话    → return     # 同一个仓库不并发
+  if view.watch.project 有 running 会话    → return     # 同一个仓库不并发（只算泵起的会话）
   rows = runView(project, view)                      # modified_at 升序，最老优先
   for row of rows:
      st = derive(row.key)
@@ -372,6 +372,8 @@ touched = git status --porcelain(失败后) - dirtyBefore(派发前)
 前两层是本地的，第三层不是：认领借用底座的乐观锁，所以**跨机器也成立**——这是本地日志永远做不到的。两条视图命中同一实体时，第二条会在认领处拿到 `CONFLICT` 而不是拿到同一份工作。
 
 串行键是**执行项目目录**，不再按 entity 工作区——路由下移到视图之后，会被并发破坏的是工作树，而不是实体空间。两条视图指向同一个项目时仍然串行。
+
+**这一层只认得泵自己起的会话**（`WatchRegistry.byProject` 在进程内、不落盘，见 `lib/views/watch/pump.ts` 与 `SSR-000090` 的取舍）。人工恢复 / 续跑的会话不进这张表，所以同一个工作树仍可能被「人手工续的那个会话 + 泵刚派的会话」同时用；泵不杀会话、不检查工作区、不协调，冲突由执行项目自己承担。要暂停派发只有 `enabled: false`（见 §11），派发期间不要手工续会话——人工纪律写在 `docs/entity/工作台视图的配置指南.md` 第 10 节「派发与并发」。
 
 ## 11. 界面上看得见什么
 
