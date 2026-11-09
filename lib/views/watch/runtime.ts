@@ -129,6 +129,33 @@ export function createLiveDeps(): WatchDeps {
       return handle;
     },
 
+    async projectBusy(runCwd) {
+      // The app's own registry, not this pump's map: a resumed or continued human
+      // session in the target project closes the gate the same way ours does.
+      // Terminal processes never appear here — that is the agreed boundary.
+      const { hasBusyRpcSessionForCwd } = await import("../../rpc-manager");
+      return hasBusyRpcSessionForCwd(runCwd);
+    },
+
+    async count(target, query) {
+      const resolved = targetOf(agentDir, target);
+      if (!resolved.ok) return resolved;
+      // One row is enough to decide; `includeTotal` is what makes the panel able
+      // to say "有 N 条待人工" instead of silently rounding to one.
+      const result = await callMcpTool(resolved.value, "list", {
+        workspaceId: target.workspace,
+        query,
+        limit: 1,
+        offset: 0,
+        includeTotal: true,
+      });
+      if (!result.ok) return { ok: false, error: result.error };
+      const payload = result.value as { total?: unknown; items?: unknown } | undefined;
+      if (typeof payload?.total === "number") return { ok: true, value: payload.total };
+      const items = Array.isArray(payload?.items) ? payload.items.length : 0;
+      return { ok: true, value: items };
+    },
+
     log(event) {
       // One line per state transition keeps `journalctl`/dev-server output useful
       // without inventing a log format the app has to maintain.

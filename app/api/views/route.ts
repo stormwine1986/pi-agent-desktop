@@ -7,6 +7,8 @@ import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-cal
 import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
 import { checkOrderBy, declaredSortFields } from "@/lib/views/order-by";
 import { validate, watchViewStatus } from "@/lib/views/watch";
+import { dispatchGate } from "@/lib/views/watch/pump";
+import { describeGate } from "@/lib/views/watch/core";
 import { createLiveDeps } from "@/lib/views/watch/runtime";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +47,7 @@ interface ViewRows {
   /** The view's page size, so the panel can move by a page rather than by a guess. */
   pageSize: number;
   /** Dispatch state for a watched view: why it is not dispatching, and whether it is running. */
-  watch: { disabled: string | null; inFlight: boolean } | null;
+  watch: { disabled: string | null; inFlight: boolean; skipped: string | null } | null;
   error: string | null;
 }
 
@@ -87,13 +89,31 @@ function cell(item: unknown, column: string): string {
  * The pump keeps that reason in memory, but only the process holding the lease
  * scans views — so a second window (dev server beside the app) would show an
  * empty answer. Validating here covers that case; it is one metadata read, and
- * only for views this process has not seen.
+ * only for views this process has not seen. The gate probe below is the same
+ * one round the pump would take: the app's running sessions for ④, and the
+ * `manual` slice for ⑦.
  */
-async function watchStatusOf(cwd: string, view: ViewDefinition): Promise<{ disabled: string | null; inFlight: boolean } | null> {
+async function watchStatusOf(
+  cwd: string,
+  view: ViewDefinition,
+): Promise<{ disabled: string | null; inFlight: boolean; skipped: string | null } | null> {
   if (!view.watch) return null;
   const known = watchViewStatus(cwd, view);
   if (known) return known;
-  return { disabled: await validate(cwd, view, view.watch, createLiveDeps()), inFlight: false };
+  // `enabled: false` is the pause switch, not a failure: no gate reason to show.
+  if (!view.watch.enabled) return { disabled: null, inFlight: false, skipped: null };
+
+  const deps = createLiveDeps();
+  const disabled = await validate(cwd, view, view.watch, deps);
+  if (disabled) return { disabled, inFlight: false, skipped: null };
+
+  const gate = await dispatchGate(
+    { view, watch: view.watch, target: { panelCwd: cwd, server: view.server, workspace: view.workspace } },
+    deps,
+  );
+  // A failed probe is not a reason to claim the view is fine: leave the skip
+  // line empty and let the list query's own error speak.
+  return { disabled: null, inFlight: false, skipped: gate.ok && gate.value ? describeGate(gate.value) : null };
 }
 
 /**
@@ -154,6 +174,9 @@ async function orderByProblem(target: McpHttpTarget, view: ViewDefinition): Prom
 }
 
 async function runView(agentDir: string, cwd: string, view: ViewDefinition, offset: number): Promise<ViewRows> {
+  // Asked once: the fallback path may validate and probe a gate, and doing that
+  // twice per refresh would double every query this view costs.
+  const watch = await watchStatusOf(cwd, view);
   const empty = {
     title: view.title,
     server: view.server,
@@ -166,7 +189,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition, offs
     offset,
     total: null,
     pageSize: view.pageSize,
-    watch: await watchStatusOf(cwd, view),
+    watch,
     error: null,
   };
   // The error has to name the query that failed: the panel shows it as-is, and
@@ -220,7 +243,7 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition, offs
     offset,
     total: typeof payload?.total === "number" ? payload.total : null,
     pageSize: view.pageSize,
-    watch: await watchStatusOf(cwd, view),
+    watch,
     error: null,
   };
 }

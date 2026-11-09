@@ -51,9 +51,10 @@ interface ViewRows {
   pageSize: number;
   /**
    * Dispatch state for a watched view: `disabled` says why it is not handing
-   * anything out. A read-only view, or one that has not been scanned yet, is null.
+   * anything out, `skipped` why the last round was gated (SSR-000089 ④⑦).
+   * A read-only view, or one that has not been scanned yet, is null.
    */
-  watch: { disabled: string | null; inFlight: boolean } | null;
+  watch: { disabled: string | null; inFlight: boolean; skipped: string | null } | null;
   error: string | null;
 }
 
@@ -393,12 +394,22 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             {view.rows.length}
           </span>
         )}
-        {/* A watched view that cannot dispatch looks exactly like an empty queue,
-            so the reason has to be visible without opening anything. */}
+        {/* A watched view that cannot dispatch, or that a gate closed this
+            round, looks exactly like an empty queue. The reason has to be
+            visible without opening anything. */}
         {view.watch?.disabled && (
           <span
             aria-label="watch 未生效"
             title={`watch 未生效：${view.watch.disabled}`}
+            style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: warning }}
+          >
+            ●
+          </span>
+        )}
+        {!view.watch?.disabled && view.watch?.skipped && (
+          <span
+            aria-label="本轮跳过"
+            title={`本轮跳过：${view.watch.skipped}`}
             style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: warning }}
           >
             ●
@@ -584,6 +595,11 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             {active.watch?.disabled && (
               <div style={{ fontSize: "var(--fs-micro)", color: warning, marginBottom: 6, lineHeight: 1.5 }}>
                 watch 未生效：{active.watch.disabled}
+              </div>
+            )}
+            {!active.watch?.disabled && active.watch?.skipped && (
+              <div style={{ fontSize: "var(--fs-micro)", color: warning, marginBottom: 6, lineHeight: 1.5 }}>
+                本轮跳过：{active.watch.skipped}
               </div>
             )}
             {active.error ? <Notice text={active.error} /> : (

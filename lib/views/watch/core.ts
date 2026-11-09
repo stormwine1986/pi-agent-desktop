@@ -32,6 +32,22 @@ export interface WatchSessionHandle {
   done: Promise<void>;
 }
 
+/**
+ * Why a view is not handing anything out this round.
+ *
+ * Both gates close the whole view, not one row: a project stopped in the middle
+ * of an attempt has to be looked at before new work is stacked on top of it
+ * (andon semantics, SSR-000089 ④⑦).
+ */
+export type WatchGate =
+  | { reason: "session" }
+  | { reason: "manual"; count: number };
+
+/** The sentence the panel prints — the same words the contract uses. */
+export function describeGate(gate: WatchGate): string {
+  return gate.reason === "session" ? "项目有运行中会话" : `有 ${gate.count} 条待人工`;
+}
+
 export interface WatchDeps {
   now(): number;
   list(
@@ -54,6 +70,16 @@ export interface WatchDeps {
     type: string,
   ): Promise<WatchResult<{ validStates: string[]; routes: { from: string; to: string }[] }>>;
   startSession(runCwd: string, prompt: string, title: string): Promise<WatchResult<WatchSessionHandle>>;
+  /**
+   * True when the app itself has a running session in this directory.
+   *
+   * Read from the application's session registry (running ids + each session's
+   * cwd), never from this pump's own bookkeeping: a manual resume or a continued
+   * conversation counts too. Terminal processes are invisible on purpose.
+   */
+  projectBusy(runCwd: string): Promise<boolean>;
+  /** Rows matching a query, used for the manual-state count behind the gate. */
+  count(target: WatchTarget, query: string): Promise<WatchResult<number>>;
   log(event: WatchLogEvent): void;
 }
 
@@ -62,6 +88,7 @@ export type WatchLogEvent =
   | { type: "done"; view: string; key: string; state: string }
   | { type: "manual"; view: string; key: string; reason: "failed" | "timeout" }
   | { type: "conflict"; view: string; key: string }
+  | { type: "skipped"; view: string; reason: "session" | "manual"; count?: number }
   | { type: "error"; view: string; key?: string; message: string };
 
 /**

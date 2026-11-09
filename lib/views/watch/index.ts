@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { acquireLease, isPidAlive } from "../../scheduled-tasks/lease";
 import { readViewsConfig, type ViewDefinition, type ViewWatch } from "../config";
-import { sliceDql } from "./core";
+import { describeGate, sliceDql } from "./core";
 import { createLiveDeps } from "./runtime";
-import { pumpView, WatchRegistry, readPrompt, type PumpOutcome } from "./pump";
+import { pumpView, WatchRegistry, readPrompt, MAX_CONCURRENT_WATCH_RUNS, type PumpOutcome } from "./pump";
 import type { WatchDeps } from "./core";
 
 /**
@@ -33,6 +33,8 @@ interface ViewState {
   inFlight: boolean;
   /** Non-null when the view cannot be dispatched, with the reason to show. */
   disabled: string | null;
+  /** Non-null when a dispatch gate closed this view in the last round. */
+  skipped: string | null;
   validatedAt: number;
 }
 
@@ -57,11 +59,13 @@ export interface WatchViewStatus {
   disabled: string | null;
   /** True while a session for this view is running. */
   inFlight: boolean;
+  /** Why the last round handed nothing out although the view is valid (④⑦). */
+  skipped: string | null;
 }
 
 export function watchViewStatus(projectCwd: string, view: ViewDefinition): WatchViewStatus | null {
   const state = states.get(watchViewKey(projectCwd, view));
-  return state ? { disabled: state.disabled, inFlight: state.inFlight } : null;
+  return state ? { disabled: state.disabled, inFlight: state.inFlight, skipped: state.skipped } : null;
 }
 
 export function startWatchPump(options: WatchPumpOptions = {}): () => void {
@@ -119,7 +123,7 @@ async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
     if (!watch.enabled) continue;
 
     const key = watchViewKey(projectCwd, view);
-    const state = states.get(key) ?? { lastRunAt: 0, inFlight: false, disabled: null, validatedAt: 0 };
+    const state = states.get(key) ?? { lastRunAt: 0, inFlight: false, disabled: null, skipped: null, validatedAt: 0 };
     states.set(key, state);
     if (state.inFlight) continue;
     // A view whose interval equals the tick period would otherwise be skipped
@@ -141,6 +145,7 @@ async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
         deps,
         registry,
       );
+      state.skipped = skipReasonOf(outcome);
       if (outcome.status === "error") {
         deps.log({ type: "error", view: view.title, message: outcome.error });
       }
@@ -148,6 +153,18 @@ async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
       state.inFlight = false;
     }
   }
+}
+
+function skipReasonOf(outcome: PumpOutcome): string | null {
+  if (outcome.status === "skipped") return describeGate(outcome.gate);
+  if (outcome.status === "busy") {
+    return outcome.reason === "project"
+      ? describeGate({ reason: "session" })
+      : `已达全局并发上限（${MAX_CONCURRENT_WATCH_RUNS} 个）`;
+  }
+  // dispatched / idle / error: no gate kept this round, so nothing to explain
+  // (an error already has its own line in the panel).
+  return null;
 }
 
 /**
@@ -174,10 +191,10 @@ export async function validate(
   }
 
   const sliced = sliceDql(view.dql, watch.claim.from, watch.claim.to);
-  if (!sliced.ok) return sliced.error;
+  if (!sliced.ok) return `${sliced.error}（视图 "${view.title}"）`;
 
   if (watch.claim.manual === watch.claim.from) {
-    return `watch.claim.manual 不能等于 from（${watch.claim.from}），否则待人工会被立刻重新派发`;
+    return `watch.claim.manual 不能等于 from（${watch.claim.from}），否则待人工会被立刻重新派发（视图 "${view.title}"）`;
   }
 
   const type = extractType(view.dql);

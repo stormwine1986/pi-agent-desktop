@@ -5,6 +5,8 @@ import {
   renderPrompt,
   sliceDql,
   type WatchDeps,
+  type WatchGate,
+  type WatchResult,
   type WatchRow,
   type WatchTarget,
 } from "./core";
@@ -57,8 +59,35 @@ export interface PumpInput {
 export type PumpOutcome =
   | { status: "dispatched"; key: string; sessionId: string }
   | { status: "idle" }
+  /** A gate from SSR-000089 ④⑦ closed the whole view for this round. */
+  | { status: "skipped"; gate: WatchGate }
   | { status: "busy"; reason: "project" | "global" }
   | { status: "error"; error: string };
+
+/**
+ * The two dispatch gates, in the order they are shown:
+ *
+ * 1. A running session in the target project — read from the app's session
+ *    registry, so a resumed human conversation closes the gate as well.
+ * 2. One entity still parked in `claim.manual` — the same state-substitution
+ *    slice the claim uses, so no extra ledger or DQL field is introduced.
+ *
+ * Both are read-only checks; they decide *when* to dispatch, never *what* the
+ * queue is. A closed gate leaves the pending set untouched, so nothing is lost.
+ */
+export async function dispatchGate(
+  input: PumpInput,
+  deps: WatchDeps,
+): Promise<WatchResult<WatchGate | null>> {
+  const { view, watch, target } = input;
+  if (await deps.projectBusy(watch.project)) return { ok: true, value: { reason: "session" } };
+
+  const sliced = sliceDql(view.dql, watch.claim.from, watch.claim.manual);
+  if (!sliced.ok) return { ok: false, error: sliced.error };
+  const parked = await deps.count(target, sliced.value);
+  if (!parked.ok) return { ok: false, error: parked.error };
+  return { ok: true, value: parked.value > 0 ? { reason: "manual", count: parked.value } : null };
+}
 
 /**
  * One pass for one view: hand claimed-but-stale items to the manual state, then
@@ -86,6 +115,21 @@ export async function pumpView(
   await expireClaimed(input, claimed.value, deps);
 
   if (registry.get(watch.project)) return { status: "busy", reason: "project" };
+
+  // Gate before any read of the pending set: a closed round must not even look
+  // at candidates, so a row that arrived meanwhile is still there next round.
+  const gate = await dispatchGate(input, deps);
+  if (!gate.ok) return { status: "error", error: gate.error };
+  if (gate.value) {
+    deps.log({
+      type: "skipped",
+      view: view.title,
+      reason: gate.value.reason,
+      ...(gate.value.reason === "manual" ? { count: gate.value.count } : {}),
+    });
+    return { status: "skipped", gate: gate.value };
+  }
+
   if (registry.size >= MAX_CONCURRENT_WATCH_RUNS) return { status: "busy", reason: "global" };
 
   const pending = await deps.list(target, view.dql, {
