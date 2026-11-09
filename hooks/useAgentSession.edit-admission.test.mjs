@@ -3,7 +3,10 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
 
-const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+// A CRLF checkout has no "\n\n": normalize before slicing, or the marker and the
+// blank-line end offset disagree on Windows and this guard silently stops testing
+// anything (the callback itself is unchanged by line endings).
+const source = (await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8")).replace(/\r\n/g, "\n");
 const start = source.indexOf("  const handleEditContent = useCallback(");
 const end = source.indexOf("\n\n", start);
 assert.ok(start >= 0 && end > start);

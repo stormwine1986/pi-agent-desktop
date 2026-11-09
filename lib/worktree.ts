@@ -68,7 +68,12 @@ async function git(cwd: string, args: string[], timeoutMs = 10_000): Promise<str
 
 function realPathOrSelf(filePath: string): string {
   try {
-    return realpathSync(filePath);
+    // `.native` on purpose: git reports worktrees by the long form of a path, and a
+    // plain realpathSync keeps whatever 8.3 spelling the caller was handed
+    // (`C:\Users\STORMW~1\...`). Comparing the two then says "not a worktree of
+    // this repository" about the very worktree git just listed. POSIX behaviour is
+    // identical either way.
+    return realpathSync.native(filePath);
   } catch {
     return filePath;
   }

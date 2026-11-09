@@ -31,8 +31,11 @@ function call(handler, method, body) {
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 async function tempRepo(t) {
-  // realpath: macOS tmpdir is a symlink and git reports real paths.
-  const parent = realpathSync(await mkdtemp(path.join(os.tmpdir(), "pi-web-worktrees-route-")));
+  // realpath: macOS tmpdir is a symlink and git reports real paths. `.native`
+  // because a Windows TEMP handed out as `C:\Users\STORMW~1\...` makes plain
+  // realpathSync keep the 8.3 spelling while git and lib/worktree.ts report the
+  // long one — every comparison below would then miss by the spelling alone.
+  const parent = realpathSync.native(await mkdtemp(path.join(os.tmpdir(), "pi-web-worktrees-route-")));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const repo = path.join(parent, "repo");
   execFileSync("git", ["init", "-q", "-b", "main", repo]);
