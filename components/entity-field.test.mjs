@@ -23,7 +23,15 @@ const {
   fieldControlOf,
   fieldDescriptorsOf,
   FIELD_CONTROLS,
+  // `SSR-000093` FM-USER: a `user` field is a member reference, not free text.
+  MemberDirectoryProvider,
+  TableEditor,
+  TableValue,
+  UserValue,
+  isUserProperty,
+  userDraftValue,
 } = await jiti.import("./entity-field.tsx");
+const { normalizeMembers } = await jiti.import("./../lib/entity-members.ts");
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 
@@ -206,4 +214,140 @@ test("a metadata entry with no name is skipped, never shown unlabelled", () => {
   assert.deepEqual(descriptors.map((field) => field.name), ["ok"]);
   assert.deepEqual(fieldDescriptorsOf(undefined), []);
   assert.deepEqual(fieldDescriptorsOf("nope"), []);
+});
+
+// ── FM-USER (`SSR-000093`) ──────────────────────────────────────────────────
+// The candidate list is the base's `list_workspace_members`; the value is the
+// username; the reader sees the display name. Neither direction may be skipped.
+
+const members = normalizeMembers([
+  { username: "evan", displayName: "Evan Li", email: "evan@entity.com", roleName: "RD" },
+  { username: "alice", email: "alice@entity.com", roleName: "RD" },
+  { username: "jiapei", displayName: "贾培", email: "jiapei@entity.com", roleName: "ADMIN" },
+]);
+
+const directoryOf = (status, list = members) => ({ status, members: list });
+
+/** Render a control the way a panel does: under the workspace's member list. */
+const withDirectory = (directory, element) => renderToStaticMarkup(
+  React.createElement(MemberDirectoryProvider, { directory }, element),
+);
+
+const ownerProperty = { name: "owner", label: "负责人", type: "user", multiple: false };
+
+test("a user field is a member picker, not a text box", () => {
+  assert.equal(isUserProperty(ownerProperty), true);
+  const html = withDirectory(
+    directoryOf("ready"),
+    React.createElement(FieldControl, { property: ownerProperty, value: "evan", onChange() {} }),
+  );
+  assert.match(html, /class="app-select-trigger"/, "the shared app menu picker");
+  assert.doesNotMatch(html, /<input[^>]*type="text"/, "not the degraded text box");
+  // The value is the username; the visible label of the selected member is the
+  // display name (SSR-000093 ② ⑤).
+  assert.match(html, />Evan Li</);
+  assert.doesNotMatch(html, />evan</, "the username is not what is shown");
+});
+
+test("a member without a display name falls back to the username", () => {
+  const html = withDirectory(
+    directoryOf("ready"),
+    React.createElement(FieldControl, { property: ownerProperty, value: "alice", onChange() {} }),
+  );
+  assert.match(html, />alice</);
+});
+
+test("a username the list does not know stays selected and is marked", () => {
+  const html = withDirectory(
+    directoryOf("ready"),
+    React.createElement(FieldControl, { property: ownerProperty, value: "ghost", onChange() {} }),
+  );
+  // Not hidden, not cleared: the raw value is the trigger text, called out.
+  assert.match(html, /ghost（未知成员）/);
+});
+
+test("an unreadable member list degrades to text and says so", () => {
+  const html = withDirectory(
+    directoryOf("unavailable"),
+    React.createElement(FieldControl, { property: ownerProperty, value: "evan", onChange() {} }),
+  );
+  assert.match(html, /<input[^>]*type="text"/);
+  // FM-RENDER AC-2 does not apply: `user` is a known type, so the form still renders.
+  assert.doesNotMatch(html, /不认识的字段类型/);
+  assert.match(html, /未能读取成员清单/);
+  // No empty dropdown pretending nobody is a member (SSR-000093 AC-2).
+  assert.doesNotMatch(html, /app-select-trigger/);
+});
+
+test("read-only values show the person, keep the username, and keep unknowns", () => {
+  const known = renderToStaticMarkup(
+    React.createElement(
+      MemberDirectoryProvider,
+      { directory: directoryOf("ready") },
+      React.createElement(UserValue, { value: ["evan", "ghost"] }),
+    ),
+  );
+  assert.match(known, />Evan Li</);
+  assert.match(known, /title="evan"/, "hovering gives the username");
+  assert.match(known, /未知成员/, "an unknown username is marked");
+  assert.match(known, />ghost</, "and its value is still visible");
+  assert.doesNotMatch(known, /ghost（未知成员）/, "the read-only form keeps the raw value separate");
+});
+
+test("the wire keeps usernames, never the display text", () => {
+  const single = { name: "owner", type: "user", multiple: false };
+  const many = { name: "watchers", type: "user", multiple: true };
+  assert.equal(userDraftValue(single, "evan"), "evan");
+  assert.deepEqual(userDraftValue(many, ["evan", "evan", "ghost"]), ["evan", "ghost"]);
+  // A single-value field holding an array is not collapsed into one username.
+  assert.deepEqual(userDraftValue(single, ["evan", "ghost"]), ["evan", "ghost"]);
+  assert.equal(userDraftValue(single, null), "");
+});
+
+const stepsWithOwner = {
+  name: "steps",
+  label: "测试步骤",
+  type: "table",
+  columns: [
+    { name: "step", type: "text" },
+    { name: "tester", type: "user" },
+    { name: "reviewers", type: "user", multiple: true },
+  ],
+};
+
+test("a user column in a table uses the same control and the same source", () => {
+  const html = withDirectory(
+    directoryOf("ready"),
+    React.createElement(TableEditor, {
+      property: stepsWithOwner,
+      rows: [{ step: "登录", tester: "evan", reviewers: ["alice"] }],
+      onChange() {},
+    }),
+  );
+  // Two member columns, two pickers — the declared `text` column keeps its input.
+  assert.equal((html.match(/class="app-select-trigger"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /<input[^>]*value="evan"/, "the tester cell is not a text box");
+  assert.match(html, />Evan Li</);
+});
+
+test("a user cell goes back as the reference it holds", () => {
+  const wire = serializeTableRows(stepsWithOwner, [
+    { step: "登录", tester: "evan", reviewers: ["alice", "ghost"] },
+  ]);
+  assert.deepEqual(wire, [{ step: "登录", tester: "evan", reviewers: ["alice", "ghost"] }]);
+});
+
+test("a user column reads back by name, not by username", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      MemberDirectoryProvider,
+      { directory: directoryOf("ready") },
+      React.createElement(TableValue, {
+        property: stepsWithOwner,
+        value: [{ step: "登录", tester: "evan", reviewers: ["ghost"] }],
+      }),
+    ),
+  );
+  assert.match(html, />Evan Li</);
+  assert.match(html, /未知成员/);
 });

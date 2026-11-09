@@ -7,6 +7,8 @@ import { isImeComposing } from "@/lib/ime";
 export interface AppSelectOption {
   value: string;
   label: string;
+  /** A second line in the menu only: the trigger keeps the label. */
+  description?: string;
   disabled?: boolean;
 }
 
@@ -52,7 +54,14 @@ export function AppSelect({ value, onValueChange, options, name, placeholder, cl
           <Select.Viewport className="app-select-viewport">
             {options.map((option) => (
               <Select.Item key={option.value} value={encode(option.value)} disabled={option.disabled} textValue={option.label} className="app-select-option">
-                <Select.ItemText>{option.label}</Select.ItemText>
+                <Select.ItemText>
+                  {option.description ? (
+                    <span className="app-menu-copy">
+                      {option.label}
+                      <small>{option.description}</small>
+                    </span>
+                  ) : option.label}
+                </Select.ItemText>
               </Select.Item>
             ))}
           </Select.Viewport>

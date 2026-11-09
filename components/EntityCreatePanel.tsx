@@ -11,9 +11,11 @@ import {
   isTableDraft,
   isTableProperty,
   line,
+  MemberDirectoryProvider,
   muted,
   propertyLabel,
   propertyName,
+  propertyNeedsMembers,
   propertyType,
   serializeTableRows,
   surface,
@@ -22,6 +24,8 @@ import {
   type FieldProperty,
 } from "./entity-field";
 import { newKey, submissionKey, type SubmissionKey } from "@/lib/idempotency";
+import { userValues } from "@/lib/entity-members";
+import { useMemberDirectory } from "@/hooks/useMemberDirectory";
 import { AppSelect } from "./AppSelect";
 
 interface CreatableType {
@@ -67,6 +71,13 @@ export function EntityCreatePanel({ target, onCreated }: {
   // A create has no revision to lose a race on, so a retry after a lost response
   // is the one place a duplicate entity can appear. Same content, same key.
   const submission = useRef<SubmissionKey | null>(null);
+
+  // The candidate list for `user` fields (`SSR-000093` ②): a create form picks
+  // from the same members the base will validate against.
+  const needsMembers = (metadata?.properties ?? []).some((property) => propertyNeedsMembers(property));
+  const directory = useMemberDirectory(
+    needsMembers ? { cwd: target.cwd, server: target.server, workspace: target.workspace } : null,
+  );
 
   const base = useMemo(() => new URLSearchParams({
     cwd: target.cwd,
@@ -152,6 +163,14 @@ export function EntityCreatePanel({ target, onCreated }: {
           fields[name] = serializeTableRows(property, rows);
           continue;
         }
+        if (Array.isArray(raw)) {
+          // A multi-value `user` field: usernames go back as an array, and an
+          // empty list is simply not sent — there is nothing to create.
+          const values = userValues(raw);
+          if (values.length === 0) continue;
+          fields[name] = values;
+          continue;
+        }
         if (typeof raw !== "string" || raw === "") continue;
         fields[name] = property && propertyType(property) === "number" ? Number(raw) : raw;
       }
@@ -191,6 +210,7 @@ export function EntityCreatePanel({ target, onCreated }: {
   const emptyTypes = types !== null && types.length === 0;
 
   return (
+    <MemberDirectoryProvider directory={directory}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minWidth: 0 }}>
       <div
         style={{
@@ -285,7 +305,7 @@ export function EntityCreatePanel({ target, onCreated }: {
               ) : (
                 <FieldControl
                   property={property}
-                  value={typeof draft[name] === "string" ? draft[name] : ""}
+                  value={draft[name]}
                   onChange={(next) => setDraft((current) => ({ ...current, [name]: next }))}
                 />
               )}
@@ -308,5 +328,6 @@ export function EntityCreatePanel({ target, onCreated }: {
         <div style={{ marginTop: 2 }}>创建之后的字段与状态，都在这个面板里改，不需要回到会话。</div>
       </div>
     </div>
+    </MemberDirectoryProvider>
   );
 }

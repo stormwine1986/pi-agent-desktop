@@ -19,20 +19,28 @@ import {
   inputStyle,
   isTableDraft,
   isTableProperty,
+  isUserProperty,
   line,
+  MemberDirectoryProvider,
   muted,
   propertyLabel,
   propertyName,
+  propertyNeedsMembers,
   propertyType,
   serializeTableRows,
   surface,
   TableEditor,
   tableDraftRows,
   TableValue,
+  UserValue,
+  userDraftValue,
   type DraftMap,
   type FieldDraft,
+  type FieldDraftValue,
   type FieldProperty,
 } from "./entity-field";
+import { useMemberDirectory } from "@/hooks/useMemberDirectory";
+import { userValues } from "@/lib/entity-members";
 
 /** The shape `GET /api/entity` answers (kept in step with `app/api/entity/route.ts`). */
 interface RelationRow {
@@ -114,6 +122,12 @@ function draftOf(data: EntityResponse): DraftMap {
       draft[name] = tableDraftRows(property, value);
       continue;
     }
+    if (isUserProperty(property)) {
+      // A member reference keeps its shape: a username, or usernames for a
+      // multi-value field — never the display text (`SSR-000093` ⑤).
+      draft[name] = userDraftValue(property, value);
+      continue;
+    }
     draft[name] = value === undefined || value === null ? "" : formatValue(value);
   }
   return draft;
@@ -141,6 +155,14 @@ function changedFields(data: EntityResponse, draft: DraftMap): Record<string, un
       if (sameDraft(rows, beforeRows)) continue;
       // Rows, not text: the base takes an array of objects here.
       changed[name] = serializeTableRows(property, rows);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      // A multi-value `user` field: the usernames go back as the array the model
+      // declares, and only when the set actually changed.
+      const next = userValues(value);
+      if (sameDraft(next, userValues(data.fields[name]))) continue;
+      changed[name] = next;
       continue;
     }
     const text = typeof value === "string" ? value : "";
@@ -197,7 +219,7 @@ export function EntityPanel({ target, onOpenEntity }: {
   };
   // The transition being prepared, and the values its destination requires.
   const [pendingRoute, setPendingRoute] = useState<AvailableRoute | null>(null);
-  const [routeDraft, setRouteDraft] = useState<Record<string, string>>({});
+  const [routeDraft, setRouteDraft] = useState<Record<string, FieldDraftValue>>({});
   const [routeError, setRouteError] = useState<string | null>(null);
   // One hop of traceability: what this entity depends on, and what depends on it.
   const [traces, setTraces] = useState<{ upstream: RelationRow[]; downstream: RelationRow[] } | null>(null);
@@ -285,6 +307,19 @@ export function EntityPanel({ target, onOpenEntity }: {
   }, [data, target.cwd]);
 
   const writable = useMemo(() => new Set(data?.writableFields ?? []), [data]);
+
+  /**
+   * The candidate list for `user` fields (`SSR-000093` ②). Read once the entity
+   * names its workspace — a channel-less link only learns it on first read —
+   * and shared by every user field on the form.
+   */
+  const needsMembers = useMemo(
+    () => (data?.properties ?? []).some((property) => propertyNeedsMembers(property as FieldProperty)),
+    [data],
+  );
+  const directory = useMemberDirectory(
+    data && needsMembers ? { cwd: target.cwd, server: data.server, workspace: data.workspace } : null,
+  );
 
   /**
    * One list per relation, keyed by direction and link type.
@@ -420,7 +455,8 @@ export function EntityPanel({ target, onOpenEntity }: {
     if (!data) return [];
     return route.required.filter((name) => {
       const value = data.fields[name];
-      return value === undefined || value === null || value === "";
+      return value === undefined || value === null || value === ""
+        || (Array.isArray(value) && value.length === 0);
     });
   };
 
@@ -659,13 +695,15 @@ export function EntityPanel({ target, onOpenEntity }: {
   const unfilled = visible.filter((field) => data.fields[field.name] === undefined);
   const canEdit = data.writableFields.length > 0;
   const relationCount = (traces?.upstream.length ?? 0) + (traces?.downstream.length ?? 0);
-  /** Numbers leave the form as numbers; the base rejects the rest. */
-  const coerce = (name: string, raw: string): unknown => {
+  /** Numbers leave the form as numbers; a username list leaves as itself. */
+  const coerce = (name: string, raw: FieldDraftValue): unknown => {
+    if (Array.isArray(raw)) return userValues(raw);
     const type = fields.find((field) => field.name === name)?.type ?? "";
     return type === "number" && raw.trim() !== "" ? Number(raw) : raw;
   };
 
   return (
+    <MemberDirectoryProvider directory={directory}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minWidth: 0 }}>
       {/* Two rows: the key and the actions need to stay intact in a narrow
           panel, and a single row squeezed the name, the meta and the buttons
@@ -854,7 +892,8 @@ export function EntityPanel({ target, onOpenEntity }: {
           const property = field.property;
           const name = field.name;
           const value = data.fields[name];
-          const empty = value === undefined || value === "";
+          const empty = value === undefined || value === ""
+            || (Array.isArray(value) && value.length === 0);
           const description = typeof property.description === "string" ? property.description : "";
           const editable = editing && writable.has(name);
 
@@ -883,7 +922,11 @@ export function EntityPanel({ target, onOpenEntity }: {
                     ? "—"
                     : isTableProperty(property)
                       ? <TableValue property={property} value={value} />
-                      : formatValue(value)
+                      : isUserProperty(property)
+                        // A member reads as a person, not as a username the
+                        // reader has to recognise (`SSR-000093` ③).
+                        ? <UserValue value={value} />
+                        : formatValue(value)
                 ) : isTableProperty(property) ? (
                   <TableEditor
                     property={property}
@@ -893,7 +936,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                 ) : (
                   <FieldControl
                     property={property}
-                    value={typeof draft[name] === "string" ? draft[name] : ""}
+                    value={draft[name]}
                     onChange={(next) => setDraft((current) => ({ ...current, [name]: next }))}
                   />
                 )}
@@ -951,12 +994,24 @@ export function EntityPanel({ target, onOpenEntity }: {
                   : [];
                 const type = propertyType(property ?? {});
                 const label = propertyLabel(property ?? { name });
+                // A required `user` field must be picked from the same candidate
+                // list as everywhere else — a transition is not a "blind username"
+                // back door (`SSR-000093` AC-7).
+                const isUser = property ? isUserProperty(property) : false;
+                const routeDraftValue = routeDraft[name];
+                const routeText = typeof routeDraftValue === "string" ? routeDraftValue : "";
                 return (
                   <label key={name} style={{ display: "block", marginBottom: 6, fontSize: "var(--fs-caption)" }}>
                     <span style={{ display: "block", color: muted, marginBottom: 2 }}>{label}</span>
-                    {values.length > 0 ? (
-                      <AppSelect
+                    {isUser && property ? (
+                      <FieldControl
+                        property={property}
                         value={routeDraft[name] ?? ""}
+                        onChange={(next) => setRouteDraft((current) => ({ ...current, [name]: next }))}
+                      />
+                    ) : values.length > 0 ? (
+                      <AppSelect
+                        value={routeText}
                         onValueChange={(next) => setRouteDraft((current) => ({ ...current, [name]: next }))}
                         aria-label={label}
                         options={[{ value: "", label: "（未填）" }, ...values.map((option) => ({ value: option, label: option }))]}
@@ -964,7 +1019,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                     ) : (
                       <input
                         type={type === "number" ? "number" : type === "date" ? "date" : "text"}
-                        value={routeDraft[name] ?? ""}
+                        value={routeText}
                         onChange={(event) => setRouteDraft((current) => ({ ...current, [name]: event.target.value }))}
                         style={inputStyle}
                       />
@@ -1341,5 +1396,6 @@ export function EntityPanel({ target, onOpenEntity }: {
         </div>
       )}
     </div>
+    </MemberDirectoryProvider>
   );
 }
