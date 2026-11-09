@@ -8,7 +8,6 @@ import {
   FieldControl,
   fieldControlOf,
   fieldDescriptorsOf,
-  inputStyle,
   isTableDraft,
   isTableProperty,
   line,
@@ -23,6 +22,7 @@ import {
   type FieldProperty,
 } from "./entity-field";
 import { newKey, submissionKey, type SubmissionKey } from "@/lib/idempotency";
+import { AppSelect } from "./AppSelect";
 
 interface CreatableType {
   type: string;
@@ -201,8 +201,8 @@ export function EntityCreatePanel({ target, onCreated }: {
           flexShrink: 0,
         }}
       >
-        <strong style={{ fontSize: 13, whiteSpace: "nowrap" }}>新建实体</strong>
-        <span style={{ fontSize: 11, color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <strong style={{ fontSize: "var(--fs-body)", whiteSpace: "nowrap" }}>新建实体</strong>
+        <span style={{ fontSize: "var(--fs-micro)", color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {target.workspace}
         </span>
         <button
@@ -216,20 +216,18 @@ export function EntityCreatePanel({ target, onCreated }: {
       </div>
 
       <div style={{ padding: "0 10px 8px", borderBottom: `1px solid ${line}`, flexShrink: 0 }}>
-        <label style={{ display: "block", fontSize: 11, color: muted, marginBottom: 2 }}>类型</label>
-        <select
+        <label style={{ display: "block", fontSize: "var(--fs-micro)", color: muted, marginBottom: 2 }}>类型</label>
+        <AppSelect
           value={type}
-          onChange={(event) => setType(event.target.value)}
+          onValueChange={setType}
           disabled={loading || emptyTypes}
-          style={inputStyle}
-        >
-          <option value="">{emptyTypes ? "这个空间没有可创建的类型" : "选择类型…"}</option>
-          {(types ?? []).map((item) => (
-            <option key={item.type} value={item.type}>
-              {item.type}{item.initialState ? `（初始 ${item.initialState}）` : ""}
-            </option>
-          ))}
-        </select>
+          aria-label="类型"
+          placeholder={emptyTypes ? "这个空间没有可创建的类型" : "选择类型…"}
+          options={(types ?? []).map((item) => ({
+            value: item.type,
+            label: item.initialState ? `${item.type}（初始 ${item.initialState}）` : item.type,
+          }))}
+        />
       </div>
 
       {error && (
@@ -242,7 +240,7 @@ export function EntityCreatePanel({ target, onCreated }: {
             borderRadius: 6,
             background: "rgba(229,72,77,0.08)",
             color: danger,
-            fontSize: 12,
+            fontSize: "var(--fs-caption)",
             lineHeight: 1.5,
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
@@ -254,7 +252,7 @@ export function EntityCreatePanel({ target, onCreated }: {
 
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 10px 12px" }}>
         {!type && !loading && !emptyTypes && (
-          <div style={{ fontSize: 12, color: muted, padding: "4px 0" }}>先选一个类型，再填字段。</div>
+          <div style={{ fontSize: "var(--fs-caption)", color: muted, padding: "4px 0" }}>先选一个类型，再填字段。</div>
         )}
         {fields.map((field) => {
           const property = field.property;
@@ -270,7 +268,7 @@ export function EntityCreatePanel({ target, onCreated }: {
                 gap: 8,
                 padding: "6px 0",
                 borderBottom: `1px solid ${line}`,
-                fontSize: 12,
+                fontSize: "var(--fs-caption)",
                 alignItems: "start",
               }}
             >
@@ -301,7 +299,7 @@ export function EntityCreatePanel({ target, onCreated }: {
           flexShrink: 0,
           padding: "6px 10px",
           borderTop: `1px solid ${line}`,
-          fontSize: 11,
+          fontSize: "var(--fs-micro)",
           color: muted,
           background: surface,
         }}

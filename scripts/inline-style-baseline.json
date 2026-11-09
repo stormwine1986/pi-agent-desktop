@@ -80,11 +80,6 @@
       "fontSize": 0,
       "fontWeight": 0,
       "hexColor": 1
-    },
-    "components/UpdateReminder.tsx": {
-      "fontSize": 2,
-      "fontWeight": 0,
-      "hexColor": 0
     }
   }
 }

@@ -604,12 +604,12 @@ export function EntityPanel({ target, onOpenEntity }: {
   };
 
   if (loading && !data) {
-    return <div style={{ padding: 12, fontSize: 12, color: muted }}>正在读取 {target.key}…</div>;
+    return <div style={{ padding: 12, fontSize: "var(--fs-caption)", color: muted }}>正在读取 {target.key}…</div>;
   }
 
   if (error) {
     return (
-      <div style={{ padding: 12, fontSize: 12, color: danger }}>
+      <div style={{ padding: 12, fontSize: "var(--fs-caption)", color: danger }}>
         <div>{target.key}：{error}</div>
         {(errorCode === "metadata" || errorCode === "entity") && (
           <div style={{ marginTop: 6, color: muted }}>
@@ -656,7 +656,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           flexShrink: 0,
         }}
       >
-        <strong style={{ fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>{data.key}</strong>
+        <strong style={{ fontSize: "var(--fs-body)", whiteSpace: "nowrap", flexShrink: 0 }}>{data.key}</strong>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6, flexShrink: 0 }}>
           {!editing && canEdit && (
             <button type="button" onClick={startEditing} style={buttonStyle} title={`编辑 ${data.key}`}>
@@ -697,7 +697,7 @@ export function EntityPanel({ target, onOpenEntity }: {
         <span
           title={data.name}
           style={{
-            fontSize: 12,
+            fontSize: "var(--fs-caption)",
             minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -710,7 +710,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           style={{
             marginLeft: "auto",
             flexShrink: 0,
-            fontSize: 11,
+            fontSize: "var(--fs-micro)",
             color: muted,
             whiteSpace: "nowrap",
           }}
@@ -729,7 +729,7 @@ export function EntityPanel({ target, onOpenEntity }: {
             borderRadius: 6,
             background: "rgba(229,72,77,0.08)",
             color: danger,
-            fontSize: 12,
+            fontSize: "var(--fs-caption)",
             lineHeight: 1.5,
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
@@ -785,8 +785,8 @@ export function EntityPanel({ target, onOpenEntity }: {
               background: "none",
               color: tab === id ? "inherit" : muted,
               font: "inherit",
-              fontSize: 12,
-              fontWeight: tab === id ? 600 : 400,
+              fontSize: "var(--fs-caption)",
+              fontWeight: tab === id ? "var(--fw-semibold)" : "var(--fw-regular)",
               padding: "6px 10px 5px",
               cursor: "pointer",
             }}
@@ -816,14 +816,14 @@ export function EntityPanel({ target, onOpenEntity }: {
                 gap: 8,
                 padding: "6px 0",
                 borderBottom: `1px solid ${line}`,
-                fontSize: 12,
+                fontSize: "var(--fs-caption)",
                 alignItems: "start",
               }}
             >
               <div style={{ color: muted }} title={description || undefined}>
                 {propertyLabel(property)}
                 {editing && !writable.has(name) && (
-                  <span style={{ display: "block", fontSize: 11, color: muted }}>只读</span>
+                  <span style={{ display: "block", fontSize: "var(--fs-micro)", color: muted }}>只读</span>
                 )}
               </div>
               <div style={{ minWidth: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", color: empty ? muted : undefined }}>
@@ -864,7 +864,7 @@ export function EntityPanel({ target, onOpenEntity }: {
             background: surface,
           }}
         >
-          <div style={{ fontSize: 11, color: muted, marginBottom: 6 }}>
+          <div style={{ fontSize: "var(--fs-micro)", color: muted, marginBottom: 6 }}>
             {pendingRoute ? `${pendingRoute.name} → ${pendingRoute.to}：先补齐必填` : `改状态（当前 ${data.state}）`}
           </div>
 
@@ -899,20 +899,17 @@ export function EntityPanel({ target, onOpenEntity }: {
                   ? property.validValues.filter((item): item is string => typeof item === "string")
                   : [];
                 const type = propertyType(property ?? {});
+                const label = propertyLabel(property ?? { name });
                 return (
-                  <label key={name} style={{ display: "block", marginBottom: 6, fontSize: 12 }}>
-                    <span style={{ display: "block", color: muted, marginBottom: 2 }}>{propertyLabel(property ?? { name })}</span>
+                  <label key={name} style={{ display: "block", marginBottom: 6, fontSize: "var(--fs-caption)" }}>
+                    <span style={{ display: "block", color: muted, marginBottom: 2 }}>{label}</span>
                     {values.length > 0 ? (
-                      <select
+                      <AppSelect
                         value={routeDraft[name] ?? ""}
-                        onChange={(event) => setRouteDraft((current) => ({ ...current, [name]: event.target.value }))}
-                        style={inputStyle}
-                      >
-                        <option value="">（未填）</option>
-                        {values.map((option) => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
+                        onValueChange={(next) => setRouteDraft((current) => ({ ...current, [name]: next }))}
+                        aria-label={label}
+                        options={[{ value: "", label: "（未填）" }, ...values.map((option) => ({ value: option, label: option }))]}
+                      />
                     ) : (
                       <input
                         type={type === "number" ? "number" : type === "date" ? "date" : "text"}
@@ -926,7 +923,7 @@ export function EntityPanel({ target, onOpenEntity }: {
               })}
 
               {routeError && (
-                <div role="alert" style={{ color: danger, fontSize: 12, marginTop: 6, whiteSpace: "pre-wrap" }}>
+                <div role="alert" style={{ color: danger, fontSize: "var(--fs-caption)", marginTop: 6, whiteSpace: "pre-wrap" }}>
                   {routeError}
                 </div>
               )}
@@ -966,7 +963,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           {!pendingRoute && routeError && (
             <div
               role="alert"
-              style={{ color: danger, fontSize: 12, marginTop: 6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+              style={{ color: danger, fontSize: "var(--fs-caption)", marginTop: 6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
             >
               {routeError}
             </div>
@@ -979,7 +976,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           flexShrink: 0,
           padding: "6px 10px",
           borderTop: `1px solid ${line}`,
-          fontSize: 11,
+          fontSize: "var(--fs-micro)",
           color: muted,
           background: surface,
         }}
@@ -1012,7 +1009,7 @@ export function EntityPanel({ target, onOpenEntity }: {
             >
               {linkOpen ? "收起挂链" : "＋ 挂链"}
             </button>
-            <span style={{ marginLeft: "auto", fontSize: 11, color: muted }}>只挂上游</span>
+            <span style={{ marginLeft: "auto", fontSize: "var(--fs-micro)", color: muted }}>只挂上游</span>
           </div>
 
           {linkOpen && (
@@ -1027,7 +1024,7 @@ export function EntityPanel({ target, onOpenEntity }: {
               }}
             >
               <label style={{ display: "block", marginBottom: 6 }}>
-                <span style={{ display: "block", fontSize: 11, color: muted, marginBottom: 2 }}>关系</span>
+                <span style={{ display: "block", fontSize: "var(--fs-micro)", color: muted, marginBottom: 2 }}>关系</span>
                 <AppSelect
                   aria-label="关系"
                   value={selectedLink?.linkType ?? ""}
@@ -1049,10 +1046,10 @@ export function EntityPanel({ target, onOpenEntity }: {
                 />
               </label>
               {selectedLink?.description && (
-                <div style={{ fontSize: 11, color: muted, marginBottom: 6 }}>{selectedLink.description}</div>
+                <div style={{ fontSize: "var(--fs-micro)", color: muted, marginBottom: 6 }}>{selectedLink.description}</div>
               )}
 
-              <span style={{ display: "block", fontSize: 11, color: muted, marginBottom: 2 }}>
+              <span style={{ display: "block", fontSize: "var(--fs-micro)", color: muted, marginBottom: 2 }}>
                 目标 key
                 <span style={{ marginLeft: 6, opacity: 0.8 }}>
                   空格 / 逗号 / 换行分隔，最多 {MAX_LINK_KEYS} 个
@@ -1070,19 +1067,19 @@ export function EntityPanel({ target, onOpenEntity }: {
                 style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }}
               />
               {parsedKeys.overflow > 0 && (
-                <div style={{ fontSize: 11, color: danger, marginTop: 4 }}>
+                <div style={{ fontSize: "var(--fs-micro)", color: danger, marginTop: 4 }}>
                   共 {parsedKeys.total} 个，最多 {MAX_LINK_KEYS} 个，先去掉 {parsedKeys.overflow} 个
                 </div>
               )}
 
-              {checking && <div style={{ fontSize: 11, color: muted, marginTop: 4 }}>校验中…</div>}
+              {checking && <div style={{ fontSize: "var(--fs-micro)", color: muted, marginTop: 4 }}>校验中…</div>}
 
               {checkItems.length > 0 && (
                 <div style={{ marginTop: 4 }}>
                   {checkItems.map((item) => (
                     <div
                       key={`${item.key}:${item.reason ?? "ok"}`}
-                      style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "2px 2px", fontSize: 12 }}
+                      style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "2px 2px", fontSize: "var(--fs-caption)" }}
                     >
                       <span style={{ width: 10, flexShrink: 0, color: item.ok ? accent : danger }}>
                         {item.ok ? "✓" : "×"}
@@ -1103,7 +1100,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                       >
                         {item.ok ? item.name || "（无名称）" : item.detail}
                       </span>
-                      {item.ok && <span style={{ flexShrink: 0, fontSize: 11, color: muted }}>{item.state}</span>}
+                      {item.ok && <span style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: muted }}>{item.state}</span>}
                       <button
                         type="button"
                         onClick={() => removeKey(item.key)}
@@ -1113,7 +1110,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                           background: "none",
                           color: muted,
                           font: "inherit",
-                          fontSize: 11,
+                          fontSize: "var(--fs-micro)",
                           cursor: "pointer",
                           padding: 0,
                         }}
@@ -1130,7 +1127,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                   role="alert"
                   style={{
                     color: danger,
-                    fontSize: 12,
+                    fontSize: "var(--fs-caption)",
                     marginTop: 6,
                     whiteSpace: "pre-wrap",
                     overflowWrap: "anywhere",
@@ -1153,7 +1150,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                   取消
                 </button>
                 {rejected > 0 && (
-                  <span style={{ marginLeft: "auto", fontSize: 11, color: muted }}>
+                  <span style={{ marginLeft: "auto", fontSize: "var(--fs-micro)", color: muted }}>
                     {rejected} 条不可挂，会留在框里
                   </span>
                 )}
@@ -1163,20 +1160,20 @@ export function EntityPanel({ target, onOpenEntity }: {
 
           <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 10px 12px" }}>
             {traceError ? (
-              <div style={{ color: danger, fontSize: 12 }}>关系读取失败：{traceError}</div>
+              <div style={{ color: danger, fontSize: "var(--fs-caption)" }}>关系读取失败：{traceError}</div>
             ) : relationGroups.length === 0 ? (
-              <div style={{ color: muted, fontSize: 12, padding: "4px 0" }}>
+              <div style={{ color: muted, fontSize: "var(--fs-caption)", padding: "4px 0" }}>
                 这条实体还没有建立关联。
               </div>
             ) : (
               relationGroups.map((group) => (
                 <div key={group.id} style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 11, color: muted, margin: "2px 0 3px" }}>
+                  <div style={{ fontSize: "var(--fs-micro)", color: muted, margin: "2px 0 3px" }}>
                     {group.direction === "upstream" ? "上游" : "下游"} · {group.label}
                     {group.targetTypes.length > 0 ? ` → ${group.targetTypes.join(" / ")}` : ""}（{group.rows.length}）
                   </div>
                   {group.rows.length === 0 ? (
-                    <div style={{ fontSize: 11, color: muted, padding: "2px 4px" }}>还没有挂</div>
+                    <div style={{ fontSize: "var(--fs-micro)", color: muted, padding: "2px 4px" }}>还没有挂</div>
                   ) : (
                     group.rows.map((row) => {
                       const id = `${group.direction}:${group.linkType}:${row.key}`;
@@ -1193,7 +1190,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                             }}
                           >
                             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <span style={{ fontSize: 11 }}>断开 {row.key}？</span>
+                              <span style={{ fontSize: "var(--fs-micro)" }}>断开 {row.key}？</span>
                               <button
                                 type="button"
                                 onClick={() => void breakLink(row)}
@@ -1204,7 +1201,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                                   borderColor: danger,
                                   color: danger,
                                   padding: "1px 7px",
-                                  fontSize: 11,
+                                  fontSize: "var(--fs-micro)",
                                   opacity: breaking ? 0.6 : 1,
                                 }}
                               >
@@ -1217,13 +1214,13 @@ export function EntityPanel({ target, onOpenEntity }: {
                                   setBreakError(null);
                                 }}
                                 disabled={breaking}
-                                style={{ ...buttonStyle, padding: "1px 7px", fontSize: 11 }}
+                                style={{ ...buttonStyle, padding: "1px 7px", fontSize: "var(--fs-micro)" }}
                               >
                                 取消
                               </button>
                             </div>
                             {breakError && (
-                              <div style={{ color: danger, fontSize: 11, marginTop: 4, whiteSpace: "pre-wrap" }}>
+                              <div style={{ color: danger, fontSize: "var(--fs-micro)", marginTop: 4, whiteSpace: "pre-wrap" }}>
                                 {breakError}
                               </div>
                             )}
@@ -1251,7 +1248,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                               background: "none",
                               color: "inherit",
                               font: "inherit",
-                              fontSize: 12,
+                              fontSize: "var(--fs-caption)",
                               textAlign: "left",
                               cursor: onOpenEntity ? "pointer" : "default",
                             }}
@@ -1260,7 +1257,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: muted }}>
                               {row.name}
                             </span>
-                            <span style={{ flexShrink: 0, fontSize: 11, color: muted }}>{row.state}</span>
+                            <span style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: muted }}>{row.state}</span>
                           </button>
                           {row.canUnlink ? (
                             <button
@@ -1270,14 +1267,14 @@ export function EntityPanel({ target, onOpenEntity }: {
                                 setBreakTarget(id);
                               }}
                               title={`断开 ${row.key}`}
-                              style={{ ...buttonStyle, padding: "1px 7px", fontSize: 11 }}
+                              style={{ ...buttonStyle, padding: "1px 7px", fontSize: "var(--fs-micro)" }}
                             >
                               断开
                             </button>
                           ) : (
                             <span
                               title="这条链接由下游那一端维护，需要对该类型有写权限"
-                              style={{ flexShrink: 0, fontSize: 11, color: muted, opacity: 0.8 }}
+                              style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: muted, opacity: 0.8 }}
                             >
                               归对方所有
                             </span>

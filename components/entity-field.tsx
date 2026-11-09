@@ -1,5 +1,7 @@
 "use client";
 
+import { AppSelect } from "./AppSelect";
+
 // Field rendering shared by the detail view and the create form, so a new
 // entity is asked for exactly the fields its type declares and in the same
 // controls — one place decides how a `choice` or a long `text` looks.
@@ -7,8 +9,8 @@
 export const muted = "rgba(128,128,128,0.75)";
 export const line = "rgba(128,128,128,0.25)";
 export const surface = "rgba(128,128,128,0.06)";
-export const danger = "#e5484d";
-export const accent = "#3b82f6";
+export const danger = "var(--danger)";
+export const accent = "var(--accent)";
 
 export interface FieldProperty {
   name?: unknown;
@@ -264,7 +266,7 @@ export function TableEditor({ property, rows, onChange, readOnly }: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {rows.length === 0 && (
-        <div style={{ fontSize: 11, color: muted }}>还没有行。</div>
+        <div style={{ fontSize: "var(--fs-micro)", color: muted }}>还没有行。</div>
       )}
       {rows.map((row, index) => (
         <div
@@ -272,7 +274,7 @@ export function TableEditor({ property, rows, onChange, readOnly }: {
           style={{ border: `1px solid ${line}`, borderRadius: 6, padding: "5px 6px" }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
-            <span style={{ fontSize: 11, color: muted, fontVariantNumeric: "tabular-nums", minWidth: 14 }}>
+            <span style={{ fontSize: "var(--fs-micro)", color: muted, fontVariantNumeric: "tabular-nums", minWidth: 14 }}>
               {index + 1}
             </span>
             <span style={{ flex: 1 }} />
@@ -306,7 +308,7 @@ export function TableEditor({ property, rows, onChange, readOnly }: {
             const type = columnType(property, column);
             return (
               <label key={column} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-                <span style={{ fontSize: 11, color: muted, width: 56, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis" }} title={column}>
+                <span style={{ fontSize: "var(--fs-micro)", color: muted, width: 56, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis" }} title={column}>
                   {column}
                 </span>
                 <input
@@ -329,7 +331,7 @@ export function TableEditor({ property, rows, onChange, readOnly }: {
           + 添加一行
         </button>
       ) : (
-        <div style={{ fontSize: 11, color: danger }}>这个表格字段没有声明列，无法编辑。</div>
+        <div style={{ fontSize: "var(--fs-micro)", color: danger }}>这个表格字段没有声明列，无法编辑。</div>
       )}
     </div>
   );
@@ -354,7 +356,7 @@ const miniButton = {
   borderRadius: 4,
   padding: "0 5px",
   font: "inherit",
-  fontSize: 11,
+  fontSize: "var(--fs-micro)",
   lineHeight: "18px",
   cursor: "pointer",
 } as const;
@@ -374,7 +376,7 @@ export function TableValue({ property, value }: { property: FieldProperty; value
       <table
         style={{
           borderCollapse: "collapse",
-          fontSize: 11,
+          fontSize: "var(--fs-micro)",
           lineHeight: 1.45,
           width: "100%",
           tableLayout: "fixed",
@@ -382,7 +384,7 @@ export function TableValue({ property, value }: { property: FieldProperty; value
       >
         <thead>
           <tr>
-            {numbered && <th style={{ ...headCell, width: 22, color: muted, fontWeight: 400 }}>#</th>}
+            {numbered && <th style={{ ...headCell, width: 22, color: muted, fontWeight: "var(--fw-regular)" }}>#</th>}
             {Array.from({ length: width }, (_, index) => (
               <th key={index} style={headCell}>
                 {columns[index] ?? `列${index + 1}`}
@@ -416,7 +418,7 @@ const headCell = {
   verticalAlign: "bottom" as const,
   padding: "3px 5px",
   borderBottom: `1px solid ${line}`,
-  fontWeight: 600,
+  fontWeight: "var(--fw-semibold)",
   whiteSpace: "nowrap" as const,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -438,7 +440,7 @@ export const inputStyle = {
   background: "transparent",
   color: "inherit",
   font: "inherit",
-  fontSize: 12,
+  fontSize: "var(--fs-caption)",
   padding: "5px 7px",
 } as const;
 
@@ -449,7 +451,7 @@ export const buttonStyle = {
   borderRadius: 6,
   padding: "3px 10px",
   font: "inherit",
-  fontSize: 12,
+  fontSize: "var(--fs-caption)",
   cursor: "pointer",
   whiteSpace: "nowrap",
 } as const;
@@ -459,7 +461,7 @@ function InertField({ field, value, reason }: { field: string; value: string; re
   return (
     <div>
       <input value={value} readOnly style={{ ...inputStyle, opacity: 0.75 }} aria-readonly="true" />
-      <div role="alert" style={{ color: danger, fontSize: 11, marginTop: 2, lineHeight: 1.4 }}>
+      <div role="alert" style={{ color: danger, fontSize: "var(--fs-micro)", marginTop: 2, lineHeight: 1.4 }}>
         {reason}（字段 {field || "?"}）：只读，无法编辑，也不会被提交。
       </div>
     </div>
@@ -493,12 +495,12 @@ export function FieldControl({ property, value, onChange }: {
 
   if (kind === "select" && values.length > 0) {
     return (
-      <select value={value} onChange={(event) => onChange(event.target.value)} style={inputStyle}>
-        <option value="">（未填）</option>
-        {values.map((option) => (
-          <option key={option} value={option}>{option}</option>
-        ))}
-      </select>
+      <AppSelect
+        value={value}
+        onValueChange={onChange}
+        aria-label={propertyLabel(property) || propertyName(property)}
+        options={[{ value: "", label: "（未填）" }, ...values.map((option) => ({ value: option, label: option }))]}
+      />
     );
   }
   if (kind === "textarea") {
@@ -520,7 +522,7 @@ export function FieldControl({ property, value, onChange }: {
         onChange={(event) => onChange(event.target.value)}
         rows={6}
         spellCheck={false}
-        style={{ ...inputStyle, resize: "vertical", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}
+        style={{ ...inputStyle, resize: "vertical", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "var(--fs-micro)" }}
       />
     );
   }

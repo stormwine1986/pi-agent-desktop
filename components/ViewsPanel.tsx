@@ -69,9 +69,9 @@ interface ViewsResponse {
 const muted = "rgba(128,128,128,0.75)";
 const line = "rgba(128,128,128,0.25)";
 const surface = "rgba(128,128,128,0.06)";
-const danger = "#e5484d";
+const danger = "var(--danger)";
 /** Amber: something is turned off but nothing failed — a watched view that cannot dispatch. */
-const warning = "#d19a2b";
+const warning = "var(--warning)";
 
 const NAV_WIDTH = 180;
 const POLL_INTERVAL_MS = 60_000;
@@ -84,7 +84,7 @@ const pagerStyle: React.CSSProperties = {
   borderRadius: 4,
   padding: "0 6px",
   lineHeight: "16px",
-  fontSize: 12,
+  fontSize: "var(--fs-caption)",
   cursor: "pointer",
 };
 
@@ -364,12 +364,12 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           width: "100%",
           padding: indented ? "5px 8px 5px 18px" : "5px 8px 5px 6px",
           border: "none",
-          borderLeft: `2px solid ${isActive ? "var(--accent, #5b9dd9)" : "transparent"}`,
+          borderLeft: `2px solid ${isActive ? "var(--accent)" : "transparent"}`,
           background: isActive ? surface : "none",
           color: view.error ? danger : "inherit",
           font: "inherit",
-          fontSize: 12,
-          fontWeight: isActive ? 600 : 400,
+          fontSize: "var(--fs-caption)",
+          fontWeight: isActive ? "var(--fw-semibold)" : "var(--fw-regular)",
           textAlign: "left",
           cursor: "pointer",
         }}
@@ -378,13 +378,13 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           {view.title}
         </span>
         {view.error ? (
-          <span aria-label="配置有误" style={{ flexShrink: 0, fontSize: 10 }}>
+          <span aria-label="配置有误" style={{ flexShrink: 0, fontSize: "var(--fs-micro)" }}>
             ●
           </span>
         ) : fresh > 0 ? (
           <span
             title={`${fresh} 条新条目，点开查看`}
-            style={{ flexShrink: 0, color: "var(--accent, #5b9dd9)", fontVariantNumeric: "tabular-nums" }}
+            style={{ flexShrink: 0, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}
           >
             +{fresh}
           </span>
@@ -399,7 +399,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           <span
             aria-label="watch 未生效"
             title={`watch 未生效：${view.watch.disabled}`}
-            style={{ flexShrink: 0, fontSize: 10, color: warning }}
+            style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: warning }}
           >
             ●
           </span>
@@ -417,7 +417,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           gap: 8,
           padding: "6px 10px",
           borderBottom: `1px solid ${line}`,
-          fontSize: 12,
+          fontSize: "var(--fs-caption)",
           color: muted,
           flexShrink: 0,
         }}
@@ -450,7 +450,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             color: "inherit",
             borderRadius: 4,
             padding: "2px 8px",
-            fontSize: 12,
+            fontSize: "var(--fs-caption)",
             cursor: onCreateEntity && active?.server && active.workspace ? "pointer" : "default",
             opacity: onCreateEntity && active?.server && active.workspace ? 1 : 0.5,
           }}
@@ -467,7 +467,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             color: "inherit",
             borderRadius: 4,
             padding: "2px 8px",
-            fontSize: 12,
+            fontSize: "var(--fs-caption)",
             cursor: loading ? "default" : "pointer",
             opacity: loading ? 0.6 : 1,
           }}
@@ -517,25 +517,25 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
                             background: "none",
                             color: "inherit",
                             font: "inherit",
-                            fontSize: 12,
-                            fontWeight: 600,
+                            fontSize: "var(--fs-caption)",
+                            fontWeight: "var(--fw-semibold)",
                             textAlign: "left",
                             cursor: "pointer",
                           }}
                         >
-                          <span aria-hidden="true" style={{ flexShrink: 0, color: muted, fontSize: 10, width: 8 }}>
+                          <span aria-hidden="true" style={{ flexShrink: 0, color: muted, fontSize: "var(--fs-micro)", width: 8 }}>
                             {folded ? "▸" : "▾"}
                           </span>
                           <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {title}
                           </span>
                           {holdsActive && (
-                            <span aria-label="当前视图在这个组里" style={{ flexShrink: 0, color: "var(--accent, #5b9dd9)", fontSize: 10 }}>
+                            <span aria-label="当前视图在这个组里" style={{ flexShrink: 0, color: "var(--accent)", fontSize: "var(--fs-micro)" }}>
                               ●
                             </span>
                           )}
                           {broken && (
-                            <span aria-label="组内有配置错误的视图" style={{ flexShrink: 0, color: danger, fontSize: 10 }}>
+                            <span aria-label="组内有配置错误的视图" style={{ flexShrink: 0, color: danger, fontSize: "var(--fs-micro)" }}>
                               ●
                             </span>
                           )}
@@ -558,8 +558,8 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
 
           <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "8px 10px 16px" }}>
             {failure && <Notice text={failure} />}
-            <header style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6, fontSize: 12 }}>
-              <strong style={{ fontWeight: 600 }}>{active.title}</strong>
+            <header style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6, fontSize: "var(--fs-caption)" }}>
+              <strong style={{ fontWeight: "var(--fw-semibold)" }}>{active.title}</strong>
               {!active.error && (
                 <span style={{ color: muted }}>
                   {pageLabel(active)}
@@ -582,7 +582,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
               )}
             </header>
             {active.watch?.disabled && (
-              <div style={{ fontSize: 11, color: warning, marginBottom: 6, lineHeight: 1.5 }}>
+              <div style={{ fontSize: "var(--fs-micro)", color: warning, marginBottom: 6, lineHeight: 1.5 }}>
                 watch 未生效：{active.watch.disabled}
               </div>
             )}
@@ -599,7 +599,7 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           )}
           {data?.error && <Notice text={data.error} />}
           {data?.exists && !data.error && (
-            <div style={{ fontSize: 12, color: muted, padding: "4px 2px" }}>这个文件里没有配置任何视图。</div>
+            <div style={{ fontSize: "var(--fs-caption)", color: muted, padding: "4px 2px" }}>这个文件里没有配置任何视图。</div>
           )}
         </div>
       )}
@@ -613,7 +613,7 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
   onOpenEntity?: (ref: { server: string; workspace: string; key: string; name: string }) => void;
 }) {
   if (view.rows.length === 0) {
-    return <div style={{ fontSize: 12, color: muted, padding: "4px 2px" }}>这条查询没有匹配的实体。</div>;
+    return <div style={{ fontSize: "var(--fs-caption)", color: muted, padding: "4px 2px" }}>这条查询没有匹配的实体。</div>;
   }
   // The hand-off needs the entity behind the row, which is only meaningful when
   // the server told us its key and the view names the channel it came from.
@@ -626,7 +626,7 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
   const keyColumnIndex = view.columns.findIndex((column) => column.trim().toLowerCase() === "key");
   return (
     <div style={{ overflowX: "auto" }}>
-      <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+      <table style={{ borderCollapse: "collapse", fontSize: "var(--fs-caption)", width: "100%" }}>
         <thead>
           <tr>
             {/* First, not last: the table scrolls sideways in a narrow panel, and an
@@ -638,7 +638,7 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
                 key={column}
                 style={{
                   textAlign: "left",
-                  fontWeight: 600,
+                  fontWeight: "var(--fw-semibold)",
                   color: muted,
                   padding: "4px 8px 4px 0",
                   borderBottom: `1px solid ${line}`,
@@ -673,7 +673,7 @@ function ViewTable({ view, onBringToChat, onOpenEntity }: {
                           width: 16,
                           height: 16,
                           font: "inherit",
-                          fontSize: 11,
+                          fontSize: "var(--fs-micro)",
                           lineHeight: 1,
                           cursor: "pointer",
                         }}
@@ -744,7 +744,7 @@ function Notice({ text }: { text: string }) {
         border: "1px solid rgba(229,72,77,0.3)",
         borderRadius: 6,
         padding: "6px 8px",
-        fontSize: 12,
+        fontSize: "var(--fs-caption)",
         lineHeight: 1.5,
         marginBottom: 8,
         whiteSpace: "pre-wrap",

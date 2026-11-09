@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { moduleCache: false, jsx: { runtime: "automatic" } });
+// The alias mirrors tsconfig's `@/*`: FieldControl now renders the shared
+// AppSelect, which reaches lib/ime through `@/lib/ime`.
+const jiti = createJiti(import.meta.url, {
+  moduleCache: false,
+  jsx: { runtime: "automatic" },
+  alias: { "@": process.cwd() },
+});
 const {
   propertyColumns,
   tableRows,
@@ -132,9 +138,20 @@ test("known types still get their own editors", () => {
   assert.match(control({ name: "notes", type: "text" }), /<textarea/);
   assert.match(control({ name: "n", type: "number" }), /type="number"/);
   assert.match(control({ name: "d", type: "date" }), /type="date"/);
-  const choice = control({ name: "p", type: "choice", validValues: ["高", "低"] });
-  assert.match(choice, /<select/);
-  assert.match(choice, /高/);
+  // A choice renders the shared app menu picker, not a native <select>
+  // (AGENTS: form options go through components/AppSelect.tsx, which keeps the
+  // popup on the .app-menu surface). Its options only exist while the menu is
+  // open, so the SSR markup shows the trigger: combobox role, the field's own
+  // label, and the current value.
+  const choice = control({ name: "p", type: "choice", validValues: ["高", "低"] }, "高");
+  assert.match(choice, /role="combobox"/);
+  assert.match(choice, /class="app-select-trigger"/);
+  assert.match(choice, /aria-label="p"/);
+  assert.match(choice, />高</);
+  // Radix keeps one hidden native <select> for form submission; nothing native
+  // is *offered*.
+  const nativeSelects = choice.match(/<select[^>]*>/g) ?? [];
+  assert.equal(nativeSelects.every((tag) => tag.includes('aria-hidden="true"')), true);
 });
 
 test("a choice with no declared options is read-only, not free text", () => {
@@ -175,12 +192,11 @@ test("the form's field list is the metadata's, item by item", () => {
   assert.equal(descriptors[3].label, "", "a field with no label declares none");
 
   // And what the reader sees comes out of exactly those declarations.
-  assert.match(control(descriptors[1].property), /<select/);
-  const options = control(descriptors[1].property).match(/<option value="[^"]*"/g) ?? [];
-  assert.deepEqual(
-    options.map((option) => option.slice('option value="'.length + 1, -1)).filter(Boolean),
-    metadata.fields[1].validValues,
-  );
+  // The choice field is the shared picker; its declared options reach it through
+  // the descriptor asserted above, and the trigger carries the field's label.
+  const choiceField = control(descriptors[1].property);
+  assert.match(choiceField, /class="app-select-trigger"/);
+  assert.match(choiceField, /aria-label="优先级"/);
   assert.match(control(descriptors[3].property), /<textarea/);
   assert.match(control(descriptors[4].property), /role="alert"/);
 });
