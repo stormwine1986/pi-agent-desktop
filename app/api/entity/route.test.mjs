@@ -68,7 +68,53 @@ function stubMcp() {
       return rpcResponse(id, { structuredContent: entity });
     }
     if (tool === "get_metadata") {
-      return rpcResponse(id, { structuredContent: { description: "系统需求", fields: [], lifecycle: {} } });
+      return rpcResponse(id, {
+        structuredContent: {
+          description: "系统需求",
+          fields: [],
+          // Two routes so a test can see which state the response was computed
+          // from: a payload carrying the pre-write state also carries its routes.
+          lifecycle: {
+            routes: [
+              { from: "DRAFT", to: "DEFINED", name: "定稿" },
+              { from: "DEFINED", to: "IN_PROGRESS", name: "开始" },
+            ],
+          },
+        },
+      });
+    }
+    if (tool === "promotion" || tool === "update") {
+      // The base's write tools: CAS on `expectedRevision`, then the entity as it
+      // now stands, sent as `content` text (there is no `structuredContent`),
+      // which is exactly the shape `callMcpTool` parses.
+      const args = body.params.arguments ?? {};
+      const byKey = entities.get(url) ?? new Map();
+      const current = byKey.get(args.id);
+      if (!current) return rpcResponse(id, { isError: true, content: [{ type: "text", text: "NOT_FOUND" }] });
+      if (typeof args.expectedRevision === "number" && args.expectedRevision !== current.revision) {
+        return rpcResponse(id, {
+          isError: true,
+          content: [{
+            type: "text",
+            text: `Error executing tool '${tool}': [CONCURRENT_WRITE_CONFLICT] expected ${args.expectedRevision}, current ${current.revision}`,
+          }],
+          structuredContent: {
+            code: "CONCURRENT_WRITE_CONFLICT",
+            expectedRevision: args.expectedRevision,
+            currentRevision: current.revision,
+          },
+        });
+      }
+      const next = { ...current, revision: current.revision + 1 };
+      if (tool === "promotion") {
+        next.state = args.targetState;
+        next.fields = { ...current.fields, state: next.state };
+      } else {
+        next.fields = { ...current.fields, ...(args.fields ?? {}) };
+        if (typeof next.fields.name === "string") next.name = next.fields.name;
+      }
+      byKey.set(current.key, next);
+      return rpcResponse(id, { content: [{ type: "text", text: JSON.stringify(next, null, 2) }] });
     }
     if (tool === "about_me") {
       return rpcResponse(id, { structuredContent: { userId: "evan", workspaceRoles: [] } });
@@ -128,6 +174,19 @@ async function read(cwd, params) {
   url.searchParams.set("cwd", cwd);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = await route.GET(new Request(url));
+  return { status: response.status, body: await response.json() };
+}
+
+/** POST to the same handler: the panel's save / transition path. */
+async function write(cwd, params, body) {
+  const url = new URL("http://127.0.0.1/api/entity");
+  url.searchParams.set("cwd", cwd);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = await route.POST(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
   return { status: response.status, body: await response.json() };
 }
 
@@ -645,4 +704,104 @@ test("one hit among several entries opening the key is still opened, degraded", 
   assert.equal(status, 200);
   assert.equal(body.server, "stub-a");
   assert.equal(body.identity.verdict, "degraded");
+});
+
+// --- A write answers with the state it produced (DEFECT-000085) ---------------
+//
+// POST rebuilt its payload from the entity `resolveTarget` had already read,
+// which is the state *before* the write. The panel therefore kept showing the
+// old state, the old routes and the old revision, and the next save carried that
+// revision into the base's CAS. The write's own answer is the post-write entity.
+
+/** A DRAFT entity at revision 3, the state the defect reproduced from. */
+function draftEntity(key, workspaceId) {
+  return {
+    ...entity(key, workspaceId),
+    state: "DRAFT",
+    revision: 3,
+    fields: { name: "示例", state: "DRAFT" },
+  };
+}
+
+for (const [label, meta] of [
+  ["declared", { instanceId: "ins_demo" }],
+  ["probe (older deployment, declares nothing)", null],
+]) {
+  test(`a transition answers with the state the base now holds — ${label}`, async (t) => {
+    const url = "http://write1.example/mcp";
+    const cwd = await project(t, { "entity-base": url });
+    if (meta) serverInfos.set(url, meta);
+    entities.set(url, new Map([["SSR-000033", draftEntity("SSR-000033", "ws_entity_base")]]));
+
+    const { status, body } = await write(
+      cwd,
+      { server: "entity-base", workspace: "ws_entity_base", key: "SSR-000033" },
+      { targetState: "DEFINED", expectedRevision: 3, idempotencyKey: "transition-payload-1" },
+    );
+
+    assert.equal(status, 200);
+    // The dashboard is rendered from these three fields, so all three must be the
+    // post-transition values.
+    assert.equal(body.state, "DEFINED");
+    assert.equal(body.revision, 4);
+    assert.deepEqual(body.routes.map((route) => route.to), ["IN_PROGRESS"]);
+    // "与底座一致": the base itself moved.
+    assert.equal(entities.get(url).get("SSR-000033").state, "DEFINED");
+    assert.equal(entities.get(url).get("SSR-000033").revision, 4);
+
+    // One read before the write resolved the target; at most one more may be the
+    // fresh read after it (this fix reuses the answer, so normally none).
+    const promotionAt = calls.indexOf(`${url} promotion`);
+    assert.notEqual(promotionAt, -1);
+    const readsAfterWrite = calls.slice(promotionAt).filter((call) => call.endsWith(" get"));
+    assert.ok(readsAfterWrite.length <= 1, `unexpected reads after the write: ${readsAfterWrite.join(", ")}`);
+  });
+}
+
+test("the revision a transition answers with saves without a CAS conflict", async (t) => {
+  const url = "http://write2.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", draftEntity("SSR-000033", "ws_entity_base")]]));
+  const params = { server: "entity-base", workspace: "ws_entity_base", key: "SSR-000033" };
+
+  const promoted = await write(cwd, params, { targetState: "DEFINED", expectedRevision: 3, idempotencyKey: "flow-promote-1" });
+  assert.equal(promoted.status, 200);
+  assert.equal(promoted.body.revision, 4);
+
+  // The panel saves with the revision its last response carried.
+  const saved = await write(cwd, params, {
+    fields: { name: "新名字" },
+    expectedRevision: promoted.body.revision,
+    idempotencyKey: "flow-save-1",
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.conflict, undefined);
+  assert.equal(saved.body.revision, 5);
+  assert.equal(saved.body.name, "新名字");
+});
+
+test("the pre-transition revision is a CAS conflict, which is what the panel renders as 已被他人修改", async (t) => {
+  // The inference the defect filed as "未实测": a response carrying revision 3
+  // makes the next save send 3 while the base is at 4. A stale revision is
+  // refused before any write, and POST maps it to 409 + `conflict: true`.
+  const url = "http://write3.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", draftEntity("SSR-000033", "ws_entity_base")]]));
+  const params = { server: "entity-base", workspace: "ws_entity_base", key: "SSR-000033" };
+
+  const promoted = await write(cwd, params, { targetState: "DEFINED", expectedRevision: 3, idempotencyKey: "stale-promote-1" });
+  assert.equal(promoted.body.revision, 4);
+
+  const stale = await write(cwd, params, {
+    fields: { name: "旧快照提交" },
+    expectedRevision: 3,
+    idempotencyKey: "stale-save-1",
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.conflict, true);
+  assert.match(stale.body.error, /CONCURRENT_WRITE_CONFLICT/);
+  // A refused save changes nothing, which is why reusing the stale revision is
+  // wasted work rather than data loss.
+  assert.equal(entities.get(url).get("SSR-000033").fields.name, "示例");
+  assert.equal(entities.get(url).get("SSR-000033").revision, 4);
 });

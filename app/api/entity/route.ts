@@ -93,7 +93,13 @@ interface Target {
   key: string;
   /** How far the environment was checked, and what was compared. */
   identity: EntityIdentity;
-  /** Already read while resolving, so opening does not read the same key twice. */
+  /**
+   * Already read while resolving, so opening does not read the same key twice.
+   * It is a snapshot of the moment it was read: after a write it is the state
+   * *before* the write, so a response built from it reports the old revision
+   * (`DEFECT-000085`). Only a GET may reuse it; POST passes the write's own
+   * answer instead (and lets `loadEntity` re-read when that answer has none).
+   */
   entity?: Record<string, unknown>;
 }
 
@@ -620,7 +626,16 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({ error: result.error, conflict }, { status: conflict ? 409 : 502 });
   }
 
-  const reloaded = await loadEntity(resolved);
+  // The write answers with the entity as it now stands (`promotion` and
+  // `update` both re-read it server-side, with this caller's field permissions),
+  // so that answer — not the snapshot `resolveTarget` took before writing — is
+  // what the panel renders. Using `resolved` unchanged here answered every
+  // transition with the pre-transition state and revision, so the panel kept
+  // showing the old routes and the next save carried a stale `expectedRevision`
+  // into the base's CAS (`DEFECT-000085`). A write that answers without an
+  // entity (an idempotent replay) falls through to one fresh `get`.
+  const written = unwrapEntity(result.value);
+  const reloaded = await loadEntity({ ...resolved, entity: written ?? undefined });
   if (!("payload" in reloaded)) return NextResponse.json(failureBody(reloaded), { status: reloaded.status });
   return NextResponse.json(reloaded.payload);
 }
