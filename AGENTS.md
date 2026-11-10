@@ -81,6 +81,7 @@ app/api/
   agent/running/route.ts          GET currently-running session ids
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
   agent/tasks/route.ts            GET live task snapshots (running step, waiting dialogs, last outcome) for the Tasks page
+  app-info/route.ts               GET appVersion + the package's build fingerprint (commit, branch, dirty, builtAt, node, buildId) for the Settings Version row
   remote-access/route.ts          GET/PUT Tailscale remote-access setting (PUT only from loopback)
   push/{config,subscribe,unsubscribe,test}/route.ts  Web Push key, device subscriptions, test send
   relay/route.ts                  GET/PUT encrypted relay status and config (PUT local-only)
@@ -120,6 +121,8 @@ app/api/
 
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
+  app-build-info.ts    Build fingerprint types + `0.8.2 · e0a8022` label formatting (client-safe)
+  app-build-info-server.ts  the only reader of the packaged component-versions.json
   artifacts.ts         `:::artifact` scanner, markdown encoding, version collection
   artifact-store.ts    client store shared by ChatWindow, message cards and the artifact panel
   artifact-index.ts    server index of artifacts in every session file (Artifacts page)
