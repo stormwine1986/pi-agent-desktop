@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppSelect } from "./AppSelect";
+import { StaleDependencyNotice } from "./StaleDependencyNotice";
 
+import { staleDependencies } from "@/lib/entity-dependencies";
 import { MAX_LINK_KEYS, parseLinkKeys, type LinkKeyCheck } from "@/lib/entity-links";
 import type { LinkOption } from "@/lib/entity-permissions";
 import { newKey, submissionKey, type SubmissionKey } from "@/lib/idempotency";
@@ -375,6 +377,22 @@ export function EntityPanel({ target, onOpenEntity }: {
     }
     return [...groups.values()];
   }, [data, traces]);
+
+  /**
+   * 「依赖已失效」, recomputed on every read (`SSR-000094` AC-11): the upstream
+   * rows already carry each target's current state, and the guarded routes are
+   * in the type definition this panel was built from — so this needs no request
+   * of its own and writes nothing (never `suspect`, never the entity).
+   */
+  const stale = useMemo(
+    () => staleDependencies({
+      state: data?.state ?? "",
+      lifecycle: data?.lifecycle,
+      upstream: traces?.upstream ?? [],
+    }),
+    [data?.state, data?.lifecycle, traces],
+  );
+
   const changed = data ? changedFields(data, draft) : {};
   const changedCount = Object.keys(changed).length;
 
@@ -843,6 +861,10 @@ export function EntityPanel({ target, onOpenEntity }: {
           )}
         </div>
       )}
+
+      {/* A dependency that moved out of the acceptable set is stated here, in
+          the detail view, and only when there is one (AC-11). */}
+      <StaleDependencyNotice items={stale} />
 
       {/* Two views of one entity. The relations tab exists because "what is
           this connected to" is a question about the entity, not a separate
