@@ -47,7 +47,13 @@ interface ViewRows {
   /** The view's page size, so the panel can move by a page rather than by a guess. */
   pageSize: number;
   /** Dispatch state for a watched view: why it is not dispatching, and whether it is running. */
-  watch: { disabled: string | null; inFlight: boolean; skipped: string | null } | null;
+  watch: {
+    disabled: string | null;
+    inFlight: boolean;
+    skipped: string | null;
+    idle: boolean;
+    error: string | null;
+  } | null;
   error: string | null;
 }
 
@@ -96,19 +102,27 @@ function cell(item: unknown, column: string): string {
 async function watchStatusOf(
   cwd: string,
   view: ViewDefinition,
-): Promise<{ disabled: string | null; inFlight: boolean; skipped: string | null } | null> {
+): Promise<{
+  disabled: string | null;
+  inFlight: boolean;
+  skipped: string | null;
+  idle: boolean;
+  error: string | null;
+} | null> {
   if (!view.watch) return null;
   // `enabled: false` is the pause switch, and "paused" is a state the reader of
   // the panel has to see: reporting it as a clean watch made a switched-off
   // queue look like an empty one (SSR-000089 AC-11). The pump skips paused views
   // entirely, so nothing in memory would say it either.
-  if (!view.watch.enabled) return { disabled: "配置里关闭了派发", inFlight: false, skipped: null };
+  if (!view.watch.enabled) {
+    return { disabled: "配置里关闭了派发", inFlight: false, skipped: null, idle: false, error: null };
+  }
   const known = watchViewStatus(cwd, view);
   if (known) return known;
 
   const deps = createLiveDeps();
   const disabled = await validate(cwd, view, view.watch, deps);
-  if (disabled) return { disabled, inFlight: false, skipped: null };
+  if (disabled) return { disabled, inFlight: false, skipped: null, idle: false, error: null };
 
   const gate = await dispatchGate(
     { view, watch: view.watch, target: { panelCwd: cwd, server: view.server, workspace: view.workspace } },
@@ -116,7 +130,13 @@ async function watchStatusOf(
   );
   // A failed probe is not a reason to claim the view is fine: leave the skip
   // line empty and let the list query's own error speak.
-  return { disabled: null, inFlight: false, skipped: gate.ok && gate.value ? describeGate(gate.value) : null };
+  return {
+    disabled: null,
+    inFlight: false,
+    skipped: gate.ok && gate.value ? describeGate(gate.value) : null,
+    idle: false,
+    error: null,
+  };
 }
 
 /**

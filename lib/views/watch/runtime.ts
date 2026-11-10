@@ -1,5 +1,7 @@
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../../mcp-call";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { classifyPromotionFailure } from "./core";
+import { describeWatchRunLimit } from "./limit";
 import type { WatchDeps, WatchResult, WatchRow, WatchSessionHandle, WatchTarget } from "./core";
 
 /**
@@ -31,8 +33,6 @@ function targetOf(agentDir: string, target: WatchTarget): { ok: true; value: Mcp
   const resolved = resolveMcpTarget(agentDir, target.panelCwd, target.server);
   return resolved.ok ? { ok: true, value: resolved.target } : { ok: false, error: resolved.error };
 }
-
-const conflictPattern = /CONCURRENT_WRITE_CONFLICT/;
 
 export function createLiveDeps(): WatchDeps {
   const agentDir = getAgentDir();
@@ -94,7 +94,15 @@ export function createLiveDeps(): WatchDeps {
         idempotencyKey: `watch-${key}-${to}-${expectedRevision}-${crypto.randomUUID()}`,
       });
       if (!result.ok) {
-        return { ok: false, error: result.error, ...(conflictPattern.test(result.error) ? { conflict: true } : {}) };
+        // One classification for every failed claim, so the pump cannot turn a
+        // business refusal (a guard whose dependency is not done) into a red dot
+        // that repeats every round (TASK-000054).
+        const verdict = classifyPromotionFailure(result.error, result.structured);
+        if (verdict.kind === "conflict") return { ok: false, error: result.error, conflict: true };
+        if (verdict.kind === "skip") {
+          return { ok: false, error: result.error, skip: { code: verdict.code, reason: verdict.reason } };
+        }
+        return { ok: false, error: result.error };
       }
       return { ok: true, value: null };
     },
@@ -157,6 +165,13 @@ export function createLiveDeps(): WatchDeps {
     },
 
     log(event) {
+      // The startup line is the one event an operator has to be able to read in
+      // the dev-server / journalctl output: it is the only confirmation that
+      // `PI_WEB_MAX_WATCH_RUNS` took effect (or was clamped).
+      if (event.type === "limit") {
+        console.log("[watch]", describeWatchRunLimit(event));
+        return;
+      }
       // One line per state transition keeps `journalctl`/dev-server output useful
       // without inventing a log format the app has to maintain.
       console.log("[watch]", JSON.stringify(event));

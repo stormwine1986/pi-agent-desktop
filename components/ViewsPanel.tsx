@@ -52,10 +52,18 @@ interface ViewRows {
   pageSize: number;
   /**
    * Dispatch state for a watched view: `disabled` says why it is not handing
-   * anything out, `skipped` why the last round was gated (SSR-000089 ④⑦).
-   * A read-only view, or one that has not been scanned yet, is null.
+   * anything out, `skipped` why the last round with work was held back
+   * (SSR-000089 ④⑦, the global cap, or a business refusal), `idle` that the last
+   * round simply found nothing, `error` a real failure. A read-only view, or one
+   * that has not been scanned yet, is null.
    */
-  watch: { disabled: string | null; inFlight: boolean; skipped: string | null } | null;
+  watch: {
+    disabled: string | null;
+    inFlight: boolean;
+    skipped: string | null;
+    idle: boolean;
+    error: string | null;
+  } | null;
   error: string | null;
 }
 

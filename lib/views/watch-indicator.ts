@@ -18,8 +18,16 @@ export interface WatchState {
   disabled: string | null;
   /** A session for this view is running right now. */
   inFlight: boolean;
-  /** Why the last round handed nothing out although the view is valid (④⑦). */
+  /**
+   * Why the last round that had work handed nothing out (④⑦, the global cap, or a
+   * business refusal). It survives a later round that finds an empty queue, so
+   * "held back" never becomes "the queue was empty".
+   */
   skipped: string | null;
+  /** The last round looked and found nothing to hand out. */
+  idle?: boolean;
+  /** A real failure on the last round (network, auth, a non-policy 4xx). */
+  error?: string | null;
 }
 
 export type WatchTone = "ready" | "skipped" | "error";
@@ -82,10 +90,18 @@ export function watchIndicator(watch: WatchState | null | undefined): WatchIndic
   if (watch.disabled) {
     return { tone: "error", label: "派发未生效", detail: plainReason(watch.disabled) };
   }
+  // A real failure comes before a skip line: both can be true at once (a gated
+  // round followed by an unreachable server), and the red one is what has to be
+  // fixed first. It does not erase the skip reason; the row keeps both.
+  if (watch.error) {
+    return { tone: "error", label: "派发出错", detail: plainReason(watch.error) };
+  }
   if (watch.skipped) {
     return { tone: "skipped", label: "本轮跳过", detail: plainReason(watch.skipped) };
   }
-  return watch.inFlight
-    ? { tone: "ready", label: "正在派发", detail: "已经交出一条，等这个会话结束" }
-    : { tone: "ready", label: "派发就绪", detail: "到达派发间隔后会接手待派条目" };
+  if (watch.inFlight) return { tone: "ready", label: "正在派发", detail: "已经交出一条，等这个会话结束" };
+  // The distinction the panel needs: an empty queue is not the same fact as a
+  // round that was held back — the skip line above would still be showing.
+  if (watch.idle) return { tone: "ready", label: "派发就绪", detail: "上一轮没有待派条目" };
+  return { tone: "ready", label: "派发就绪", detail: "到达派发间隔后会接手待派条目" };
 }

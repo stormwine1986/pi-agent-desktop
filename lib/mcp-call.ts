@@ -46,7 +46,19 @@ export interface McpHttpTarget {
 
 export type McpTargetResult = { ok: true; target: McpHttpTarget } | { ok: false; error: string };
 
-export type McpToolResult = { ok: true; value: unknown } | { ok: false; error: string };
+export type McpToolResult =
+  | { ok: true; value: unknown }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * The server's typed error body when it sent one (`code`, `statusCode`,
+       * `retriable`, `skippedByPolicy`, `details`). Entity-base puts the contract
+       * there, so callers that must tell a business refusal from a real fault
+       * read these fields instead of guessing from the message.
+       */
+      structured?: Record<string, unknown>;
+    };
 
 const CONFIG_FILENAME = "mcp.json";
 const PROJECT_CONFIG_RELATIVE = join(".pi", CONFIG_FILENAME);
@@ -336,7 +348,15 @@ export async function callMcpTool(
     );
     const result = outcome.result as { isError?: unknown; structuredContent?: unknown; content?: unknown } | undefined;
     if (result?.isError === true) {
-      return { ok: false as const, error: toolErrorText(result.content) ?? `${toolName} 返回 isError` };
+      const structured =
+        typeof result.structuredContent === "object" && result.structuredContent !== null
+          ? (result.structuredContent as Record<string, unknown>)
+          : undefined;
+      return {
+        ok: false as const,
+        error: toolErrorText(result.content) ?? `${toolName} 返回 isError`,
+        ...(structured ? { structured } : {}),
+      };
     }
     if (result?.structuredContent !== undefined) return { ok: true as const, value: result.structuredContent };
     const text = toolErrorText(result?.content);

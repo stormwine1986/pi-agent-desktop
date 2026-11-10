@@ -24,7 +24,19 @@ export interface WatchTarget {
 
 export type WatchResult<T> =
   | { ok: true; value: T }
-  | { ok: false; error: string; conflict?: boolean };
+  | {
+      ok: false;
+      error: string;
+      /** Another writer advanced the entity first — treat as "someone else has it". */
+      conflict?: boolean;
+      /**
+       * A business refusal that means "not this round", not "the tool is broken":
+       * the entity's own state does not allow the move yet (see
+       * `classifyPromotionFailure`). `code` is for logs; `reason` is the sentence
+       * the panel prints.
+       */
+      skip?: { code: string; reason: string };
+    };
 
 export interface WatchSessionHandle {
   sessionId: string;
@@ -35,17 +47,28 @@ export interface WatchSessionHandle {
 /**
  * Why a view is not handing anything out this round.
  *
- * Both gates close the whole view, not one row: a project stopped in the middle
+ * Every gate closes the whole view, not one row: a project stopped in the middle
  * of an attempt has to be looked at before new work is stacked on top of it
- * (andon semantics, SSR-000089 ④⑦).
+ * (andon semantics, SSR-000089 ④⑦). The third one is about the machine rather
+ * than the project (the global concurrency cap), and it is named separately so
+ * the three reasons cannot be mistaken for one another.
  */
 export type WatchGate =
   | { reason: "session" }
-  | { reason: "manual"; count: number };
+  | { reason: "manual"; count: number }
+  /**
+   * The machine is already running as many watch sessions as it allows. It is a
+   * third gate with its own sentence: an operator who sees "项目有运行中会话" for
+   * a project that has none would go looking in the wrong place.
+   */
+  | { reason: "queue"; limit: number };
 
 /** The sentence the panel prints — the same words the contract uses. */
 export function describeGate(gate: WatchGate): string {
-  return gate.reason === "session" ? "项目有运行中会话" : `有 ${gate.count} 条待人工`;
+  if (gate.reason === "session") return "项目有运行中会话";
+  if (gate.reason === "manual") return `有 ${gate.count} 条待人工`;
+  // The effective cap, not a literal: raising it must change what this says.
+  return `排队中：正在执行的任务已达上限（${gate.limit} 个）`;
 }
 
 export interface WatchDeps {
@@ -88,7 +111,18 @@ export type WatchLogEvent =
   | { type: "done"; view: string; key: string; state: string }
   | { type: "manual"; view: string; key: string; reason: "failed" | "timeout" }
   | { type: "conflict"; view: string; key: string }
-  | { type: "skipped"; view: string; reason: "session" | "manual"; count?: number }
+  | {
+      type: "skipped";
+      view: string;
+      key?: string;
+      reason: "session" | "manual" | "queue" | "policy";
+      count?: number;
+      limit?: number;
+      /** The plain sentence for a policy skip; `code` is for logs only. */
+      message?: string;
+      code?: string;
+    }
+  | { type: "limit"; limit: number; source: "default" | "env"; note: string | null }
   | { type: "error"; view: string; key?: string; message: string };
 
 /**
@@ -140,6 +174,102 @@ export function countClaims(states: readonly string[], claimedState: string): nu
     if (state === claimedState) count += 1;
   }
   return count;
+}
+
+/**
+ * Promotion failures that mean "skip this row this round".
+ *
+ * Whitelist, not "any 4xx": `ENTITY_VALIDATION_FAILED` is a bad write that
+ * retrying cannot fix, and a 404/401 is a broken target — both must stay errors
+ * so the panel keeps showing a failure instead of a quiet wait. The three codes
+ * below are the base's *business refusals* (entity-base `errors.ts`:
+ * 「守卫拒绝是业务拒绝，不是系统错误——可以跳过该条、稍后重试」), always
+ * `statusCode 409` + `retriable: false` + `skippedByPolicy: true`.
+ */
+export const SKIPPABLE_PROMOTION_CODES = [
+  "STATE_GUARD_UNSATISFIED",
+  "STATE_GUARD_BUDGET_EXCEEDED",
+  "STATE_GUARD_CYCLE",
+] as const;
+
+export type PromotionVerdict =
+  | { kind: "conflict" }
+  | { kind: "skip"; code: string; reason: string }
+  | { kind: "error" };
+
+/** `Error executing tool 'promotion': [STATE_GUARD_CYCLE] …` → the code. */
+function codeIn(error: string): string | null {
+  const match = /\[([A-Z][A-Z0-9_]+)\]/.exec(error);
+  return match ? match[1] : null;
+}
+
+function keysOf(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const keys: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const key = (item as { key?: unknown }).key;
+    if (typeof key === "string" && key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+/**
+ * The sentence for a policy skip. Plain words only — no `STATE_GUARD_*`, no
+ * `claim`, no `intervalSec`: the panel is read by whoever works the queue, and
+ * the first line has to say what to do next.
+ */
+export function describePromotionSkip(code: string, details?: Record<string, unknown> | null): string {
+  if (code === "STATE_GUARD_UNSATISFIED") {
+    const waiting = keysOf(details?.violations);
+    return waiting.length > 0
+      ? `条目依赖未完成（等待 ${waiting.join("、")}）`
+      : "条目依赖未完成，稍后会自动重试";
+  }
+  if (code === "STATE_GUARD_BUDGET_EXCEEDED") {
+    return "条目依赖链超出可检查范围，需要人调整依赖或拆分";
+  }
+  // STATE_GUARD_CYCLE: a data fact, not a transient state.
+  return "条目依赖关系成环，需要人拆环";
+}
+
+/**
+ * How a failed promotion should be recorded.
+ *
+ * Order matters: a concurrent-write conflict keeps its own `conflict` meaning
+ * ("someone else owns the row, take the next one") and must not be swallowed by
+ * the new skip branch, even when the server marks it retriable.
+ *
+ * With `structured` (the server's typed error body) the decision reads the
+ * flags the base promises. A text-only error — an older server, or a stub — is
+ * accepted when it carries a whitelisted code, because that code is itself the
+ * contract; everything else stays an error.
+ */
+export function classifyPromotionFailure(
+  error: string,
+  structured?: Record<string, unknown> | null,
+): PromotionVerdict {
+  const code = typeof structured?.code === "string" ? structured.code : codeIn(error);
+  if (code === "CONCURRENT_WRITE_CONFLICT" || /CONCURRENT_WRITE_CONFLICT/.test(error)) {
+    return { kind: "conflict" };
+  }
+  if (!code || !(SKIPPABLE_PROMOTION_CODES as readonly string[]).includes(code)) {
+    return { kind: "error" };
+  }
+
+  if (structured) {
+    const statusCode = typeof structured.statusCode === "number" ? structured.statusCode : null;
+    const retriable = typeof structured.retriable === "boolean" ? structured.retriable : null;
+    const skippedByPolicy = structured.skippedByPolicy === true;
+    const businessRefusal =
+      skippedByPolicy || (retriable === false && statusCode !== null && statusCode >= 400 && statusCode < 500);
+    if (!businessRefusal) return { kind: "error" };
+  }
+
+  const details = typeof structured?.details === "object" && structured.details !== null
+    ? (structured.details as Record<string, unknown>)
+    : null;
+  return { kind: "skip", code, reason: describePromotionSkip(code, details) };
 }
 
 /** `{{name}}` substitution; unknown placeholders are left alone, so a typo is visible. */

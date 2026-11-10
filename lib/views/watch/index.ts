@@ -4,8 +4,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { acquireLease, isPidAlive } from "../../scheduled-tasks/lease";
 import { readViewsConfig, type ViewDefinition, type ViewWatch } from "../config";
 import { describeGate, sliceDql } from "./core";
+import { watchRunLimit } from "./limit";
 import { createLiveDeps } from "./runtime";
-import { pumpView, WatchRegistry, readPrompt, MAX_CONCURRENT_WATCH_RUNS, type PumpOutcome } from "./pump";
+import { pumpView, WatchRegistry, readPrompt, type PumpOutcome } from "./pump";
 import type { WatchDeps } from "./core";
 
 /**
@@ -41,6 +42,8 @@ export interface WatchPumpOptions {
   /** Projects to scan; defaults to the ones the session list knows about. */
   projects?: () => Promise<string[]>;
   intervalMs?: number;
+  /** The running-session map to consult; tests occupy slots with their own. */
+  registry?: WatchRegistry;
 }
 
 interface ViewState {
@@ -48,8 +51,25 @@ interface ViewState {
   inFlight: boolean;
   /** Non-null when the view cannot be dispatched, with the reason to show. */
   disabled: string | null;
-  /** Non-null when a dispatch gate closed this view in the last round. */
+  /**
+   * The last round that had work and handed nothing out, with the reason.
+   *
+   * Sticky on purpose: a later round that finds an empty queue (`idle`) must not
+   * wipe it, or two different facts — "the queue is empty" and "there was work
+   * and it was held back" — end up as the same picture (SSR-000089【可观测】).
+   * Cleared only by a successful dispatch or replaced by a new reason.
+   */
   skipped: string | null;
+  /** The last round looked and found nothing to hand out. */
+  idle: boolean;
+  /**
+   * A session this very view dispatched is still running. Displayed as "正在派发",
+   * never as the "项目有运行中会话" gate: that sentence answers "who is holding
+   * this round back", and our own session is the work, not a hold-back.
+   */
+  ownRunning: boolean;
+  /** A real failure (network, auth, 5xx, a non-policy 4xx) on the last round. */
+  error: string | null;
   validatedAt: number;
 }
 
@@ -74,20 +94,37 @@ export interface WatchViewStatus {
   disabled: string | null;
   /** True while a session for this view is running. */
   inFlight: boolean;
-  /** Why the last round handed nothing out although the view is valid (④⑦). */
+  /** Why the last round with work handed nothing out (gates, queue, policy). */
   skipped: string | null;
+  /** The last round looked and found nothing to hand out. */
+  idle: boolean;
+  /** A real failure on the last round, shown in the error tone. */
+  error: string | null;
 }
 
 export function watchViewStatus(projectCwd: string, view: ViewDefinition): WatchViewStatus | null {
   const state = states.get(watchViewKey(projectCwd, view));
-  return state ? { disabled: state.disabled, inFlight: state.inFlight, skipped: state.skipped } : null;
+  return state
+    ? {
+        disabled: state.disabled,
+        inFlight: state.inFlight || state.ownRunning,
+        skipped: state.skipped,
+        idle: state.idle,
+        error: state.error,
+      }
+    : null;
 }
 
 export function startWatchPump(options: WatchPumpOptions = {}): () => void {
   const deps = options.deps ?? createLiveDeps();
   const intervalMs = options.intervalMs ?? TICK_MS;
+  const running = options.registry ?? registry;
   const lockDir = join(getAgentDir(), "watch");
   let stopped = false;
+
+  // The effective cap goes into the log at startup: a value that was clamped or
+  // fell back to the default is otherwise invisible until the queue stalls.
+  deps.log({ ...watchRunLimit(), type: "limit" });
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
@@ -98,7 +135,7 @@ export function startWatchPump(options: WatchPumpOptions = {}): () => void {
       const projects = options.projects ? await options.projects() : await visibleProjects();
       for (const project of projects) {
         if (stopped) return;
-        await pumpProject(project, deps);
+        await pumpProject(project, deps, running);
       }
     } catch (error) {
       deps.log({ type: "error", view: "-", message: error instanceof Error ? error.message : String(error) });
@@ -127,7 +164,7 @@ async function visibleProjects(): Promise<string[]> {
   return getRecentProjects(sessions).map((project) => project.root);
 }
 
-async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
+async function pumpProject(projectCwd: string, deps: WatchDeps, running: WatchRegistry): Promise<void> {
   const config = readViewsConfig(projectCwd);
   if (!config.exists || config.error) return;
 
@@ -138,7 +175,17 @@ async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
     if (!watch.enabled) continue;
 
     const key = watchViewKey(projectCwd, view);
-    const state = states.get(key) ?? { lastRunAt: 0, inFlight: false, disabled: null, skipped: null, validatedAt: 0 };
+    const state =
+      states.get(key) ?? {
+        lastRunAt: 0,
+        inFlight: false,
+        disabled: null,
+        skipped: null,
+        idle: false,
+        ownRunning: false,
+        error: null,
+        validatedAt: 0,
+      };
     states.set(key, state);
     if (state.inFlight) continue;
     // A view whose interval equals the tick period would otherwise be skipped
@@ -158,27 +205,76 @@ async function pumpProject(projectCwd: string, deps: WatchDeps): Promise<void> {
       const outcome: PumpOutcome = await pumpView(
         { view, watch, target: { panelCwd: projectCwd, server: view.server, workspace: view.workspace } },
         deps,
-        registry,
+        running,
       );
-      state.skipped = skipReasonOf(outcome);
-      if (outcome.status === "error") {
-        deps.log({ type: "error", view: view.title, message: outcome.error });
-      }
+      applyOutcome(state, outcome, view.title, deps);
     } finally {
       state.inFlight = false;
     }
   }
 }
 
+/**
+ * Fold one round's outcome into what the panel shows.
+ *
+ * The three reasons are kept apart instead of collapsed into one field, because
+ * they answer different questions:
+ * - `idle` — nothing was waiting (the queue really is empty);
+ * - `skipped` — there was (or may have been) work and it was held back; sticky
+ *   across `idle`, so a held-back round stays visible instead of looking like a
+ *   queue that was never full;
+ * - `error` — a real failure. It never overwrites a skip reason and never gets
+ *   overwritten by one; a successful dispatch clears both.
+ */
+function applyOutcome(state: ViewState, outcome: PumpOutcome, viewTitle: string, deps: WatchDeps): void {
+  if (outcome.status === "dispatched") {
+    state.skipped = null;
+    state.idle = false;
+    state.error = null;
+    state.ownRunning = true;
+    return;
+  }
+  if (outcome.status === "busy" && outcome.reason === "project" && outcome.own) {
+    // This view's own session is running. Not a skip: nothing was held back, and
+    // saying "项目有运行中会话" here would point at the wrong thing — the project
+    // is busy with this very view.
+    state.ownRunning = true;
+    state.idle = false;
+    state.error = null;
+    return;
+  }
+  state.ownRunning = false;
+  if (outcome.status === "idle") {
+    // Nothing to explain, and nothing to erase either: this round proves the
+    // queue is empty now, not that the last gate never closed.
+    state.idle = true;
+    state.error = null;
+    return;
+  }
+  if (outcome.status === "error") {
+    state.idle = false;
+    state.error = outcome.error;
+    deps.log({ type: "error", view: viewTitle, message: outcome.error });
+    return;
+  }
+  // A gate, the global cap, or a business refusal: there was work (or we could
+  // not look), and this round handed nothing out.
+  state.skipped = skipReasonOf(outcome);
+  state.idle = false;
+  state.error = null;
+}
+
 function skipReasonOf(outcome: PumpOutcome): string | null {
   if (outcome.status === "skipped") return describeGate(outcome.gate);
   if (outcome.status === "busy") {
+    // "global" carries the effective cap, so a raised limit says 3, not 2.
     return outcome.reason === "project"
       ? describeGate({ reason: "session" })
-      : `已达全局并发上限（${MAX_CONCURRENT_WATCH_RUNS} 个）`;
+      : describeGate({ reason: "queue", limit: outcome.limit });
   }
-  // dispatched / idle / error: no gate kept this round, so nothing to explain
-  // (an error already has its own line in the panel).
+  if (outcome.status === "policy") return outcome.reason;
+  // dispatched / idle / error: nothing a gate held back (an error has its own
+  // visible state, see `applyOutcome`).
   return null;
 }
 

@@ -10,9 +10,7 @@ import {
   type WatchRow,
   type WatchTarget,
 } from "./core";
-
-/** How many watch sessions may run at once across every project. */
-export const MAX_CONCURRENT_WATCH_RUNS = 2;
+import { maxConcurrentWatchRuns } from "./limit";
 
 /** Rows fetched per scan; the API caps a page at 100 anyway. */
 const SCAN_LIMIT = 100;
@@ -61,7 +59,13 @@ export type PumpOutcome =
   | { status: "idle" }
   /** A gate from SSR-000089 ④⑦ closed the whole view for this round. */
   | { status: "skipped"; gate: WatchGate }
-  | { status: "busy"; reason: "project" | "global" }
+  | { status: "busy"; reason: "project"; own?: boolean } | { status: "busy"; reason: "global"; limit: number }
+  /**
+   * There was work, but every candidate refused it for a business reason (a route
+   * guard whose dependency is not done yet). Not an error: nothing is broken, the
+   * row simply waits.
+   */
+  | { status: "policy"; reason: string }
   | { status: "error"; error: string };
 
 /**
@@ -114,7 +118,11 @@ export async function pumpView(
   if (!claimed.ok) return { status: "error", error: claimed.error };
   await expireClaimed(input, claimed.value, deps);
 
-  if (registry.get(watch.project)) return { status: "busy", reason: "project" };
+  const inProject = registry.get(watch.project);
+  // `own` says whose session closed the gate: this view's own dispatch is "in
+  // flight", not a reason it was held back. A different view pointing at the
+  // same project is a real gate (that project is busy).
+  if (inProject) return { status: "busy", reason: "project", own: inProject.view === view.title };
 
   // Gate before any read of the pending set: a closed round must not even look
   // at candidates, so a row that arrived meanwhile is still there next round.
@@ -130,7 +138,11 @@ export async function pumpView(
     return { status: "skipped", gate: gate.value };
   }
 
-  if (registry.size >= MAX_CONCURRENT_WATCH_RUNS) return { status: "busy", reason: "global" };
+  const limit = maxConcurrentWatchRuns();
+  if (registry.size >= limit) {
+    deps.log({ type: "skipped", view: view.title, reason: "queue", limit });
+    return { status: "busy", reason: "global", limit };
+  }
 
   const pending = await deps.list(target, view.dql, {
     limit: Math.min(view.pageSize, SCAN_LIMIT),
@@ -139,6 +151,9 @@ export async function pumpView(
   });
   if (!pending.ok) return { status: "error", error: pending.error };
 
+  // Every candidate was refused for a business reason: say so, and say which one
+  // refused last. A row that becomes actionable next round needs no action here.
+  let policyReason: string | null = null;
   for (const row of pending.value) {
     // Claiming is the gate: whoever advances the state first owns the item, so a
     // second machine (or a second view) loses here instead of running twice.
@@ -148,6 +163,21 @@ export async function pumpView(
         deps.log({ type: "conflict", view: view.title, key: row.key });
         continue;
       }
+      if (claimedRow.skip) {
+        // Business refusal, not a fault: the row stays where it is and this round
+        // hands nothing out. Keeping it out of `error` is the point — "waiting"
+        // must not be shown as "the tool is broken" (SSR-000089【可观测】).
+        policyReason = claimedRow.skip.reason;
+        deps.log({
+          type: "skipped",
+          view: view.title,
+          key: row.key,
+          reason: "policy",
+          code: claimedRow.skip.code,
+          message: claimedRow.skip.reason,
+        });
+        continue;
+      }
       return { status: "error", error: claimedRow.error };
     }
     const started = await dispatch(input, row, deps, registry);
@@ -155,6 +185,7 @@ export async function pumpView(
     return { status: "dispatched", key: row.key, sessionId: started.value };
   }
 
+  if (policyReason) return { status: "policy", reason: policyReason };
   return { status: "idle" };
 }
 
