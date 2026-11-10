@@ -14,8 +14,8 @@
  * 1. A declaration beats probing. A link may carry `instanceId`; that selects the
  *    environment, it is never evidence (AC-8).
  * 2. A deployment pin in `mcp.json` (`instanceId` on the server entry) is the
- *    comparator when the link carries none. It comes from connection config,
- *    never from a request.
+ *    only comparator. It comes from connection config, never from a request, so
+ *    a link's id can never turn an open into a checked one (AC-5b / AC-8).
  * 3. Declared + comparator + mismatch → refuse. The copy names the declaration,
  *    the expectation and what the reader can do (`SSR-000033`, MCP-5).
  * 4. Declared without a comparator → open, but say "未验真 (未 pin)". No claim of
@@ -43,10 +43,10 @@ export interface EntityIdentity {
   /** What the endpoint declared; absent when it declared nothing. */
   instanceId?: string;
   instanceName?: string;
-  /** The value the link asked for or the config pinned, when there was one. */
+  /** The value `mcp.json` pinned, when it pinned one — never a link's request. */
   expected?: string;
   /** Where `expected` came from — never a request parameter or header. */
-  source: "link" | "config" | "none";
+  source: "config" | "none";
   /** One sentence for a tooltip / a log line. */
   detail: string;
 }
@@ -231,21 +231,24 @@ export function judgeIdentity(input: IdentityJudgementInput): IdentityJudgement 
   if (!actual) {
     // Older deployment: no declaration anywhere. Open it, label it, and never
     // claim it was verified — but never refuse it for being old, either.
-    const asked = requested ?? pinned;
     return {
       ok: true,
       identity: {
         verdict: "degraded",
-        ...(asked ? { expected: asked } : {}),
-        source: requested ? "link" : pinned ? "config" : "none",
-        detail: asked
-          ? `该环境未声明身份（降级），未验真：要求中的 instanceId=${asked} 无从核对，只能按 workspace + key 定位。`
+        // Nothing was compared, so there is no expectation to report: the link's
+        // id only said which environment the writer meant (AC-8).
+        source: "none",
+        detail: requested
+          ? `该环境未声明身份（降级），未验真：链接要求 instanceId=${requested}，端点未声明，无法核对，只能按 workspace + key 定位。`
           : "该环境未声明身份（降级），未验真：没有可对照的 instanceId，只能按 workspace + key 定位。",
       },
     };
   }
 
-  const expectation = requested ?? pinned;
+  // The comparator is the deployment pin and nothing else. A link's `instanceId`
+  // selected this entry (and is refused above when it contradicts one); taking it
+  // as `expected` too made a request parameter verify itself (AC-5b / AC-8).
+  const expectation = pinned;
   if (requested && actual.instanceId !== requested) {
     return {
       ok: false,
@@ -278,10 +281,10 @@ export function judgeIdentity(input: IdentityJudgementInput): IdentityJudgement 
       instanceId: actual.instanceId,
       ...(actual.instanceName ? { instanceName: actual.instanceName } : {}),
       ...(expectation ? { expected: expectation } : {}),
-      source: requested ? "link" : pinned ? "config" : "none",
+      source: pinned ? "config" : "none",
       detail: expectation
-        ? `已核对：端点声明 instanceId=${actual.instanceId}${actual.instanceName ? `（${actual.instanceName}）` : ""}，与${requested ? "链接要求" : " mcp.json 的 pin"}一致。`
-        : `未验真：端点声明 instanceId=${actual.instanceId}${actual.instanceName ? `（${actual.instanceName}）` : ""}，但链接没有要求、mcp.json 也没有 pin，没有对照物（未 pin）。`,
+        ? `已核对：端点声明 instanceId=${actual.instanceId}${actual.instanceName ? `（${actual.instanceName}）` : ""}，与 mcp.json 的 pin 一致。`
+        : `未验真：端点声明 instanceId=${actual.instanceId}${actual.instanceName ? `（${actual.instanceName}）` : ""}，但 mcp.json 没有 pin，没有可对照的期望值（未 pin）${requested ? `；链接里的 instanceId=${requested} 只用于选择，不作对照` : ""}。`,
     },
   };
 }

@@ -48,7 +48,11 @@ function stubMcp() {
 
     if (body.method === "initialize") {
       handshakes.push(url);
-      const meta = serverInfos.get(url);
+      // A test may need two entries on one url that declare different
+      // environments (same address, different token) — a header marker lets the
+      // fixture say so without a second stub endpoint.
+      const marker = (init?.headers ?? {})["x-stub-instance"];
+      const meta = typeof marker === "string" && marker ? parseMarker(marker) : serverInfos.get(url);
       return rpcResponse(id, {
         protocolVersion: "2025-06-18",
         // A stub that declares nothing keeps the older-deployment path honest:
@@ -128,6 +132,12 @@ function rpcResponse(id, result) {
     status: 200,
     headers: { "content-type": "application/json", "mcp-session-id": "stub" },
   });
+}
+
+/** `ins_demo|演示环境` → the `_meta` a header-marked entry declares. */
+function parseMarker(marker) {
+  const [instanceId, instanceName] = marker.split("|");
+  return { instanceId, ...(instanceName ? { instanceName } : {}) };
 }
 
 /**
@@ -352,7 +362,10 @@ function twoStacks(servers) {
   }
 }
 
-test("two environments with the same space and key open by declaration, not by luck", async (t) => {
+test("a link's declaration selects the environment but does not verify it", async (t) => {
+  // AC-8: the link's `instanceId` only says which environment the writer meant.
+  // The right environment was opened — and still marked 未验真, because no pin
+  // from the connection config was compared with it.
   const cwd = await project(t, { "demo-a": "http://id1a.example/mcp", "demo-b": "http://id1b.example/mcp" });
   twoStacks({
     "http://id1a.example/mcp": { instanceId: "ins_demo", instanceName: "演示环境" },
@@ -369,7 +382,9 @@ test("two environments with the same space and key open by declaration, not by l
   assert.equal(status, 200);
   // The declaration selected b even though the link's channel named a.
   assert.equal(body.server, "demo-b");
-  assert.equal(body.identity.verdict, "verified");
+  assert.equal(body.identity.verdict, "unverified");
+  assert.equal(body.identity.source, "none");
+  assert.equal(body.identity.expected, undefined);
   assert.equal(body.identity.instanceId, "ins_test");
   assert.equal(body.identity.instanceName, "测试环境");
   // Nothing probed a: a declaration does not need "read both and see".
@@ -395,7 +410,9 @@ test("the same environment under two entry names opens once, without a conflict"
   });
 
   assert.equal(status, 200);
-  assert.equal(body.identity.verdict, "verified");
+  // One environment, but still nothing from the connection config to compare.
+  assert.equal(body.identity.verdict, "unverified");
+  assert.equal(body.identity.source, "none");
   assert.equal(body.server, "entity-demo-system-evan");
 });
 
@@ -704,6 +721,150 @@ test("one hit among several entries opening the key is still opened, degraded", 
   assert.equal(status, 200);
   assert.equal(body.server, "stub-a");
   assert.equal(body.identity.verdict, "degraded");
+});
+
+// --- Two entry names for one environment (TASK-000023 gap 1) -----------------
+//
+// `entity-base` and `entity-base-alias` may both legitimately point at the demo
+// stack. Probing then saw two hits in one space and refused it as the
+// unsolvable tie `DEFECT-000084` forbids guessing — even though there was only
+// one environment to open. Hits are now folded by environment before the tie is
+// judged, and the representative entry is chosen deterministically.
+
+/** Two entries, one declared environment, whatever url each uses. */
+function oneEnvironment(urls, meta) {
+  for (const url of urls) {
+    serverInfos.set(url, meta);
+    entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+  }
+}
+
+test("two aliases of one declared environment open, and write order does not decide which", async (t) => {
+  const servers = [["env-base", "http://alias1a.example/mcp"], ["env-alias", "http://alias1b.example/mcp"]];
+  oneEnvironment(servers.map(([, url]) => url), { instanceId: "ins_demo" });
+
+  const forward = await project(t, Object.fromEntries(servers));
+  const first = await read(forward, { workspace: "ws_entity_base", key: "SSR-000033" });
+  const reversed = await project(t, Object.fromEntries([...servers].reverse()));
+  const second = await read(reversed, { workspace: "ws_entity_base", key: "SSR-000033" });
+
+  assert.equal(first.status, 200);
+  // The representative is the dictionary-first entry name, not the first written.
+  assert.equal(first.body.server, "env-alias");
+  assert.equal(first.body.identity.instanceId, "ins_demo");
+  // One environment, but still no pin: opened 未验真, never 409.
+  assert.equal(first.body.identity.verdict, "unverified");
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.body, first.body);
+});
+
+test("two entries on the same connection with no declaration open as one environment", async (t) => {
+  const url = "http://alias2.example/mcp";
+  const cwd = await project(t, { "conn-base": url, "conn-alias": url });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  // Same url and same headers is the same connection: there is nothing left to
+  // choose between, so the tie rule must not fire.
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+  assert.equal(status, 200);
+  assert.equal(body.server, "conn-alias");
+  assert.equal(body.identity.verdict, "degraded");
+});
+
+test("two entries on one url that declare different environments are still a tie", async (t) => {
+  const url = "http://alias3.example/mcp";
+  const cwd = await project(t, {
+    "same-a": { url, headers: { "x-stub-instance": "ins_demo" } },
+    "same-b": { url, headers: { "x-stub-instance": "ins_test" } },
+  });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+  assert.equal(status, 409);
+  assert.equal(body.code, "channel");
+  // Two declarations for one address are two environments, not one alias.
+  assert.deepEqual(body.candidates.map((candidate) => candidate.instanceId).sort(), ["ins_demo", "ins_test"]);
+  assert.match(body.error, /ins_demo/);
+  assert.match(body.error, /ins_test/);
+});
+
+test("a refusal lists environments, not entries: two aliases are one candidate", async (t) => {
+  const cwd = await project(t, {
+    "env-base": "http://alias4a.example/mcp",
+    "env-alias": "http://alias4b.example/mcp",
+    "env-test": "http://alias4c.example/mcp",
+  });
+  oneEnvironment(["http://alias4a.example/mcp", "http://alias4b.example/mcp"], { instanceId: "ins_demo" });
+  oneEnvironment(["http://alias4c.example/mcp"], { instanceId: "ins_test" });
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+  assert.equal(status, 409);
+  assert.equal(body.candidates.length, 2);
+  // The alias pair is one environment: named once, by its representative.
+  assert.equal(body.candidates.find((candidate) => candidate.instanceId === "ins_demo").server, "env-alias");
+  assert.equal(body.error.match(/ins_demo/g).length, 1);
+  assert.equal(body.error.includes("env-base"), false);
+});
+
+test("an alias hitting one environment while another entry misses keeps opening", async (t) => {
+  // The merge must not turn "one stack holds it" into "several might": only a
+  // second *environment* is a tie.
+  const cwd = await project(t, {
+    "env-base": "http://alias5a.example/mcp",
+    "env-alias": "http://alias5b.example/mcp",
+    empty: "http://alias5c.example/mcp",
+  });
+  oneEnvironment(["http://alias5a.example/mcp", "http://alias5b.example/mcp"], { instanceId: "ins_demo" });
+
+  const { status, body } = await read(cwd, { workspace: "ws_entity_base", key: "SSR-000033" });
+  assert.equal(status, 200);
+  assert.equal(body.server, "env-alias");
+  assert.equal(body.identity.instanceId, "ins_demo");
+});
+
+// --- A link's instanceId selects, it never verifies (TASK-000023 gap 2) -----
+
+test("a link's instanceId against an undeclared endpoint degrades with no expectation", async (t) => {
+  // AC-5b: the endpoint declares nothing, so there is nothing to compare the
+  // link's request with. It stays a request, not an expectation.
+  const url = "http://id12.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const { status, body } = await read(cwd, {
+    server: "entity-base",
+    workspace: "ws_entity_base",
+    key: "SSR-000033",
+    instanceId: "ins_demo",
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.identity.verdict, "degraded");
+  assert.equal(body.identity.source, "none");
+  assert.equal(body.identity.expected, undefined);
+  // The request is still named — as something that could not be checked.
+  assert.match(body.identity.detail, /ins_demo/);
+  assert.match(body.identity.detail, /无法核对/);
+});
+
+test("a link asking for another environment than the endpoint declares is refused before any read", async (t) => {
+  const url = "http://id13.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  serverInfos.set(url, { instanceId: "ins_demo" });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const { status, body } = await read(cwd, {
+    server: "entity-base",
+    workspace: "ws_entity_base",
+    key: "SSR-000033",
+    instanceId: "ins_test",
+  });
+
+  assert.equal(status, 409);
+  assert.equal(body.code, "instance-mismatch");
+  assert.equal(body.expected, "ins_test");
+  assert.equal(body.actual, "ins_demo");
+  assert.equal(calls.some((call) => call.endsWith(" get")), false);
 });
 
 // --- A write answers with the state it produced (DEFECT-000085) ---------------

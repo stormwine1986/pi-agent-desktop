@@ -85,7 +85,7 @@ interface EntityResponse {
     instanceId?: string;
     instanceName?: string;
     expected?: string;
-    source: "link" | "config" | "none";
+    source: "config" | "none";
     detail: string;
   };
 }
