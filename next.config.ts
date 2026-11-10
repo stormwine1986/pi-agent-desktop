@@ -29,6 +29,24 @@ const nextConfig: NextConfig = {
     ? { output: "standalone" as const, distDir: ".next-desktop" }
     : {}),
   outputFileTracingRoot: configDir,
+  // The file tracer folds every path that reaches one of its globs into the
+  // standalone server. `lib/branding.ts` imports a JSON file from `src-tauri/`,
+  // so the tracer walks that directory — and `tauri build` copies
+  // `src-tauri/resources` into `src-tauri/target/<profile>/resources`, which
+  // means each packaging run traced the previous run's staged server into the
+  // new one. Two runs of `desktop:prepare` in one checkout therefore nested
+  // `resources/server` inside itself until `findOverlongPaths()` refused to
+  // build (the third package of SSR-000096 failed exactly that way). Build
+  // output is never an input to the trace, so keep it out of it.
+  outputFileTracingExcludes: {
+    "/*": [
+      ".next/**",
+      ".next-desktop/**",
+      "src-tauri/target/**",
+      "src-tauri/resources/server/**",
+      "src-tauri/resources/node/**",
+    ],
+  },
   experimental: {
     ...(isDesktopBuild
       ? { webpackBuildWorker: true, webpackMemoryOptimizations: true }

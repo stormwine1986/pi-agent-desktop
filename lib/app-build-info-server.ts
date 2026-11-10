@@ -9,18 +9,20 @@ const MANIFEST_NAME = "component-versions.json";
 /**
  * Locate the packaged manifest.
  *
- * - Packaged: the Rust shell starts the server with the server directory as its
- *   working directory (`resources/server`), and the manifest sits beside it
- *   (`resources/component-versions.json`) — the same file the shell compares
- *   against in `stale_running_build()`.
- * - `npm run dev` / `npm start` from a checkout: the repository copy.
+ * The Rust shell starts the server with the server directory as its working
+ * directory (`resources/server`), and the manifest sits beside it
+ * (`resources/component-versions.json`) — the same file the shell compares
+ * against in `stale_running_build()`.
+ *
+ * Deliberately no repository-relative candidate: a literal directory name next
+ * to a `resolve(process.cwd(), …)` makes Next's file tracer (`@vercel/nft`)
+ * glob that whole tree into the standalone server, which once staged
+ * `src-tauri/target/release/resources/server` inside itself and failed the
+ * Windows path-length gate. A checkout therefore reports no build identity —
+ * which is correct, because a dev server is not the package.
  */
 export function locateComponentManifest(cwd = process.cwd()) {
-  const candidates = [
-    resolve(cwd, "..", MANIFEST_NAME),
-    resolve(cwd, "src-tauri", "resources", MANIFEST_NAME),
-    resolve(cwd, MANIFEST_NAME),
-  ];
+  const candidates = [resolve(cwd, "..", MANIFEST_NAME), resolve(cwd, MANIFEST_NAME)];
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
