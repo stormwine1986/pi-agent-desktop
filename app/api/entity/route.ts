@@ -201,20 +201,106 @@ function candidateLine(candidate: IdentityCandidate): string {
 }
 
 /**
- * Several entries hold the key and nothing tells them apart.
+ * Hits folded by the **environment** they point at, not by the entry that names
+ * it (`TASK-000023` gap 1).
+ *
+ * Two entries may be two names for one place: `entity-base` and
+ * `entity-base-alias` both point at the demo stack. Probing then produced two
+ * hits in one space, which looked like the unsolvable tie `DEFECT-000084`
+ * refuses — even though there is only one environment to open. The merge rules:
+ *
+ * 1. a declared `instanceId` decides: same id → one environment, different ids →
+ *    two (the tie stands);
+ * 2. a declared id on one side and nothing on the other never merge — nothing
+ *    proves they are the same place, so the conservative refusal stays;
+ * 3. with no declaration on either side, the same connection (`url` + headers)
+ *    is one environment; a different url is not.
+ *
+ * `target.fingerprint` cannot be the key: it hashes the `server` name too
+ * (`lib/mcp-call.ts`), so two aliases always differ and a merge could never
+ * happen. No extra handshake is made for this — the attempts are the ones
+ * `describeAll()` already holds (AC-6).
+ */
+function environmentKeyOf(attempt: Attempt): string {
+  if (attempt.identity?.instanceId) return `id:${attempt.identity.instanceId}`;
+  const headers = attempt.target?.headers ?? {};
+  const pairs = Object.keys(headers)
+    .sort()
+    .map((name) => [name, headers[name]] as const);
+  return `conn:${attempt.target?.url ?? ""}|${JSON.stringify(pairs)}`;
+}
+
+interface HitEnvironment {
+  key: string;
+  members: Attempt[];
+}
+
+function groupHits(hits: Attempt[]): HitEnvironment[] {
+  const byKey = new Map<string, Attempt[]>();
+  for (const hit of hits) {
+    const key = environmentKeyOf(hit);
+    const members = byKey.get(key);
+    if (members) members.push(hit);
+    else byKey.set(key, [hit]);
+  }
+  return [...byKey.entries()].map(([key, members]) => ({ key, members }));
+}
+
+/**
+ * The entry that speaks for one environment — deterministic, so a regression can
+ * assert the same answer whatever order `mcp.json` lists the entries in.
+ *
+ * The link's own `server` wins (that name is this project's instruction, not a
+ * guess — `DEFECT-000084`), then an entry that pins its environment, then
+ * dictionary order of the entry name.
+ */
+function representativeOf(environment: HitEnvironment, server: string | null): Attempt {
+  const ranked = [...environment.members].sort((a, b) => {
+    const namedA = server !== null && sameMcpServer(a.name, server) ? 0 : 1;
+    const namedB = server !== null && sameMcpServer(b.name, server) ? 0 : 1;
+    if (namedA !== namedB) return namedA - namedB;
+    const pinnedA = a.target?.pinnedInstanceId ? 0 : 1;
+    const pinnedB = b.target?.pinnedInstanceId ? 0 : 1;
+    if (pinnedA !== pinnedB) return pinnedA - pinnedB;
+    return a.name.localeCompare(b.name);
+  });
+  return ranked[0];
+}
+
+/** One candidate per environment, sorted so write order cannot reach the copy. */
+function environmentCandidates(environments: HitEnvironment[], server: string | null): IdentityCandidate[] {
+  return environments
+    .map((environment) => hitCandidates([representativeOf(environment, server)])[0])
+    .sort((a, b) => (a.workspace ?? "").localeCompare(b.workspace ?? "") || a.server.localeCompare(b.server));
+}
+
+/**
+ * Several **environments** hold the key and nothing tells them apart.
  *
  * Two older deployments that share a space and a key naming scheme are
  * indistinguishable by `(workspace, key)`, and with no declaration to compare
  * the only thing left is `mcp.json` write order — an open that "looks opened but
  * belongs elsewhere", which `AR-000011` / `SSR-000092` ④ forbid. So the answer
  * is a refusal that names every candidate, never `scoped[0]`.
+ *
+ * Candidates are the merged environments, not the entries: two names for one
+ * place are one candidate, and listing them separately produced copy that
+ * contradicted itself (`env-alias:ins_demo`、`env-localhost:ins_demo`).
  */
-function ambiguousHits(key: string, workspace: string | null, hits: Attempt[], scoped: Attempt[]): Failure {
-  const candidates = hitCandidates(scoped.length > 0 ? scoped : hits);
+function ambiguousHits(input: {
+  key: string;
+  workspace: string | null;
+  hits: Attempt[];
+  scoped: Attempt[];
+  environments: HitEnvironment[];
+  server: string | null;
+}): Failure {
+  const { key, workspace, hits, scoped, environments, server } = input;
+  const candidates = environmentCandidates(environments, server);
   const listed = candidates.map(candidateLine).join("、");
   const fix = "请给其中一条加 instanceId（mcp.json 里 pin，或部署时声明），或改用带 instanceId 的链接。";
   const error = scoped.length > 1
-    ? `${scoped.length} 个 server 在空间 ${workspace} 里都认得 ${key}（${listed}），按书写顺序挑一个就是归属出错，无法确定打开哪一个。${fix}`
+    ? `${environments.length} 个环境在空间 ${workspace} 里都认得 ${key}（${listed}），按书写顺序挑一个就是归属出错，无法确定打开哪一个。${fix}`
     : workspace
       ? `${hits.length} 个 server 都认得 ${key}（${listed}），链接里的空间 ${workspace} 与它们都不一致，也没有可对照的 instanceId，无法确定打开哪一个。${fix}`
       : `${hits.length} 个 server 都认得 ${key}（${listed}），链接没有指明空间，也没有可对照的 instanceId，无法确定打开哪一个。${fix}`;
@@ -278,6 +364,10 @@ async function openOn(
  * 4. only an environment that declares *nothing* is probed by workspace + key:
  *    one hit may open (labelled degraded), several are refused with the list —
  *    same space included; only the entry the link names may break that tie.
+ *
+ * Probing counts **environments**, not entries (`TASK-000023` gap 1): several
+ * `mcp.json` names for one stack are one hit, so they open instead of raising a
+ * tie nobody can satisfy. See `environmentKeyOf`.
  *
  * A named channel this project does not configure is still a hint, not a
  * demand: every person's `.pi/mcp.json` names its own endpoint, so a reply
@@ -402,18 +492,23 @@ async function pickTarget(
   const scoped = workspace
     ? hits.filter((attempt) => text(attempt.entity?.workspaceId) === workspace)
     : [];
+  // Hits are folded by environment before any tie is judged (`TASK-000023`
+  // gap 1): two entry names for one stack are one hit, not an unsolvable tie.
+  const considered = scoped.length > 0 ? scoped : hits;
+  const environments = groupHits(considered);
   // One hit is the answer even when the link's space disagrees (a stale or
   // mistyped space is not a reason to withhold the only entity there is).
-  // Several hits in one space are a tie the space cannot break: the one thing
-  // that may break it is the entry the link names, because that name is this
-  // project's own instruction — everything else is write order, which is not an
-  // answer (see `ambiguousHits`).
-  const namedHit = scoped.length > 1 && server
-    ? scoped.find((attempt) => sameMcpServer(attempt.name, server))
+  // Several environments in one space are a tie the space cannot break: the one
+  // thing that may break it is the entry the link names, because that name is
+  // this project's own instruction — everything else is write order, which is not
+  // an answer (see `ambiguousHits`).
+  const namedHit = environments.length > 1 && server
+    ? considered.find((attempt) => sameMcpServer(attempt.name, server))
     : undefined;
+  // The entry that speaks for its environment: deterministic, so the response's
+  // `server` does not depend on `mcp.json` write order.
   const hit = namedHit
-    ?? (scoped.length === 1 ? scoped[0] : undefined)
-    ?? (hits.length === 1 ? hits[0] : undefined);
+    ?? (environments.length === 1 ? representativeOf(environments[0], server) : undefined);
   if (hit) {
     const decided = judgeIdentity({
       server: hit.name,
@@ -435,7 +530,7 @@ async function pickTarget(
     };
   }
 
-  if (hits.length > 1) return ambiguousHits(key, workspace, hits, scoped);
+  if (environments.length > 1) return ambiguousHits({ key, workspace, hits, scoped, environments, server });
 
   const missing = server
     ? `这个项目没有名为 "${server}" 的 server（已配置：${names.join("、")}），`
