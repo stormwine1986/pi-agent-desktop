@@ -6,6 +6,7 @@ import { sameMcpServer } from "@/lib/mcp-server-name";
 import { APP_PREF_KEYS, getPrefJson, setPrefJson } from "@/lib/app-prefs";
 import { groupViews, type ViewGroupDecl } from "@/lib/views/group";
 import { pageWindow, clampOffset } from "@/lib/views/page";
+import { watchIndicator, type WatchTone } from "@/lib/views/watch-indicator";
 
 /**
  * The to-do views declared by the workspace's `.pi/views.yaml`.
@@ -71,8 +72,15 @@ const muted = "rgba(128,128,128,0.75)";
 const line = "rgba(128,128,128,0.25)";
 const surface = "rgba(128,128,128,0.06)";
 const danger = "var(--danger)";
-/** Amber: something is turned off but nothing failed — a watched view that cannot dispatch. */
+/** Amber: nothing failed, but a round did not happen — a gated dispatch, a shifted page. */
 const warning = "var(--warning)";
+/**
+ * One colour per dispatch state (SSR-000089 AC-11): green = this view will
+ * dispatch, amber = it was gated this round, red = it will not dispatch until
+ * someone fixes it. "Not watched" has no dot at all, which is why there is no
+ * fourth colour to mistake for one of these three.
+ */
+const TONE_COLOR: Record<WatchTone, string> = { ready: "var(--success)", skipped: warning, error: danger };
 
 const NAV_WIDTH = 180;
 const POLL_INTERVAL_MS = 60_000;
@@ -281,6 +289,9 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
   }, [evaluate]);
 
   const nav = useMemo(() => groupViews(views, data?.groups ?? []), [data?.groups, views]);
+  // Same derivation as the row dots: one function, so a view cannot look ready
+  // in the list and skipped in its own pane.
+  const activeDispatch = active ? watchIndicator(active.watch) : null;
 
   // A page can stop existing between refreshes: a state change takes rows out of
   // the view, and the offset the user sits on then points past the end. Showing
@@ -347,6 +358,9 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
     if (!view) return null;
     const isActive = index === activeIndex;
     const fresh = heldCounts[index] ?? 0;
+    // Null for a view that does not dispatch; the dot is the whole difference
+    // between "watched and idle" and "not watched" (AC-11).
+    const dispatch = watchIndicator(view.watch);
     return (
       <button
         key={index}
@@ -395,22 +409,14 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
           </span>
         )}
         {/* A watched view that cannot dispatch, or that a gate closed this
-            round, looks exactly like an empty queue. The reason has to be
-            visible without opening anything. */}
-        {view.watch?.disabled && (
+            round, looks exactly like an empty queue. The state has to be
+            visible without opening anything, and distinguishable from a view
+            that was never watched (which shows no dot at all). */}
+        {dispatch && (
           <span
-            aria-label="watch 未生效"
-            title={`watch 未生效：${view.watch.disabled}`}
-            style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: warning }}
-          >
-            ●
-          </span>
-        )}
-        {!view.watch?.disabled && view.watch?.skipped && (
-          <span
-            aria-label="本轮跳过"
-            title={`本轮跳过：${view.watch.skipped}`}
-            style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: warning }}
+            aria-label={dispatch.label}
+            title={dispatch.label === dispatch.detail ? dispatch.label : `${dispatch.label}：${dispatch.detail}`}
+            style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: TONE_COLOR[dispatch.tone] }}
           >
             ●
           </span>
@@ -571,6 +577,15 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
             {failure && <Notice text={failure} />}
             <header style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6, fontSize: "var(--fs-caption)" }}>
               <strong style={{ fontWeight: "var(--fw-semibold)" }}>{active.title}</strong>
+              {activeDispatch && (
+                <span
+                  aria-label={activeDispatch.label}
+                  title={activeDispatch.label === activeDispatch.detail ? activeDispatch.label : `${activeDispatch.label}：${activeDispatch.detail}`}
+                  style={{ color: TONE_COLOR[activeDispatch.tone], fontSize: "var(--fs-micro)" }}
+                >
+                  ●
+                </span>
+              )}
               {!active.error && (
                 <span style={{ color: muted }}>
                   {pageLabel(active)}
@@ -592,14 +607,9 @@ export function ViewsPanel({ cwd, onBringToChat, onOpenEntity, onCreateEntity }:
                 </span>
               )}
             </header>
-            {active.watch?.disabled && (
-              <div style={{ fontSize: "var(--fs-micro)", color: warning, marginBottom: 6, lineHeight: 1.5 }}>
-                watch 未生效：{active.watch.disabled}
-              </div>
-            )}
-            {!active.watch?.disabled && active.watch?.skipped && (
-              <div style={{ fontSize: "var(--fs-micro)", color: warning, marginBottom: 6, lineHeight: 1.5 }}>
-                本轮跳过：{active.watch.skipped}
+            {activeDispatch && activeDispatch.tone !== "ready" && (
+              <div style={{ fontSize: "var(--fs-micro)", color: TONE_COLOR[activeDispatch.tone], marginBottom: 6, lineHeight: 1.5 }}>
+                {activeDispatch.label}：{activeDispatch.detail}
               </div>
             )}
             {active.error ? <Notice text={active.error} /> : (

@@ -98,10 +98,13 @@ async function watchStatusOf(
   view: ViewDefinition,
 ): Promise<{ disabled: string | null; inFlight: boolean; skipped: string | null } | null> {
   if (!view.watch) return null;
+  // `enabled: false` is the pause switch, and "paused" is a state the reader of
+  // the panel has to see: reporting it as a clean watch made a switched-off
+  // queue look like an empty one (SSR-000089 AC-11). The pump skips paused views
+  // entirely, so nothing in memory would say it either.
+  if (!view.watch.enabled) return { disabled: "配置里关闭了派发", inFlight: false, skipped: null };
   const known = watchViewStatus(cwd, view);
   if (known) return known;
-  // `enabled: false` is the pause switch, not a failure: no gate reason to show.
-  if (!view.watch.enabled) return { disabled: null, inFlight: false, skipped: null };
 
   const deps = createLiveDeps();
   const disabled = await validate(cwd, view, view.watch, deps);

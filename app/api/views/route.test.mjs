@@ -76,7 +76,15 @@ const stub = createServer((request, response) => {
         reply({ jsonrpc: "2.0", id: message.id, result: { isError: true, content: [{ type: "text", text: "metadata unavailable" }] } });
         return;
       }
-      text({ fields: metadataByType[args.type] ?? [] });
+      text({
+        fields: metadataByType[args.type] ?? [],
+        // The dispatch checks read the state machine, not only the field list:
+        // a view is refused when its claim states are not reachable.
+        lifecycle: {
+          validStates: ["DONE", "DOING", "PARKED", "FREE"],
+          routes: [{ from: "DONE", to: "DOING" }, { from: "DOING", to: "PARKED" }],
+        },
+      });
       return;
     }
     if (name === "list") {
@@ -169,4 +177,54 @@ test("a view that does not sort never reads the type definition", async () => {
 `);
   assert.equal(view.error, null);
   assert.equal(calls.some((call) => call.name === "get_metadata" && call.args.type === "DELTA"), false);
+});
+
+/**
+ * SSR-000089 AC-11: the four dispatch states have to be readable from this
+ * response alone. What the panel must never get is the same answer for "watched
+ * and idle" and "not watched": that was the ambiguity the four indicators were
+ * added for, and `watch: null` is how "not watched" is told apart.
+ */
+const watched = (title, claim, extra = "") => `  - title: ${title}
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+    watch:
+      project: .
+      prompt: .pi/mcp.json
+      intervalSec: 60
+      timeoutMin: 30
+      claim:
+        from: DONE
+        to: DOING
+        manual: ${claim}
+${extra}`;
+
+test("a view without dispatch says so by omission, not by an idle watch", async () => {
+  const [view] = await evaluate(`views:
+  - title: 只读
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+`);
+  assert.equal(view.watch, null);
+});
+
+test("a paused view reports a reason instead of looking like an empty queue", async () => {
+  const [view] = await evaluate(`views:
+${watched("暂停了", "PARKED", "      enabled: false\n")}`);
+  assert.equal(view.error, null);
+  assert.ok(view.watch, "a watched view always names its dispatch state");
+  assert.match(view.watch.disabled, /关闭了派发/);
+  assert.equal(view.watch.skipped, null, "paused is not the same state as skipped");
+});
+
+test("a view held by the manual gate reports why it was skipped", async () => {
+  const [view] = await evaluate(`views:
+${watched("待人工挡着", "PARKED")}`);
+  assert.equal(view.error, null);
+  assert.equal(view.watch.disabled, null, "a gated view is not a broken view");
+  assert.match(view.watch.skipped, /有 1 条待人工/, "the count comes from the same slice the pump uses");
 });
