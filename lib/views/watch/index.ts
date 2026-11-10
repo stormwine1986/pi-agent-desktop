@@ -292,32 +292,37 @@ export async function validate(
   watch: ViewWatch,
   deps: WatchDeps,
 ): Promise<string | null> {
-  if (!isDirectory(watch.project)) return `watch.project 不是目录：${watch.project}`;
-  if (!existsSync(watch.prompt)) return `watch.prompt 不存在：${watch.prompt}`;
+  // Every refusal names the view: the panel lists all views in one column, so
+  // without the name a broken view can only be found by counting rows. One
+  // suffix builder keeps the branches from drifting apart again (AC-2).
+  const refuse = (message: string): string => `${message}（视图 "${view.title}"）`;
+
+  if (!isDirectory(watch.project)) return refuse(`watch.project 不是目录：${watch.project}`);
+  if (!existsSync(watch.prompt)) return refuse(`watch.prompt 不存在：${watch.prompt}`);
   try {
     const text = await readPrompt(watch.prompt);
-    if (!text.trim()) return `watch.prompt 是空文件：${watch.prompt}`;
+    if (!text.trim()) return refuse(`watch.prompt 是空文件：${watch.prompt}`);
     // Same shape as every other configuration failure: the view is disabled
     // (AC-11 red dot) and the sentence names the file and the missing piece.
     if (!text.includes(REQUIRED_PROMPT_PLACEHOLDER)) {
-      return `watch.prompt 模板缺 ${REQUIRED_PROMPT_PLACEHOLDER}，派发正文里将没有该条目的 key：${watch.prompt}（视图 "${view.title}"）`;
+      return refuse(`watch.prompt 模板缺 ${REQUIRED_PROMPT_PLACEHOLDER}，派发正文里将没有该条目的 key：${watch.prompt}`);
     }
   } catch (error) {
-    return `watch.prompt 读不到：${error instanceof Error ? error.message : String(error)}`;
+    return refuse(`watch.prompt 读不到：${error instanceof Error ? error.message : String(error)}`);
   }
 
   const sliced = sliceDql(view.dql, watch.claim.from, watch.claim.to);
-  if (!sliced.ok) return `${sliced.error}（视图 "${view.title}"）`;
+  if (!sliced.ok) return refuse(sliced.error);
 
   if (watch.claim.manual === watch.claim.from) {
-    return `watch.claim.manual 不能等于 from（${watch.claim.from}），否则待人工会被立刻重新派发（视图 "${view.title}"）`;
+    return refuse(`watch.claim.manual 不能等于 from（${watch.claim.from}），否则待人工会被立刻重新派发`);
   }
 
   const type = extractType(view.dql);
   if (!type) return null; // No type in the DQL: state checks need metadata we cannot fetch.
 
   const metadata = await readStates(deps, { panelCwd: projectCwd, server: view.server, workspace: view.workspace }, type);
-  if (!metadata.ok) return metadata.error;
+  if (!metadata.ok) return refuse(metadata.error);
   const { validStates, routes } = metadata.value;
 
   for (const [field, state] of [
@@ -326,7 +331,7 @@ export async function validate(
     ["manual", watch.claim.manual],
   ] as const) {
     if (!validStates.includes(state)) {
-      return `watch.claim.${field} = "${state}" 不是类型 ${type} 的状态（可用：${validStates.join(" / ")}）`;
+      return refuse(`watch.claim.${field} = "${state}" 不是类型 ${type} 的状态（可用：${validStates.join(" / ")}）`);
     }
   }
   const missing: string[] = [];
@@ -337,7 +342,7 @@ export async function validate(
     missing.push(`${watch.claim.to} → ${watch.claim.manual}`);
   }
   if (missing.length > 0) {
-    return `类型 ${type} 缺少路由：${missing.join("、")}（视图 "${view.title}"）`;
+    return refuse(`类型 ${type} 缺少路由：${missing.join("、")}`);
   }
   return null;
 }
