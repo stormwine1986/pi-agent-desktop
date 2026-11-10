@@ -38,7 +38,7 @@ use shell::{
     DesktopApiToken, DesktopServer, AUTOSTART_ARG, WINDOW_LABEL,
 };
 #[cfg(feature = "custom-protocol")]
-use shell::{close_splash, show_splash};
+use shell::{close_splash, show_splash, ServerJob};
 #[cfg(target_os = "linux")]
 use shell::{build_linux_tray, show_main_window};
 
@@ -806,7 +806,22 @@ fn start_packaged_server(
         command.env(SPAWN_EPOCH_ENV, since_epoch.as_millis().to_string());
     }
 
-    let mut child = command.spawn()?;
+    let child = command.spawn()?;
+
+    // Job membership follows the process, not the parent link. On Windows this
+    // is what stops MCP servers/tool subprocesses from outliving a crashed or
+    // force-killed shell and keeping resources\node\node.exe locked
+    // (DEFECT-000086). Must happen before the child starts spawning anything.
+    let job = match ServerJob::attach(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            desktop_log(
+                app,
+                &format!("could not attach the server to a kill-on-close Job Object: {error}"),
+            );
+            ServerJob::none()
+        }
+    };
 
     // Startup timing, segment 1 of 3: the shell has handed off to Node. The
     // launcher logs segment 2 (how long Node took to run its first line) and
@@ -823,6 +838,7 @@ fn start_packaged_server(
 
     Ok(SpawnedServer {
         child,
+        job,
         port,
         log_path,
     })
@@ -833,6 +849,7 @@ fn start_packaged_server(
 #[cfg(feature = "custom-protocol")]
 struct SpawnedServer {
     child: Child,
+    job: ServerJob,
     port: u16,
     log_path: std::path::PathBuf,
 }
@@ -869,13 +886,13 @@ fn await_packaged_server(
                 server_log_tail(&spawn.log_path)
             ),
         );
-        let server = DesktopServer::running(spawn.child);
+        let server = DesktopServer::running(spawn.child, spawn.job);
         server.stop();
         return Err(error.into());
     }
 
     let url = format!("http://127.0.0.1:{}", spawn.port).parse()?;
-    Ok((url, DesktopServer::running(spawn.child)))
+    Ok((url, DesktopServer::running(spawn.child, spawn.job)))
 }
 
 #[cfg(all(test, feature = "custom-protocol"))]
@@ -1246,6 +1263,25 @@ fn spawn_focus_monitor(app: AppHandle) {
     });
 }
 
+/// A second launch after an overwrite install comes from the newly installed
+/// binary, while the primary that handles the callback is still the previous
+/// build. Silently focusing the old window made the upgrade look like it did
+/// nothing (DEFECT-000086 ③). Compare the running shell's compile-time version
+/// with the manifest on disk and say what to do instead.
+#[cfg(windows)]
+fn stale_running_build(app: &AppHandle) -> Option<(String, String)> {
+    let running = app.package_info().version.to_string();
+    let manifest = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("resources/component-versions.json");
+    let raw = fs::read_to_string(manifest).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let installed = parsed.get("appVersion")?.as_str()?.to_string();
+    (installed != running).then_some((running, installed))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     mark_process_start();
@@ -1274,7 +1310,20 @@ pub fn run() {
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         let value = app.clone();
-        let _ = app.run_on_main_thread(move || shell::show_main_window(&value));
+        let _ = app.run_on_main_thread(move || {
+            if let Some((running, installed)) = stale_running_build(&value) {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                value
+                    .dialog()
+                    .message(format!(
+                        "Entity Assistant {installed} is installed, but this window is still running {running}.\n\nQuit Entity Assistant completely (including the tray icon) and open it again to use the new version."
+                    ))
+                    .title("Entity Assistant")
+                    .kind(MessageDialogKind::Warning)
+                    .show(|_| {});
+            }
+            shell::show_main_window(&value);
+        });
     }));
     let app = builder
         // Launch at login. The OS entry (LaunchAgent / registry Run key /

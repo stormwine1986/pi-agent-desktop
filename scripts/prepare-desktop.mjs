@@ -1,4 +1,4 @@
-import { access, chmod, copyFile, cp, mkdir, readdir, rm } from "node:fs/promises";
+import { access, chmod, copyFile, cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -337,6 +337,17 @@ if (overlong.length > 0) {
 }
 
 const { binaryPath: nodeBinary, triple } = await bundleNodeRuntime();
+
+// DEFECT-000086: NSIS offers "Ignore" when the running node.exe cannot be
+// replaced, and an interrupted install can replace the server payload without
+// the runtime. Record which runtime this payload was built with so the
+// launcher (desktop/server-launcher.cjs) can refuse a mixed install instead of
+// running new server code on an old Node. `bundleNodeRuntime` copies
+// process.execPath, so this is exactly the runtime shipped in resources/node.
+await writeFile(
+  join(serverResourcesDir, "node-runtime.json"),
+  `${JSON.stringify({ node: process.version }, null, 2)}\n`,
+);
 
 // `tauri build` copies `src-tauri/resources` into `target/release/resources`
 // file by file, never deleting what an earlier build left behind. Stale

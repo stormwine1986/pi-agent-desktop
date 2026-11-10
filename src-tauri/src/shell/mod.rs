@@ -1,3 +1,4 @@
+mod job;
 mod macos_menu;
 mod platform_tray;
 pub mod popup;
@@ -21,6 +22,7 @@ use tauri::{AppHandle, Manager, Url};
 
 use crate::logging::{desktop_log, since_process_start_ms};
 
+pub use job::ServerJob;
 #[cfg(target_os = "macos")]
 pub use macos_menu::build_macos_app_menu;
 #[cfg(target_os = "linux")]

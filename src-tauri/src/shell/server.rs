@@ -1,5 +1,7 @@
 use std::{io, process::Child, sync::Mutex};
 
+use super::job::ServerJob;
+
 // Each platform's `stop()` path needs its own imports; the split out of
 // lib.rs lost these, which only a Windows build notices.
 #[cfg(windows)]
@@ -12,6 +14,9 @@ use std::{
 
 pub struct DesktopServer {
     child: Mutex<Option<Child>>,
+    /// Kept alive for the whole App run. Dropping it is what kills any
+    /// surviving descendants on Windows (see job.rs).
+    _job: ServerJob,
 }
 
 /// When true, closing the main window quits the app; otherwise it hides to tray.
@@ -27,12 +32,14 @@ impl DesktopServer {
     pub fn empty() -> Self {
         Self {
             child: Mutex::new(None),
+            _job: ServerJob::none(),
         }
     }
 
-    pub fn running(child: Child) -> Self {
+    pub fn running(child: Child, job: ServerJob) -> Self {
         Self {
             child: Mutex::new(Some(child)),
+            _job: job,
         }
     }
 

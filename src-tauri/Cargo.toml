@@ -38,6 +38,14 @@ tauri-plugin-single-instance = "2"
 # Same versions wry already pulls in.
 webview2-com = "0.39"
 windows-core = "0.62"
+# Kill-on-close Job Object around the bundled server (shell/job.rs), so an
+# agent/MCP grandchild cannot outlive a crashed shell and keep node.exe locked.
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # NSVisualEffectView behind the (transparent) webview: the sidebar material.

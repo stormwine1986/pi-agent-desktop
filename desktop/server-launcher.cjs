@@ -104,12 +104,46 @@ if (Number.isFinite(shellSpawnedAt) && shellSpawnedAt > 0) {
 
 const expectedParentPid = Number.parseInt(process.env.PI_WEB_PARENT_PID ?? "", 10);
 
-// A normal App quit is handled by the Rust shell. This small watchdog also
-// prevents the local server from becoming orphaned if the GUI process crashes
-// or is force-terminated by macOS.
+// The launcher owns agent/tool subprocesses (MCP servers, shells). A normal
+// App quit is handled by the Rust shell, which kills this process tree. When
+// the shell crashes or is force-terminated there is nobody left to do that,
+// so take the tree down with us: a surviving child keeps
+// `resources\node\node.exe` mapped, and the next overwrite install then fails
+// on that file (DEFECT-000086). The Rust shell also puts this process in a
+// kill-on-close Job Object (shell/job.rs), which covers a crash before this
+// timer ever fires; this path covers launches that predate that job.
+function stopProcessTree() {
+  try {
+    if (process.platform === "win32") {
+      // taskkill /T follows current parent links. Grandchildren whose
+      // intermediate parent already exited are the Job Object's job.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require("node:child_process")
+        .spawn("taskkill.exe", ["/PID", String(process.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+          detached: true,
+        })
+        .unref();
+    } else {
+      // The Rust shell makes this process a group leader on unix.
+      process.kill(-process.pid, "SIGTERM");
+    }
+  } catch {
+    // Best effort: the shell may already have killed part of the tree.
+  }
+}
+
 const parentWatchdog = setInterval(() => {
-  if (!Number.isInteger(expectedParentPid) || process.ppid === 1) {
+  if (!Number.isInteger(expectedParentPid)) {
+    // Started by hand (or by a shell that predates PI_WEB_PARENT_PID): there
+    // is no parent to watch. "Unknown" is not "gone" — keep running.
+    clearInterval(parentWatchdog);
+    return;
+  }
+  if (process.ppid === 1) {
     console.error("[Entity Assistant] desktop shell is gone (orphaned); server exiting");
+    stopProcessTree();
     process.exit(0);
   }
 
@@ -117,6 +151,7 @@ const parentWatchdog = setInterval(() => {
     process.kill(expectedParentPid, 0);
   } catch {
     console.error(`[Entity Assistant] desktop shell (pid ${expectedParentPid}) is gone; server exiting`);
+    stopProcessTree();
     process.exit(0);
   }
 }, 1_000);
@@ -236,6 +271,31 @@ try {
 } catch (cacheError) {
   // Cleanup must never keep the server from starting.
   console.error("[Entity Assistant] route-cache cleanup failed:", cacheError);
+}
+
+// An overwrite install can leave the previous `resources/node/node.exe` next to
+// the new server payload: when NSIS cannot replace the locked runtime it offers
+// "Ignore", and without this check the old runtime silently loads the new
+// server (DEFECT-000086). The build stamps the runtime it bundled next to this
+// launcher; refuse to start when the running runtime is not that build, rather
+// than failing later as a "Code mode / terminal does nothing" report.
+try {
+  const stampPath = path.join(__dirname, "node-runtime.json");
+  const stamp = JSON.parse(fs.readFileSync(stampPath, "utf8"));
+  if (typeof stamp.node === "string" && stamp.node !== process.version) {
+    console.error(
+      `[Entity Assistant] refusing to start: this server payload was built with bundled Node.js ${stamp.node}, ` +
+        `but the bundled runtime is ${process.version}. The last install was interrupted or skipped a file. ` +
+        `Quit Entity Assistant completely and run the installer again.`,
+    );
+    process.exit(1);
+  }
+} catch (error) {
+  // Installs made before this check, and the tests that stage only the
+  // launcher, have no stamp. Anything else is worth a line in server.log.
+  if (error?.code !== "ENOENT") {
+    console.error("[Entity Assistant] could not read the bundled Node.js version stamp:", error);
+  }
 }
 
 // The standalone Next.js entrypoint is CommonJS. Timed on its own: loading the
