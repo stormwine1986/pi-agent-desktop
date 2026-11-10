@@ -42,8 +42,20 @@
     ClearErrors
     FileOpen $R9 "${EA_NODE_RUNTIME}" a
     ${If} ${Errors}
-      MessageBox MB_ICONSTOP|MB_OK "Entity Assistant is still running. Close Entity Assistant completely (including the tray icon), then start the installer again. If it keeps happening, end this process in Task Manager and retry: ${EA_NODE_RUNTIME}"
-      Abort
+      ; A `/S` install has nobody to click OK, so a dialog here would hang an
+      ; unattended deployment forever (SSR-000095 AC-3). Tauri's own generated
+      ; CheckIfAppIsRunning takes the same branch on /S (utils.nsh: `IfSilent` →
+      ; log line + Abort, no MessageBox); follow that precedent exactly. The
+      ; interactive prompt below is unchanged.
+      !define EA_RUNTIME_UID ${__LINE__}
+      IfSilent ea_runtime_busy_silent_${EA_RUNTIME_UID} ea_runtime_busy_ui_${EA_RUNTIME_UID}
+      ea_runtime_busy_ui_${EA_RUNTIME_UID}:
+        MessageBox MB_ICONSTOP|MB_OK "Entity Assistant is still running. Close Entity Assistant completely (including the tray icon), then start the installer again. If it keeps happening, end this process in Task Manager and retry: ${EA_NODE_RUNTIME}"
+        Abort
+      ea_runtime_busy_silent_${EA_RUNTIME_UID}:
+        DetailPrint "Entity Assistant: cannot open ${EA_NODE_RUNTIME} for writing (still locked after Restart Manager shutdown, status $R9). Aborting this silent install; close Entity Assistant completely and run the installer again."
+        Abort
+      !undef EA_RUNTIME_UID
     ${Else}
       FileClose $R9
     ${EndIf}
