@@ -105,6 +105,9 @@ before(async () => {
   await writeFile(join(project, ".pi", "mcp.json"), JSON.stringify({
     mcpServers: { stub: { type: "http", url: `http://127.0.0.1:${port}/mcp` } },
   }));
+  // The dispatch template has to name the entity it is dispatching (`{{key}}`),
+  // otherwise the view is refused before the gate is ever consulted.
+  await writeFile(join(project, ".pi", "task.md"), "处理 {{key}}\n");
   allowFileRoot(project);
 });
 
@@ -192,7 +195,7 @@ const watched = (title, claim, extra = "") => `  - title: ${title}
     columns: [key]
     watch:
       project: .
-      prompt: .pi/mcp.json
+      prompt: .pi/task.md
       intervalSec: 60
       timeoutMin: 30
       claim:

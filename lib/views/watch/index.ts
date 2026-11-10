@@ -21,6 +21,21 @@ import type { WatchDeps } from "./core";
 const TICK_MS = 60_000;
 const VALIDATION_TTL_MS = 60_000;
 
+/**
+ * The one placeholder a template cannot leave out.
+ *
+ * The prompt is whatever the template says: `renderPrompt` fills the
+ * placeholders that appear in it and produces nothing for the ones that do not
+ * (`core.ts`). A template without `{{key}}` therefore dispatches a session that
+ * cannot tell which entity it owns, and the executor can only guess with a
+ * `list` — the session title carries the key, but the model never sees its own
+ * title (SSR-000089 ⑤, AC-12/AC-13). That is a configuration error, decided
+ * here at load time, not a silent round.
+ *
+ * Every other placeholder stays optional: a template gives what it asks for.
+ */
+export const REQUIRED_PROMPT_PLACEHOLDER = "{{key}}";
+
 export interface WatchPumpOptions {
   deps?: WatchDeps;
   /** Projects to scan; defaults to the ones the session list knows about. */
@@ -186,6 +201,11 @@ export async function validate(
   try {
     const text = await readPrompt(watch.prompt);
     if (!text.trim()) return `watch.prompt 是空文件：${watch.prompt}`;
+    // Same shape as every other configuration failure: the view is disabled
+    // (AC-11 red dot) and the sentence names the file and the missing piece.
+    if (!text.includes(REQUIRED_PROMPT_PLACEHOLDER)) {
+      return `watch.prompt 模板缺 ${REQUIRED_PROMPT_PLACEHOLDER}，派发正文里将没有该条目的 key：${watch.prompt}（视图 "${view.title}"）`;
+    }
   } catch (error) {
     return `watch.prompt 读不到：${error instanceof Error ? error.message : String(error)}`;
   }
