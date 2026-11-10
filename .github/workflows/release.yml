@@ -88,15 +88,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Prepare packaged Next.js server
+        run: npm run desktop:prepare
+
+      # SSR-000096: the manifest records which build the installer ships, so it
+      # has to be written after the Next build that produces `.next-desktop`
+      # (the `BUILD_ID` it stores) and before `tauri build` copies resources.
+      # `release:verify` refuses a dirty tree and a manifest that disagrees with
+      # `git rev-parse` / `git status` / `BUILD_ID`.
       - name: Verify bundled component releases
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm run release:manifest
           npm run release:verify
-
-      - name: Prepare packaged Next.js server
-        run: npm run desktop:prepare
 
       - name: Test desktop shell
         if: runner.os == 'Windows' || runner.os == 'Linux'
@@ -169,10 +174,26 @@ jobs:
       - name: Check out pi-agent-desktop
         uses: actions/checkout@v7
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Upload component manifest to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          # Re-generated rather than uploaded as committed: the committed copy
+          # is written by the component sync *before* its version-bump commit,
+          # so it would name the previous commit and claim a dirty tree
+          # (SSR-000096 ②). This copy has no BUILD_ID (no Next build here) but
+          # the commit, branch, time and tool version are the release's.
+          npm run release:manifest -- --allow-missing-build-id
           version="$(node -p "require('./src-tauri/pi-agent-desktop-package.json').version")"
           gh release upload "v$version" src-tauri/resources/component-versions.json --clobber
           # A prerelease is never served by the updater. Say so explicitly

@@ -942,6 +942,92 @@ mod tests {
     }
 
     #[test]
+    fn same_version_rebuilds_are_told_apart_by_commit_and_build_id() {
+        use super::{stale_build_reason, BuildIdentity};
+
+        let running = BuildIdentity {
+            version: "0.8.2".to_string(),
+            commit: "e0a8022".to_string(),
+            commit_full: "e0a8022a1b2c3d4e5f60718293a4b5c6d7e8f901".to_string(),
+            dirty: Some(false),
+            build_id: "j_83oXsmFGVdK5TvnDckq".to_string(),
+        };
+        assert_eq!(
+            stale_build_reason(&running, &running.clone()),
+            None,
+            "the running build is not stale against itself"
+        );
+
+        // AC-4: same product version, different commit — the case a version
+        // comparison cannot see.
+        let other_commit = BuildIdentity {
+            commit: "bc26571".to_string(),
+            commit_full: "bc265713c3a4f392b868dd6bd24cfcf8df84ecc5".to_string(),
+            build_id: "k_9qXb3nP0wLe2Rv7hTy8Z".to_string(),
+            ..running.clone()
+        };
+        let reason = stale_build_reason(&running, &other_commit).expect("a different commit is stale");
+        assert!(reason.contains("commit"), "{reason}");
+        assert!(reason.contains("e0a8022"), "{reason}");
+        assert!(reason.contains("bc26571"), "{reason}");
+
+        // Two packages of one commit (0.8.2 on 11-03 and 11-10): only the Next
+        // build id differs.
+        let rebuilt = BuildIdentity {
+            build_id: "k_9qXb3nP0wLe2Rv7hTy8Z".to_string(),
+            ..running.clone()
+        };
+        let reason = stale_build_reason(&running, &rebuilt).expect("a rebuild is stale");
+        assert!(reason.contains("Next build"), "{reason}");
+
+        // A dirty tree is a different build of the same commit.
+        let dirty = BuildIdentity {
+            dirty: Some(true),
+            ..running.clone()
+        };
+        let reason = stale_build_reason(&running, &dirty).expect("a dirty build is stale");
+        assert!(reason.contains("working tree"), "{reason}");
+
+        // Nothing to compare is not a mismatch: an unstamped build may report
+        // nothing, but must never be reported as the wrong build.
+        let unstamped = BuildIdentity {
+            commit: String::new(),
+            commit_full: String::new(),
+            dirty: None,
+            build_id: String::new(),
+            ..running.clone()
+        };
+        assert_eq!(stale_build_reason(&running, &unstamped), None);
+        assert_eq!(stale_build_reason(&unstamped, &running), None);
+    }
+
+    #[test]
+    fn build_identity_label_matches_the_settings_row() {
+        use super::BuildIdentity;
+
+        let clean = BuildIdentity {
+            version: "0.8.2".to_string(),
+            commit: "e0a8022".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(clean.label(), "0.8.2 · e0a8022");
+
+        let dirty = BuildIdentity {
+            dirty: Some(true),
+            ..clean.clone()
+        };
+        assert_eq!(dirty.label(), "0.8.2 · e0a8022+dirty");
+
+        // A manifest without a short sha still shows one.
+        let only_full = BuildIdentity {
+            version: "0.8.2".to_string(),
+            commit_full: "bc265713c3a4f392b868dd6bd24cfcf8df84ecc5".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(only_full.label(), "0.8.2 · bc26571");
+    }
+
+    #[test]
     fn log_timestamps_are_utc_iso() {
         assert_eq!(format_utc_millis(0), "1970-01-01T00:00:00.000Z");
         // 2024-02-29 (leap day) 23:59:59.999
@@ -1263,14 +1349,131 @@ fn spawn_focus_monitor(app: AppHandle) {
     });
 }
 
+/// What a build can say about itself: the product version plus the fingerprint
+/// compiled into the shell (`build.rs`) or read from the manifest on disk.
+///
+/// Only `stale_running_build()` uses this on Windows today, but the comparison
+/// itself is plain data so it is unit-tested on every platform.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct BuildIdentity {
+    version: String,
+    /// Short sha, the form the UI shows (`0.8.2 · e0a8022`).
+    commit: String,
+    commit_full: String,
+    /// None when the build had no git information at all.
+    dirty: Option<bool>,
+    /// Next's BUILD_ID. Two packages of the same commit differ only here.
+    build_id: String,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl BuildIdentity {
+    /// The running shell's own identity, fixed at compile time.
+    #[cfg(windows)]
+    fn running(app: &AppHandle) -> Self {
+        Self {
+            version: app.package_info().version.to_string(),
+            commit: env!("PI_AGENT_DESKTOP_GIT_COMMIT_SHORT").to_string(),
+            commit_full: env!("PI_AGENT_DESKTOP_GIT_COMMIT").to_string(),
+            dirty: match env!("PI_AGENT_DESKTOP_GIT_DIRTY") {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            },
+            build_id: env!("PI_AGENT_DESKTOP_BUILD_ID").to_string(),
+        }
+    }
+
+    /// The build the installer just put on disk.
+    #[cfg(windows)]
+    fn installed(manifest: &serde_json::Value) -> Option<Self> {
+        let version = manifest.get("appVersion")?.as_str()?.to_string();
+        let build = manifest.get("build");
+        let text = |key: &str| {
+            build
+                .and_then(|value| value.get(key))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        Some(Self {
+            version,
+            commit: text("gitCommitShort"),
+            commit_full: text("gitCommit"),
+            dirty: build
+                .and_then(|value| value.get("gitDirty"))
+                .and_then(|value| value.as_bool()),
+            build_id: text("buildId"),
+        })
+    }
+
+    /// `0.8.2 · e0a8022+dirty`, the same shape the Settings row shows.
+    fn label(&self) -> String {
+        let mut label = self.version.clone();
+        let commit = if self.commit.is_empty() {
+            self.commit_full.chars().take(7).collect::<String>()
+        } else {
+            self.commit.clone()
+        };
+        if !commit.is_empty() {
+            label.push_str(" · ");
+            label.push_str(&commit);
+        }
+        if self.dirty == Some(true) {
+            label.push_str("+dirty");
+        }
+        label
+    }
+}
+
+/// Why the running shell is not the build now on disk, if it is not.
+///
+/// The commit is the deciding evidence — comparing `appVersion` alone misses
+/// every same-version rebuild (SSR-000096 ⑤). The working-tree flag and the Next
+/// build id are compared too when both sides know them: they are what tells two
+/// packages of one commit apart. A value missing on either side is not a
+/// mismatch — an unstamped build can report nothing, but it can never report
+/// the wrong build.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn stale_build_reason(running: &BuildIdentity, installed: &BuildIdentity) -> Option<String> {
+    if !running.commit_full.is_empty()
+        && !installed.commit_full.is_empty()
+        && running.commit_full != installed.commit_full
+    {
+        return Some(format!(
+            "commit {} -> {}",
+            running.commit_full, installed.commit_full
+        ));
+    }
+    if !running.build_id.is_empty()
+        && !installed.build_id.is_empty()
+        && running.build_id != installed.build_id
+    {
+        return Some(format!(
+            "Next build {} -> {}",
+            running.build_id, installed.build_id
+        ));
+    }
+    if let (Some(running_dirty), Some(installed_dirty)) = (running.dirty, installed.dirty) {
+        if running_dirty != installed_dirty {
+            return Some(format!(
+                "working tree {} -> {}",
+                if running_dirty { "dirty" } else { "clean" },
+                if installed_dirty { "dirty" } else { "clean" }
+            ));
+        }
+    }
+    None
+}
+
 /// A second launch after an overwrite install comes from the newly installed
 /// binary, while the primary that handles the callback is still the previous
 /// build. Silently focusing the old window made the upgrade look like it did
-/// nothing (DEFECT-000086 ③). Compare the running shell's compile-time version
+/// nothing (DEFECT-000086 ③). Compare the running shell's compile-time identity
 /// with the manifest on disk and say what to do instead.
 #[cfg(windows)]
-fn stale_running_build(app: &AppHandle) -> Option<(String, String)> {
-    let running = app.package_info().version.to_string();
+fn stale_running_build(app: &AppHandle) -> Option<(BuildIdentity, BuildIdentity, String)> {
     let manifest = app
         .path()
         .resource_dir()
@@ -1278,8 +1481,10 @@ fn stale_running_build(app: &AppHandle) -> Option<(String, String)> {
         .join("resources/component-versions.json");
     let raw = fs::read_to_string(manifest).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let installed = parsed.get("appVersion")?.as_str()?.to_string();
-    (installed != running).then_some((running, installed))
+    let running = BuildIdentity::running(app);
+    let installed = BuildIdentity::installed(&parsed)?;
+    let reason = stale_build_reason(&running, &installed)?;
+    Some((running, installed, reason))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1311,12 +1516,26 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         let value = app.clone();
         let _ = app.run_on_main_thread(move || {
-            if let Some((running, installed)) = stale_running_build(&value) {
+            if let Some((running, installed, reason)) = stale_running_build(&value) {
                 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                // The log is the evidence for a support report: the dialog is
+                // gone once it is dismissed, the reason it appeared is not.
+                desktop_log(
+                    &value,
+                    &format!(
+                        "stale running build: this window is {} (build {}), the installed manifest is {} (build {}): {reason}",
+                        running.label(),
+                        if running.build_id.is_empty() { "unknown" } else { &running.build_id },
+                        installed.label(),
+                        if installed.build_id.is_empty() { "unknown" } else { &installed.build_id },
+                    ),
+                );
                 value
                     .dialog()
                     .message(format!(
-                        "Entity Assistant {installed} is installed, but this window is still running {running}.\n\nQuit Entity Assistant completely (including the tray icon) and open it again to use the new version."
+                        "You are still running an old build of Entity Assistant.\n\u{4f60}\u{8fd8}\u{5728}\u{7528}\u{65e7}\u{6784}\u{5efa}\u{3002}\n\nRunning:   {}\nInstalled: {}\n\nQuit Entity Assistant completely (including the tray icon) and open it again. If this warning comes back, reinstall the new version.",
+                        running.label(),
+                        installed.label(),
                     ))
                     .title("Entity Assistant")
                     .kind(MessageDialogKind::Warning)

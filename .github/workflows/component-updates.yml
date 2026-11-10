@@ -103,7 +103,11 @@ jobs:
           fi
 
           node scripts/bump-pi-agent-desktop-version.mjs
-          npm run release:manifest
+          # The manifest is committed with this sync. No Next build has run in
+          # this job, so the build id is unknown here; the release workflow
+          # re-generates the manifest after `desktop:prepare` so the copy inside
+          # the installer carries it (SSR-000096 ②/③).
+          npm run release:manifest -- --allow-missing-build-id
 
       # A clean `git merge` is not evidence the two sides agree, so the gate has
       # to be as wide as it can cheaply be. Component tests are included here

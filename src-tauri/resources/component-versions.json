@@ -17,5 +17,14 @@
       "repository": "agegr/pi-web",
       "version": "0.10.0"
     }
-  ]
+  ],
+  "build": {
+    "gitCommit": "bc265713c3a4f392b868dd6bd24cfcf8df84ecc5",
+    "gitCommitShort": "bc26571",
+    "gitBranch": "main",
+    "gitDirty": true,
+    "builtAt": "2026-11-10T16:27:47+08:00",
+    "node": "v22.22.2",
+    "buildId": "j_83oXsmFGVdK5TvnDckq"
+  }
 }
