@@ -202,6 +202,18 @@ than discover it.
   **`app/api/custom-css`**, **`app/api/appearance/fonts`**, **`app/api/push/config`**
   — SDK imported (if at all) at the call.
 
+## Response shape (unchanged)
+
+`GET /api/sessions/[id]` and `GET /api/sessions/[id]/context` were compared
+between the two arms on the same session file, after dropping the volatile
+fields (`snapshotRevision`, `modified`, `filePath`, `totalActiveMs`):
+`assert.deepStrictEqual` passes, and the set of object key-sets is identical.
+`/context` is byte-identical. The detail payload differs only in the *insertion
+order* of `toolResult` message keys (`details` before or after
+`isError`/`durationMs`/`timestamp`): the old path read through the read-only
+manager cache, which deletes and re-adds `details` while slimming, and the new
+one keeps the file's order. `JSON.parse` gives the same object either way.
+
 ## Trade-offs (deliberate, not accidental)
 
 - **The SDK is now paid on the first *interaction*.** Nothing on the first
