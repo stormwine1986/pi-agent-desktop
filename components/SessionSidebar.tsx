@@ -4,6 +4,13 @@ import { Fragment, useEffect, useLayoutEffect, useState, useCallback, useRef, us
 import type { SessionInfo, SessionWorkspaceKind } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
+import {
+  formatWakeTime,
+  isSubscriptionWarning,
+  toSubscriptionBadges,
+  type SubscriptionBadge,
+  type SubscriptionHealth,
+} from "@/lib/event-badges";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { PRODUCT_NAME } from "@/lib/branding";
@@ -491,6 +498,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // The chat whose conversation is being copied into a project (the picker is open for it).
   const [continueChat, setContinueChat] = useState<SessionInfo | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  // Sessions that declared event subscriptions (SSR-000097). The ids and the
+  // health arrive on the existing running stream; which rules/how often is
+  // fetched per project, because that lives in `.pi/events.yaml`.
+  const [subscribedSessionIds, setSubscribedSessionIds] = useState<Set<string>>(() => new Set());
+  const [subscriptionHealth, setSubscriptionHealth] = useState<Record<string, SubscriptionHealth>>({});
+  const [subscriptionBadges, setSubscriptionBadges] = useState<Record<string, SubscriptionBadge>>({});
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -645,10 +658,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       source = new EventSource("/api/agent/running/events");
       source.onmessage = async (e) => {
         try {
-          const data = JSON.parse(e.data) as { type?: string; runningSessionIds?: string[]; sessionListVersion?: number };
+          const data = JSON.parse(e.data) as {
+            type?: string;
+            runningSessionIds?: string[];
+            sessionListVersion?: number;
+            subscribedSessionIds?: string[];
+            subscriptionHealth?: Record<string, SubscriptionHealth>;
+          };
           if (data.type === "running") {
             sseAuthoritativeRef.current = true;
             setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+            // Appended by the same frame (SSR-000097【会话列表标记】): a session
+            // that is not running may still be waiting for an event.
+            if (data.subscribedSessionIds) setSubscribedSessionIds(new Set(data.subscribedSessionIds));
+            if (data.subscriptionHealth) setSubscriptionHealth(data.subscriptionHealth);
           }
           if (typeof data.sessionListVersion === "number"
             && data.sessionListVersion !== sessionListVersionRef.current) {
@@ -1345,6 +1368,45 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const allProjects = groupByProject(projectSessions, { runningIds: runningSessionIds, unreadIds: unreadSessionIds });
   const activeProjects = allProjects.filter((group) => !archivedProjectRoots.has(group.projectRoot));
   const activeProjectRoots = activeProjects.map((group) => group.projectRoot);
+  // Which rules a project declares — fetched once per project (and on a minute
+  // tick), because the badge's tooltip needs names, last wake-up and today's
+  // count, none of which belong on the running stream.
+  const subscriptionProjectKey = activeProjectRoots.join("\n");
+  const subscribedIdsKey = [...subscribedSessionIds].sort().join(",");
+  useEffect(() => {
+    if (!subscriptionProjectKey) return;
+    let cancelled = false;
+    const roots = subscriptionProjectKey.split("\n");
+    const load = async () => {
+      const next: Record<string, SubscriptionBadge> = {};
+      await Promise.all(roots.map(async (root) => {
+        try {
+          const res = await fetch(`/api/events/subscriptions?cwd=${encodeURIComponent(root)}`, { cache: "no-store" });
+          if (!res.ok) return;
+          Object.assign(next, toSubscriptionBadges(await res.json()));
+        } catch {
+          // A project whose file cannot be read simply shows no badge.
+        }
+      }));
+      if (!cancelled) setSubscriptionBadges(next);
+    };
+    void load();
+    const timer = setInterval(() => void load(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [subscriptionProjectKey, subscribedIdsKey]);
+
+  const sessionSubscription = useCallback(
+    (sessionId: string): { badge: SubscriptionBadge | null; health: SubscriptionHealth | null } => {
+      const badge = subscriptionBadges[sessionId] ?? null;
+      const health = subscriptionHealth[sessionId] ?? badge?.health ?? null;
+      if (!badge && !subscribedSessionIds.has(sessionId) && health === null) return { badge: null, health: null };
+      return { badge, health };
+    },
+    [subscriptionBadges, subscriptionHealth, subscribedSessionIds],
+  );
   const projectDisplayNames = getProjectDisplayNames(activeProjectRoots);
   // A search looks inside the archive too, and unfolds it to show the matches.
   const archivedProjects = allProjects.filter((group) => archivedProjectRoots.has(group.projectRoot));
@@ -1438,6 +1500,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const isActive = group.projectRoot === projectRootFor(selectedCwd);
     const runningCount = group.runningIds.size;
     const unreadCount = group.unreadIds.size;
+    // A folded project hides its rows, so the subscription picture must stay on
+    // the header: how many sessions wait on events, and whether any is stuck.
+    const subscribedCount = group.sessions.filter(
+      (session) => subscribedSessionIds.has(session.id) || subscriptionBadges[session.id],
+    ).length;
+    const subscriptionWarning = group.sessions.some((session) => {
+      const health = subscriptionHealth[session.id] ?? subscriptionBadges[session.id]?.health;
+      return health ? isSubscriptionWarning(health) : false;
+    });
     const fullGroupTree = buildSessionTree(group.sessions);
     const archivedGroupTree = trimmedSessionQuery
       ? []
@@ -1555,6 +1626,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     {unreadCount}
                   </span>
                 )}
+                {subscribedCount > 0 && (
+                  <span
+                    className={`sidebar-project-tree-chip is-subscription${subscriptionWarning ? " is-warning" : ""}`}
+                    title={t("sidebar.subscriptionCount", { count: subscribedCount })}
+                  >
+                    {subscribedCount}
+                  </span>
+                )}
               </span>
             )}
           </button>
@@ -1607,6 +1686,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
+                subscription={sessionSubscription(node.session.id).badge}
+                subscriptionHealth={sessionSubscription(node.session.id).health}
                 onSelectSession={handleSelectSessionFromList}
                 onRenamed={loadSessions}
                 archiveActions={sessionArchiveActions(node.session.id)}
@@ -2276,6 +2357,8 @@ function SessionFamilyItem({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  subscription,
+  subscriptionHealth,
   onSelectSession,
   onRenamed,
   onSessionDeleted,
@@ -2291,6 +2374,8 @@ function SessionFamilyItem({
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  subscription?: SubscriptionBadge | null;
+  subscriptionHealth?: SubscriptionHealth | null;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
@@ -2324,6 +2409,8 @@ function SessionFamilyItem({
             ? familySessions.some((session) => runningSessionIds.has(session.id))
             : runningSessionIds.has(node.session.id)}
           isUnread={unreadSessionIds.has(node.session.id)}
+          subscription={subscription}
+          subscriptionHealth={subscriptionHealth}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
@@ -2460,11 +2547,67 @@ interface ChatRowActions extends SessionArchiveActions {
   onTogglePin: () => void;
 }
 
+/**
+ * The subscription badge of one session row (SSR-000097 AC-9).
+ *
+ * Quiet when the rules are working: a bell and a count. A warning tone when a
+ * rule is `paused` / `limited` / `unavailable`, and the tooltip says why, which
+ * rules are involved, when one last woke this session and how many times today —
+ * "it did not wake me" is otherwise indistinguishable from "I have no rule".
+ */
+function SubscriptionIndicator({
+  badge,
+  health,
+}: {
+  badge: SubscriptionBadge | null;
+  health: SubscriptionHealth | null;
+}) {
+  const { t } = useI18n();
+  const effective = health ?? badge?.health ?? "active";
+  const warning = isSubscriptionWarning(effective);
+  const count = badge?.count ?? null;
+  const healthLabel = effective === "paused"
+    ? t("sidebar.subscriptionHealth.paused")
+    : effective === "limited"
+      ? t("sidebar.subscriptionHealth.limited")
+      : effective === "unavailable"
+        ? t("sidebar.subscriptionHealth.unavailable")
+        : t("sidebar.subscriptionHealth.active");
+
+  const lines = [t("sidebar.subscriptionTitle", { count: count ?? 0, health: healthLabel })];
+  if (badge?.reason) lines.push(t("sidebar.subscriptionReason", { reason: badge.reason }));
+  for (const rule of badge?.rules ?? []) {
+    lines.push(t("sidebar.subscriptionRule", {
+      name: rule.name,
+      last: formatWakeTime(rule.lastWakeAt) ?? t("sidebar.subscriptionNever"),
+      count: rule.todayCount,
+    }));
+  }
+  for (const broken of badge?.broken ?? []) lines.push(t("sidebar.subscriptionBroken", { error: broken }));
+
+  return (
+    <span
+      className={`session-item-subscription${warning ? " is-warning" : ""}`}
+      title={lines.join("\n")}
+      aria-label={t("sidebar.subscriptionCount", { count: count ?? 0 })}
+      data-subscription-health={effective}
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+      </svg>
+      {count !== null && <span>{count}</span>}
+    </span>
+  );
+}
+
 function SessionItem({
   session,
   isSelected,
   isRunning,
   isUnread,
+  subscription,
+  subscriptionHealth,
   onClick,
   onRenamed,
   onDeleted,
@@ -2481,6 +2624,9 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  /** Event subscriptions of this session, when it declared any. */
+  subscription?: SubscriptionBadge | null;
+  subscriptionHealth?: SubscriptionHealth | null;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -2831,6 +2977,13 @@ function SessionItem({
             <span className="session-item-project" title={subtitle}>
               {subtitle}
             </span>
+          )}
+
+          {(subscription || subscriptionHealth) && (
+            <SubscriptionIndicator
+              badge={subscription ?? null}
+              health={subscriptionHealth ?? subscription?.health ?? null}
+            />
           )}
 
           {/* Collapse toggle — always visible when has children */}

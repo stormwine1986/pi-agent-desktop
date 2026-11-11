@@ -10359,3 +10359,36 @@ html.dark .artifacts-thumb[data-tone="data"] { --tone: #4fc1d6; }
   outline-offset: 2px;
   border-radius: 2px;
 }
+
+/* Event subscriptions (SSR-000097 AC-9): the session row badge and the folded
+   project's chip. A quiet grey when the rules are working; the warning token
+   when one is paused / limited / unavailable, so "it did not wake me" and
+   "I have no rule" never look the same. The tooltip carries the names, the last
+   wake-up and today's count. */
+.session-item-subscription {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.session-item-subscription.is-warning {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+}
+.sidebar-project-tree-chip.is-subscription {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+}
+.sidebar-project-tree-chip.is-subscription.is-warning {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+}

@@ -29,6 +29,7 @@ import { isChatFolderPath } from "@/lib/chat-workspace";
 import { samePath } from "@/lib/paths";
 import { moveFolderToTrash } from "@/lib/trash";
 import { replaceFileAtomicSync } from "@/lib/atomic-file";
+import { removeSessionSubscriptions } from "@/lib/events/remove-session";
 
 export async function GET(
   req: Request,
@@ -383,6 +384,16 @@ export async function DELETE(
       }
       invalidateSessionPathCache(deletedId);
       invalidateSessionManagerCache(deletedPath);
+    }
+    // A subscription's life is the session's life (SSR-000097): the project's
+    // `.pi/events.yaml` must not keep pointing at a session that is gone.
+    if (sessionCwd) {
+      try {
+        removeSessionSubscriptions(sessionCwd, deletedSessionIds);
+      } catch {
+        // A failed cleanup must not fail the delete; the runtime reports the
+        // dangling entry as "会话不存在" instead of injecting anything.
+      }
     }
     invalidateSessionListCache();
     let folderTrashed = false;

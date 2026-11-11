@@ -3,6 +3,7 @@ import { closeAllAgentEventStreams } from "@/lib/agent-event-stream";
 import { startScheduler } from "@/lib/scheduled-tasks";
 import { restartRelayFromConfig } from "@/lib/relay/runtime";
 import { startWatchPump } from "@/lib/views/watch";
+import { startEventRuntime, stopEventRuntime } from "@/lib/events/runtime";
 
 export function registerNodeInstrumentation(): void {
   configureHttpDispatcher();
@@ -15,6 +16,13 @@ export function registerNodeInstrumentation(): void {
   // hidden window changes nothing (SSR-000089 ①).
   if (process.env.PI_WEB_DISABLE_WATCH !== "1") startWatchPump();
 
+  // Event subscriptions (SSR-000097) are the third background loop, and the
+  // slowest to be useful: nothing may wait for a connection. It starts two
+  // seconds later than the watch pump, so the two do not reach for the network
+  // in the same breath, and the first scan only runs after the window has had a
+  // chance to become interactive.
+  if (process.env.PI_WEB_DISABLE_EVENTS !== "1") startEventRuntime();
+
   // The relay connection (Settings › Remote relay) must also come up without a page:
   // a phone reaches this computer through it.
   if (process.env.PI_WEB_DISABLE_RELAY !== "1") {
@@ -26,7 +34,10 @@ export function registerNodeInstrumentation(): void {
   // In production Next 16 answers SIGINT/SIGTERM with server.close() and waits
   // for every connection to end, without a timeout. SSE streams only end when
   // the client disconnects, so close them here or the process never exits.
-  const shutdownStreams = () => closeAllAgentEventStreams();
+  const shutdownStreams = () => {
+    closeAllAgentEventStreams();
+    stopEventRuntime();
+  };
   process.on("SIGINT", shutdownStreams);
   process.on("SIGTERM", shutdownStreams);
 }

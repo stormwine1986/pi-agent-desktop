@@ -1,5 +1,6 @@
 import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
 import { getSessionListVersion } from "@/lib/session-reader";
+import { getSubscriptionRuntimeSnapshot, subscribeSubscriptionRuntime } from "@/lib/events/runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -13,12 +14,23 @@ export async function GET(req: Request) {
       const encoder = new TextEncoder();
       let closed = false;
       let unsubscribe = () => {};
+      let unsubscribeSubscriptions = () => {};
+      // Both halves of the frame are read from the same snapshot, so a client
+      // never sees a running id without the subscription story that explains it.
+      const subscriptionFields = () => {
+        const subscriptions = getSubscriptionRuntimeSnapshot();
+        return {
+          subscribedSessionIds: subscriptions.subscribedSessionIds,
+          subscriptionHealth: subscriptions.subscriptionHealth,
+        };
+      };
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       const cleanup = () => {
         if (closed) return;
         closed = true;
         if (heartbeat) clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeSubscriptions();
         req.signal?.removeEventListener("abort", cleanup);
         try { controller.close(); } catch { /* already closed/cancelled */ }
       };
@@ -41,14 +53,22 @@ export async function GET(req: Request) {
       // the session-list version: renames/deletes/creates in other windows bump
       // it, letting connected sidebars refetch without waiting for focus.
       const nextUnsubscribe = subscribeRunningSessions((ids) => {
-        encode({ type: "running", runningSessionIds: ids, sessionListVersion: getSessionListVersion() });
+        encode({ type: "running", runningSessionIds: ids, sessionListVersion: getSessionListVersion(), ...subscriptionFields() });
       });
       if (closed) nextUnsubscribe();
       else unsubscribe = nextUnsubscribe;
 
+      // A subscription appearing, turning unavailable or being delivered to is
+      // a change of this same picture: push it, do not make the sidebar poll.
+      const nextSubscriptionUnsubscribe = subscribeSubscriptionRuntime(() => {
+        encode({ type: "running", runningSessionIds: getRunningRpcSessionIds(), sessionListVersion: getSessionListVersion(), ...subscriptionFields() });
+      });
+      if (closed) nextSubscriptionUnsubscribe();
+      else unsubscribeSubscriptions = nextSubscriptionUnsubscribe;
+
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds(), sessionListVersion: getSessionListVersion() });
+      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds(), sessionListVersion: getSessionListVersion(), ...subscriptionFields() });
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
       if (!closed) heartbeat = setInterval(() => {
