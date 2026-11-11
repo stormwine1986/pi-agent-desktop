@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "fs";
 import { randomUUID } from "crypto";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "../agent-dir";
 import { decideSlot } from "./catch-up";
 import { emitScheduledTaskEvent } from "./events";
 import { acquireLease, isPidAlive, readLeaseInfo, releaseLease, type LeaseInfo } from "./lease";
@@ -83,7 +83,7 @@ export class Scheduler {
   private ticking = false;
 
   constructor(private readonly options: SchedulerOptions) {
-    this.agentDir = options.agentDir ?? getAgentDir();
+    this.agentDir = options.agentDir ?? agentDir();
     this.tickMs = options.tickMs ?? DEFAULT_TICK_MS;
     this.pid = options.pid ?? process.pid;
     this.alive = options.isPidAlive ?? isPidAlive;

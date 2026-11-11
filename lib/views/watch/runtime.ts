@@ -1,5 +1,5 @@
+import { agentDir as resolveAgentDir } from "../../agent-dir";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../../mcp-call";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { classifyPromotionFailure } from "./core";
 import { describeWatchRunLimit } from "./limit";
 import type { WatchDeps, WatchResult, WatchRow, WatchSessionHandle, WatchTarget } from "./core";
@@ -35,7 +35,7 @@ function targetOf(agentDir: string, target: WatchTarget): { ok: true; value: Mcp
 }
 
 export function createLiveDeps(): WatchDeps {
-  const agentDir = getAgentDir();
+  const agentDir = resolveAgentDir();
 
   return {
     now: () => Date.now(),

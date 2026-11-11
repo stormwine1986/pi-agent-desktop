@@ -1,4 +1,4 @@
-import { getAgentDir } from "../session-reader";
+import { agentDir } from "../agent-dir";
 import { RelayConnector } from "./connector";
 import { loadOrCreateIdentity, readDevices, readRelayConfig, relayDir } from "./store";
 
@@ -15,7 +15,7 @@ type RelayGlobal = typeof globalThis & {
 const relayGlobal = globalThis as RelayGlobal;
 
 export function relayFilesDir(): string {
-  return relayDir(getAgentDir());
+  return relayDir(agentDir());
 }
 
 /** This server, as the connector reaches it. Next sets PORT for `dev` and `start`; the desktop shell sets it too. */

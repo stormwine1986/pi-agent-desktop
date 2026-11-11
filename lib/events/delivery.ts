@@ -1,6 +1,3 @@
-import { getRpcSession, startRpcSession } from "../rpc-manager";
-import { resolveSessionPath } from "../session-reader";
-
 /**
  * `action: wake` — inject a prompt into an existing session so it runs a turn.
  *
@@ -13,7 +10,15 @@ import { resolveSessionPath } from "../session-reader";
  *
  * Delivery is serialized per session by the caller (`runtime.ts`), so two
  * batches never enter one session at the same time.
+ *
+ * The two modules below are the pi SDK's front door (a session runtime and its
+ * session store). They are imported when a delivery actually happens, not when
+ * this file is loaded: the event runtime is registered from the instrumentation
+ * hook, and the SDK is a 1.5–2.3 s synchronous module load that must not sit in
+ * front of the desktop shell's identity probe (DEFECT-000090).
  */
+const sessionRuntime = () => import("../rpc-manager");
+const sessionReader = () => import("../session-reader");
 
 export type DeliveryOutcome =
   | { status: "delivered" }
@@ -22,7 +27,7 @@ export type DeliveryOutcome =
 export async function wakeSession(sessionId: string, text: string): Promise<DeliveryOutcome> {
   let sessionFile: string | null;
   try {
-    sessionFile = await resolveSessionPath(sessionId);
+    sessionFile = await (await sessionReader()).resolveSessionPath(sessionId);
   } catch (error) {
     return { status: "skipped", reason: `读会话路径失败：${error instanceof Error ? error.message : String(error)}` };
   }
@@ -30,13 +35,13 @@ export async function wakeSession(sessionId: string, text: string): Promise<Deli
     return { status: "skipped", reason: "会话不存在" };
   }
 
-  const running = getRpcSession(sessionId);
+  const running = (await sessionRuntime()).getRpcSession(sessionId);
   if (running?.isAlive() && running.isRunning()) {
     return { status: "skipped", reason: "会话正在跑这一轮，忙时排队属 M2，本次未注入" };
   }
 
   try {
-    const { session } = await startRpcSession(sessionId, sessionFile, undefined, {});
+    const { session } = await (await sessionRuntime()).startRpcSession(sessionId, sessionFile, undefined, {});
     await session.send({ type: "prompt", message: text });
     return { status: "delivered" };
   } catch (error) {

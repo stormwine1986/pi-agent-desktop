@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "../agent-dir";
 import { writePrivateFileAtomicSync } from "../atomic-file";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../mcp-call";
 import { getRecentProjects } from "../project-groups";
-import { listAllSessions, resolveSessionPath } from "../session-reader";
 import { Coalescer, type CoalescedBatch } from "./batch";
 import { claimChannel, releaseChannel, type ChannelOwnership } from "./channel-lease";
 import { readEventsConfig, usableSubscriptions, type EventSubscription, type EventsConfig } from "./config";
@@ -143,11 +142,11 @@ export function eventEndpointOf(url: string, headers: Record<string, string>): E
 }
 
 function sessionStateDir(): string {
-  return join(getAgentDir(), "subscriptions");
+  return join(agentDir(), "subscriptions");
 }
 
 function channelStatePath(key: string): string {
-  return join(getAgentDir(), "events", `${key.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`);
+  return join(agentDir(), "events", `${key.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -267,7 +266,7 @@ function writeChannelState(key: string, force = false): void {
   if (!force && now - state.lastWriteAt < STATE_WRITE_INTERVAL_MS) return;
   state.lastWriteAt = now;
   try {
-    mkdirSync(join(getAgentDir(), "events"), { recursive: true });
+    mkdirSync(join(agentDir(), "events"), { recursive: true });
     writePrivateFileAtomicSync(
       channelStatePath(key),
       `${JSON.stringify({ lastEventId: state.lastEventId, seen: state.order.slice(-SEEN_CAP) }, null, 2)}
@@ -313,6 +312,11 @@ async function resolveCid(target: McpHttpTarget, serverName: string): Promise<st
 }
 
 async function visibleProjects(): Promise<string[]> {
+  // The session reader is the first thing here that needs the pi SDK. It is a
+  // 1.5–2.3 s synchronous module load, and it must not happen while the desktop
+  // shell is waiting for its identity probe (DEFECT-000090), so it is reached
+  // only when a scan actually needs the project list.
+  const { listAllSessions } = await import("../session-reader");
   const sessions = await listAllSessions({ allowStale: true });
   return getRecentProjects(sessions).map((project) => project.root);
 }
@@ -383,6 +387,7 @@ async function refreshScan(): Promise<void> {
     // reported, never re-created and never edited out of the file.
     const sessionIds = [...new Set(rules.map((rule) => rule.sessionId))];
     const exists = new Map<string, boolean>();
+    const { resolveSessionPath } = await import("../session-reader");
     for (const sessionId of sessionIds) {
       try {
         exists.set(sessionId, Boolean(await resolveSessionPath(sessionId)));
@@ -394,7 +399,7 @@ async function refreshScan(): Promise<void> {
 
     const wanted = desiredChannels(rules);
     const reshaped = new Set<string>();
-    const claimDir = join(getAgentDir(), "events");
+    const claimDir = join(agentDir(), "events");
     for (const [key, channel] of [...state.channels]) {
       const entry = wanted.get(key);
       const sameShape = entry
@@ -439,7 +444,7 @@ async function startChannel(
   options: { resume: boolean } = { resume: true },
 ): Promise<void> {
   const state = runtime();
-  const resolved = resolveMcpTarget(getAgentDir(), entry.projectCwd, entry.server);
+  const resolved = resolveMcpTarget(agentDir(), entry.projectCwd, entry.server);
   if (!resolved.ok) {
     // Reported by the status API from the same resolution, so no connection is
     // registered for a channel that cannot exist.
@@ -449,7 +454,7 @@ async function startChannel(
   if (!endpoint) return;
 
   const cid = await resolveCid(resolved.target, entry.server);
-  const claimDir = join(getAgentDir(), "events");
+  const claimDir = join(agentDir(), "events");
   const isChannelOwner = (): ChannelOwnership => claimChannel(claimDir, key);
   const ownership = isChannelOwner();
   if (!ownership.owner) {
@@ -625,7 +630,7 @@ export function stopEventRuntime(): void {
   state.coalescer = null;
   for (const [key, channel] of state.channels) {
     (channel.connection as EventConnection | null)?.stop?.();
-    releaseChannel(join(getAgentDir(), "events"), key);
+    releaseChannel(join(agentDir(), "events"), key);
   }
   for (const key of channelStates.keys()) writeChannelState(key, true);
   state.channels.clear();

@@ -242,6 +242,7 @@ Each one undid a real regression; the linked note has the reasoning.
 - Open local paths with `explorer.exe` on Windows, never `cmd.exe /C start`. ([fork-desktop](docs/agents/fork-desktop.md))
 - Native popup menus are built in Rust (`show_popup_menu`); do not go back to the JS `Menu` API. ([fork-desktop](docs/agents/fork-desktop.md))
 - `tauri-plugin-*` crates and `@tauri-apps/plugin-*` packages stay on the same minor; fix drift in `Cargo.lock`, never by pinning npm down. ([fork-desktop](docs/agents/fork-desktop.md))
+- Nothing reachable from `instrumentation-node.ts` imports `@earendil-works/*` statically — the startup graph reaches the SDK only through a dynamic `import()` at first use. Next runs that hook as soon as the server listens, and the shell waits for the identity probe before it creates a window. ([fork-desktop](docs/agents/fork-desktop.md))
 - Window state flags are `SIZE | POSITION | MAXIMIZED`; never `VISIBLE` or `DECORATIONS`. ([fork-desktop](docs/agents/fork-desktop.md))
 - After an SDK bump run `npm run desktop:prepare && npm run desktop:verify`; never hard-code a nested staging destination; keep all three Windows `node_modules` guards. ([fork-desktop](docs/agents/fork-desktop.md))
 - The staged payload must carry no `.pi/`, no `Bearer ak_`, no armoured private key and no `src-tauri/target` leftover: `outputFileTracingExcludes` is inert on Windows, so the load-bearing defence is the pre-trace cleanup plus the throwing scan in `scripts/prepare-desktop.mjs` (`scripts/packaged-payload.mjs`). ([fork-desktop](docs/agents/fork-desktop.md))

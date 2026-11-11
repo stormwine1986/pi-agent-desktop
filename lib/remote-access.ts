@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import { dirname, join } from "node:path";
+import { agentDir } from "./agent-dir.ts";
 import { writePrivateFileAtomicSync } from "./atomic-file.ts";
-import { userHome } from "./user-home.ts";
 import { hasRelayMark } from "./relay/mark.ts";
 
 /**
@@ -36,13 +36,7 @@ export interface RemoteAccessConfig {
 }
 
 export function remoteAccessSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
-  const configured = env.PI_CODING_AGENT_DIR?.trim();
-  const agentDir = configured
-    ? configured === "~" || configured.startsWith("~/")
-      ? join(userHome(), configured.slice(1))
-      : configured
-    : join(userHome(), ".pi", "agent");
-  return join(agentDir, "pi-web", "settings.json");
+  return join(agentDir(env), "pi-web", "settings.json");
 }
 
 /**

@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "../../agent-dir";
 import { acquireLease, isPidAlive } from "../../scheduled-tasks/lease";
 import { readViewsConfig, type ViewDefinition, type ViewWatch } from "../config";
 import { describeGate, sliceDql } from "./core";
@@ -119,7 +119,7 @@ export function startWatchPump(options: WatchPumpOptions = {}): () => void {
   const deps = options.deps ?? createLiveDeps();
   const intervalMs = options.intervalMs ?? TICK_MS;
   const running = options.registry ?? registry;
-  const lockDir = join(getAgentDir(), "watch");
+  const lockDir = join(agentDir(), "watch");
   let stopped = false;
 
   // The effective cap goes into the log at startup: a value that was clamped or

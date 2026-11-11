@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as resolveAgentDir } from "../agent-dir";
 import { writePrivateFileAtomicSync } from "../atomic-file";
 import {
   MAX_RUNS_PER_TASK,
@@ -19,11 +19,11 @@ import {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function scheduledTasksFile(agentDir = getAgentDir()): string {
+export function scheduledTasksFile(agentDir = resolveAgentDir()): string {
   return join(agentDir, "scheduled-tasks.json");
 }
 
-export function scheduledTasksDir(agentDir = getAgentDir()): string {
+export function scheduledTasksDir(agentDir = resolveAgentDir()): string {
   return join(agentDir, "scheduled-tasks");
 }
 
@@ -96,11 +96,11 @@ function writeStored(path: string, stored: StoredFile): void {
   );
 }
 
-export function listTasks(agentDir = getAgentDir()): ScheduledTask[] {
+export function listTasks(agentDir = resolveAgentDir()): ScheduledTask[] {
   return readStored(scheduledTasksFile(agentDir)).tasks;
 }
 
-export function getTask(id: string, agentDir = getAgentDir()): ScheduledTask | undefined {
+export function getTask(id: string, agentDir = resolveAgentDir()): ScheduledTask | undefined {
   return listTasks(agentDir).find((task) => task.id === id);
 }
 
@@ -110,7 +110,7 @@ export function getTask(id: string, agentDir = getAgentDir()): ScheduledTask | u
  */
 export function mutateTasks<T>(
   change: (tasks: ScheduledTask[]) => { tasks: ScheduledTask[]; result: T },
-  agentDir = getAgentDir(),
+  agentDir = resolveAgentDir(),
 ): T {
   const path = scheduledTasksFile(agentDir);
   const stored = readStored(path);
@@ -122,7 +122,7 @@ export function mutateTasks<T>(
 export function updateTask(
   id: string,
   change: (task: ScheduledTask) => ScheduledTask,
-  agentDir = getAgentDir(),
+  agentDir = resolveAgentDir(),
 ): ScheduledTask | undefined {
   return mutateTasks((tasks) => {
     const index = tasks.findIndex((task) => task.id === id);
@@ -133,7 +133,7 @@ export function updateTask(
   }, agentDir);
 }
 
-export function deleteTask(id: string, options: { removeRuns?: boolean } = {}, agentDir = getAgentDir()): boolean {
+export function deleteTask(id: string, options: { removeRuns?: boolean } = {}, agentDir = resolveAgentDir()): boolean {
   const removed = mutateTasks((tasks) => {
     const next = tasks.filter((task) => task.id !== id);
     return { tasks: next, result: next.length !== tasks.length };
@@ -196,11 +196,11 @@ function readArchive(agentDir: string, taskId: string): ScheduledRun[] {
 }
 
 /** Runs of a task, oldest first. */
-export function listRuns(taskId: string, agentDir = getAgentDir()): ScheduledRun[] {
+export function listRuns(taskId: string, agentDir = resolveAgentDir()): ScheduledRun[] {
   return readRuns(agentDir, taskId);
 }
 
-export function appendRun(run: ScheduledRun, agentDir = getAgentDir()): void {
+export function appendRun(run: ScheduledRun, agentDir = resolveAgentDir()): void {
   writeRuns(agentDir, run.taskId, [...readRuns(agentDir, run.taskId), run]);
 }
 
@@ -208,7 +208,7 @@ export function updateRun(
   taskId: string,
   runId: string,
   change: (run: ScheduledRun) => ScheduledRun,
-  agentDir = getAgentDir(),
+  agentDir = resolveAgentDir(),
 ): ScheduledRun | undefined {
   const runs = readRuns(agentDir, taskId);
   const index = runs.findIndex((run) => run.runId === runId);
@@ -219,7 +219,7 @@ export function updateRun(
 }
 
 /** Every run of every task, for building the session-to-run index. */
-export function listAllRuns(agentDir = getAgentDir()): ScheduledRun[] {
+export function listAllRuns(agentDir = resolveAgentDir()): ScheduledRun[] {
   const dir = join(scheduledTasksDir(agentDir), "runs");
   if (!existsSync(dir)) return [];
   const runs: ScheduledRun[] = [];
