@@ -21,6 +21,13 @@ import { pathToFileURL } from "node:url";
 const SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 const MCP_PACKAGE = "@earendil-works/pi-mcp";
 
+/**
+ * The package root's `import` entry — `exports["."].import`, which is all the
+ * manifest offers (`types` and `import`, no `require`). Loaded as a file URL
+ * like every module below, never as the bare specifier (DEFECT-000092).
+ */
+const SDK_ENTRY = "dist/index.js";
+
 const SDK_MODULES = {
   mcpExtension: "dist/extensions/mcp/index.js",
   mcpRuntime: "dist/extensions/mcp/runtime.js",
@@ -408,13 +415,38 @@ export async function importPiSdkInternals(options: {
   // this file through project-trust's MCP listing, and a static symbol from the
   // SDK root would load the whole graph on that request. Node caches the module,
   // so this is the same instance the session runtime gets.
-  const { createMcpExtension, getPackageDir } = await import(SDK_PACKAGE);
+  //
+  // Loaded by file URL with the bundler told to look away (DEFECT-000092), the
+  // same form as `importFile` below. The bare specifier this used to be was
+  // compiled into webpack's placeholder for an unresolved dynamic import: the
+  // package exports `types`/`import` only, with no `require` condition, so the
+  // CommonJS server graph judged `import("@earendil-works/pi-coding-agent")`
+  // unresolvable and emitted a function that throws `Cannot find module` no
+  // matter what is installed — MCP was off in every build that shipped it.
+  // The directory comes from this process's cwd (like `requireSdkModuleSync`
+  // and nothing from the package's exports), and `scripts/prepare-desktop.mjs`
+  // fails the build if such a placeholder ever comes back.
   let packageDir: string;
   try {
-    packageDir = realpathSync(getPackageDir());
-    const resolvedDir = resolvedSdkPackageDir(cwd);
-    if (!sameRealPath(packageDir, resolvedDir)) {
-      return { ok: false, reason: `${SDK_PACKAGE} at ${packageDir} is not the package Entity Assistant resolves (${resolvedDir})` };
+    packageDir = resolvedSdkPackageDir(cwd);
+  } catch (error) {
+    return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };
+  }
+  let sdkRoot: Record<string, unknown>;
+  try {
+    sdkRoot = await importFile(join(packageDir, SDK_ENTRY));
+  } catch (error) {
+    return { ok: false, reason: `cannot load ${join(packageDir, SDK_ENTRY)}: ${errorMessage(error)}` };
+  }
+  const createMcpExtension = sdkRoot.createMcpExtension;
+  const getPackageDir = sdkRoot.getPackageDir;
+  if (typeof createMcpExtension !== "function" || typeof getPackageDir !== "function") {
+    return { ok: false, reason: `${join(packageDir, SDK_ENTRY)} does not export createMcpExtension and getPackageDir` };
+  }
+  try {
+    const loadedDir = realpathSync((getPackageDir as () => string)());
+    if (!sameRealPath(loadedDir, packageDir)) {
+      return { ok: false, reason: `${SDK_PACKAGE} at ${loadedDir} is not the package Entity Assistant resolves (${packageDir})` };
     }
   } catch (error) {
     return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };

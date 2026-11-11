@@ -7,6 +7,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { desktopTargetTriple } from "./desktop-platform.mjs";
 import { assertPayloadClean, findLocalConfigDirs, pruneLocalConfig } from "./packaged-payload.mjs";
+import { assertNoUnresolvedDynamicImports } from "./unresolved-imports.mjs";
 import { piPackageDirNames } from "./pi-packages.mjs";
 import { dedupeNestedPackages, externalPackageSpecifiers, findNestedPiScopePackages, stageCompletePackage, stageResolvedClosure } from "./stage-package.mjs";
 
@@ -427,6 +428,13 @@ async function bundleNodeRuntime() {
 await clearTracedBuildOutput();
 const canaryPlanted = await plantPayloadCanary();
 await runNextBuild();
+
+// Build gate for DEFECT-000092: webpack compiles an `import()` it cannot resolve
+// into a function that rejects with "Cannot find module" whatever is installed,
+// and the build still succeeds — 0.8.2 shipped exactly that for the SDK root and
+// MCP was off for every user until someone opened the panel. Fail here, before
+// the payload is staged, while the cause is one package's `exports` conditions.
+await assertNoUnresolvedDynamicImports([desktopBuildDir]);
 
 // The tracer is not trusted to have kept this checkout's configuration and
 // credentials out (DEFECT-000089): drop the traced `.pi/` it cannot be told
