@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as resolveAgentDir } from "@/lib/agent-dir";
 import type {
   McpErrorResponse,
   McpRefusalReason,
@@ -12,7 +12,7 @@ import { isMcpEntryRefusal, validateMcpProject } from "@/lib/mcp-entry-request";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
-import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-manager";
+import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/session-registry";
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +56,7 @@ async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots
 export async function GET(req: Request) {
   const result = await validateCwd(new URL(req.url).searchParams.get("cwd"));
   if ("response" in result) return result.response;
-  const agentDir = getAgentDir();
+  const agentDir = resolveAgentDir();
   // Listed whatever the trust store says: the listing does not depend on it,
   // and a dialog left without one would offer Trust with nothing listed.
   const listing = await listProjectMcpServers(agentDir, result.cwd, result.allowedRoots);
@@ -81,7 +81,7 @@ export async function POST(req: Request) {
     const result = await validateCwd(body?.cwd);
     if ("response" in result) return result.response;
 
-    const agentDir = getAgentDir();
+    const agentDir = resolveAgentDir();
     const current = getProjectTrustStatus(result.cwd, agentDir);
     if (!current.requiresTrust) {
       return refusal(409, "trust-not-required", "This project has no resources that require trust");

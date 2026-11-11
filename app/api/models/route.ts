@@ -1,7 +1,7 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { agentDir as agentDirectory } from "@/lib/agent-dir";
 import {
   loadModelsWithCache,
   withModelRuntimeError,
@@ -34,7 +34,12 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const thinkingLevels: Record<string, string[]> = {};
   const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
 
-  const agentDir = getAgentDir();
+  // Imported at the call (TASK-000113): this route is on the first screen's
+  // request set, and a static symbol from either SDK package would load its
+  // whole graph there.
+  const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
+  const { getSupportedThinkingLevels } = await import("@earendil-works/pi-ai");
+  const agentDir = agentDirectory();
   // Gate untrusted project extensions: enumerating models still imports and
   // runs a repository's .pi/extensions factories, so honor project trust here
   // too (see lib/project-trust.ts, #236).

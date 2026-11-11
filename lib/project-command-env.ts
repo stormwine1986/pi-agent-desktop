@@ -1,12 +1,17 @@
 import {
   createBashToolDefinition,
   createLocalBashOperations,
-  getAgentDir,
   type BashOperations,
   type InlineExtension,
   type LoadExtensionsResult,
 } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { agentDir } from "./agent-dir";
+import { sanitizeProjectCommandEnvironment } from "./project-command-env-values";
+
+// The pure environment rule lives in ./project-command-env-values so the MCP
+// transport can use it without this module's SDK import (TASK-000113).
+export { sanitizeProjectCommandEnvironment };
 
 const HOST_EXTENSION_NAME = "pi-web-project-command-environment";
 const HOST_EXTENSION_PATH = `<inline:${HOST_EXTENSION_NAME}>`;
@@ -30,27 +35,6 @@ type ProjectCommandBashOperationsOptions = {
 
 type BashExecResult = Awaited<ReturnType<BashOperations["exec"]>>;
 
-function isHostRuntimeVariable(name: string, platform: NodeJS.Platform): boolean {
-  const comparableName = platform === "win32" ? name.toUpperCase() : name;
-  return comparableName === "PORT"
-    || comparableName === "NODE_ENV"
-    || comparableName.startsWith("NEXT_")
-    // The browser login password guards this server; commands run on behalf of
-    // a project (and the model reading their output) have no use for it.
-    || comparableName === "PI_WEB_PASSWORD";
-}
-
-export function sanitizeProjectCommandEnvironment(
-  baseEnvironment: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform = process.platform,
-): NodeJS.ProcessEnv {
-  const environment = { ...baseEnvironment };
-  for (const name of Object.keys(environment)) {
-    if (isHostRuntimeVariable(name, platform)) delete environment[name];
-  }
-  return environment;
-}
-
 function withAgentBinDirectory(
   environment: NodeJS.ProcessEnv,
   agentBinDir: string,
@@ -73,7 +57,7 @@ export function createProjectCommandBashOperations(
 ): BashOperations {
   const {
     abortSettleGraceMs = ABORT_SETTLE_GRACE_MS,
-    agentBinDir = join(getAgentDir(), "bin"),
+    agentBinDir = join(agentDir(), "bin"),
     baseEnvironment = process.env,
     localOperations = createLocalBashOperations({ shellPath: options.shellPath }),
     platform = process.platform,

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as resolveAgentDir } from "@/lib/agent-dir";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
@@ -330,7 +330,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ path: config.path, exists: true, error: null, views: [], groups: config.groups });
   }
 
-  const agentDir = getAgentDir();
+  const agentDir = resolveAgentDir();
   // Per-view offsets: each view pages on its own (SR-000023 ③), so one panel
   // showing A on page 3 must not move B. Keyed by index because that is what
   // the panel selects by; a missing or malformed entry means "first page".

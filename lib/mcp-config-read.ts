@@ -1,6 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CONFIG_DIR_NAME, type McpServerConfig } from "@earendil-works/pi-coding-agent";
+import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./agent-dir";
 import type {
   CodemodeSandboxStatus,
   McpAvailability,
@@ -745,17 +746,17 @@ async function codemodeInfo(
   } catch (error) {
     info.preferenceError = errorMessage(error);
   }
-  const projectOverride = trustedCwd === undefined ? undefined : readProjectCodemodeOverride(trustedCwd);
+  const projectOverride = trustedCwd === undefined ? undefined : await readProjectCodemodeOverride(trustedCwd);
   if (projectOverride) info.projectOverride = projectOverride;
   // Read on its own: a malformed defaultTools leaves the codemode object readable, and the other way round.
   try {
     const settingsPath = getGlobalSettingsPath(agentDir);
     const { mode, inlineBudget } = await readCodemodeSettings(settingsPath);
     info.mode = { ...mode, settingsPath };
-    const projectMode = trustedCwd === undefined ? undefined : readProjectCodemodeMode(trustedCwd);
+    const projectMode = trustedCwd === undefined ? undefined : await readProjectCodemodeMode(trustedCwd);
     if (projectMode) info.mode.projectOverride = projectMode;
     info.inlineBudget = { ...inlineBudget, settingsPath, default: CODEMODE_INLINE_BUDGET_DEFAULT, max: CODEMODE_INLINE_BUDGET_MAX };
-    const projectBudget = trustedCwd === undefined ? undefined : readProjectCodemodeInlineBudget(trustedCwd);
+    const projectBudget = trustedCwd === undefined ? undefined : await readProjectCodemodeInlineBudget(trustedCwd);
     if (projectBudget) info.inlineBudget.projectOverride = projectBudget;
   } catch (error) {
     info.modeError = errorMessage(error);

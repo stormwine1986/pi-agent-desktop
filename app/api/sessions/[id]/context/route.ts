@@ -1,6 +1,23 @@
 import { NextResponse } from "next/server";
-import { resolveSessionPath, openSessionManager, buildSessionContext } from "@/lib/session-reader";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { resolveSessionPath } from "@/lib/session-list";
+import { readSessionFile } from "@/lib/session-read";
+import { buildSessionContext } from "@/lib/session-context";
+import { sessionRegistry, type RegistrySession } from "@/lib/session-registry";
+import type { SessionEntry } from "@/lib/types";
+
+/**
+ * One page of a session's history.
+ *
+ * Like `GET /api/sessions/[id]` beside it, this is a first-screen read: a chat
+ * that restores with history paged in asks for it, and neither may load the pi
+ * SDK (TASK-000113). Entries come from the JSONL file (`lib/session-read.ts`);
+ * a live wrapper's own manager is read through a structural view, and a file
+ * older than the current format falls back to `SessionManager` dynamically.
+ */
+
+interface LiveSessionManager {
+  getEntries(): SessionEntry[];
+}
 
 export async function GET(
   req: Request,
@@ -22,17 +39,33 @@ export async function GET(
   const wholeTurns = url.searchParams.has("wholeTurns");
 
   try {
-    const rpc = getRpcSession(id);
-    const liveRpc = rpc?.isAlive() ? rpc : undefined;
+    const registered = sessionRegistry().get(id) as RegistrySession | undefined;
+    const liveRpc = registered && (typeof registered.isAlive !== "function" || registered.isAlive())
+      ? registered
+      : undefined;
     const filePath = liveRpc ? null : await resolveSessionPath(id);
     if (!liveRpc && !filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? openSessionManager(filePath!);
+    let entries: SessionEntry[];
+    if (liveRpc) {
+      const manager = liveRpc.inner?.sessionManager as unknown as LiveSessionManager | undefined;
+      if (!manager) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      entries = manager.getEntries();
+    } else {
+      const view = readSessionFile(filePath!);
+      if (view.needsSessionManager) {
+        const { openSessionManager } = await import("@/lib/session-reader");
+        entries = openSessionManager(filePath!).getEntries() as unknown as SessionEntry[];
+      } else {
+        entries = view.entries;
+      }
+    }
+
     // `before` is the oldest entry already on the client; fetch its ancestors
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
-    const context = buildSessionContext(sm.getEntries() as never, before ?? leafId, {
+    const context = buildSessionContext(entries as never, before ?? leafId, {
       deferThinking,
       deferToolResultImages,
       tail,

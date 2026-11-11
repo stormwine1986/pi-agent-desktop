@@ -1,5 +1,5 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { agentDir as piAgentDir } from "./agent-dir";
+import { listAllSessions } from "./session-list";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import webpush from "web-push";
@@ -116,7 +116,7 @@ function getDefaultEnvironment(): WebPushEnvironment {
     async listSessionNames() {
       const names = new Map<string, string>();
       try {
-        for (const session of await SessionManager.listAll()) {
+        for (const session of await listAllSessions()) {
           if (session.name) names.set(session.id, session.name);
         }
       } catch {

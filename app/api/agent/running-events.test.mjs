@@ -6,7 +6,7 @@ const routeSource = readFileSync(new URL("./running/events/route.ts", import.met
 const rpcManagerSource = readFileSync(new URL("../../../lib/rpc-manager.ts", import.meta.url), "utf8");
 
 test("running SSE frames carry the session-list version for cross-window refresh", () => {
-  assert.match(routeSource, /import \{ getSessionListVersion \} from "@\/lib\/session-reader"/);
+  assert.match(routeSource, /import \{ getSessionListVersion \} from "@\/lib\/session-list"/);
   const frames = routeSource.match(/encode\(\{ type: "running"[\s\S]*?\}\)/g) ?? [];
   assert.ok(frames.length >= 2, "expected initial + subscriber frames");
   for (const frame of frames) {

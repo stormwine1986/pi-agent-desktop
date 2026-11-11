@@ -1,12 +1,9 @@
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import {
-  hasTrustRequiringProjectResources,
-  ProjectTrustStore,
-  type ProjectTrustStoreEntry,
-} from "@earendil-works/pi-coding-agent";
+import type { ProjectTrustStoreEntry } from "@earendil-works/pi-coding-agent";
 import type { FreshFolderTrustBreadth, ProjectTrustStatus } from "./api-types";
+import { trustManager } from "./pi-trust-store";
 import { serializeByKey } from "./key-serializer";
 import { isPathWithinRoots } from "./path-security";
 import { samePath } from "./paths";
@@ -45,6 +42,7 @@ function describeDecision(
  * must not, so that failure is reported in `decisionError` instead.
  */
 export function getProjectTrustStatus(cwd: string, agentDir: string): ProjectTrustStatus {
+  const { ProjectTrustStore, hasTrustRequiringProjectResources } = trustManager();
   const requiresTrust = Boolean(cwd) && hasTrustRequiringProjectResources(cwd);
   const trustStore = new ProjectTrustStore(agentDir);
   if (!requiresTrust) {
@@ -99,6 +97,7 @@ export function mayReadProjectConfigNow(cwd: string, agentDir: string): boolean 
     // Not getProjectTrustStatus(): that also reads trust.json for a folder that
     // requires no trust, which this answers false whatever its decision. Twice
     // per prompt, that would lock and read trust.json for nothing.
+    const { ProjectTrustStore, hasTrustRequiringProjectResources } = trustManager();
     if (!cwd || !hasTrustRequiringProjectResources(cwd)) return false;
     return new ProjectTrustStore(agentDir).get(cwd) === true;
   } catch (error) {
@@ -122,7 +121,7 @@ export function trustProject(cwd: string, agentDir: string): ProjectTrustStatus 
   const status = getProjectTrustStatus(cwd, agentDir);
   if (!status.requiresTrust) return status;
 
-  new ProjectTrustStore(agentDir).set(cwd, true);
+  new (trustManager().ProjectTrustStore)(agentDir).set(cwd, true);
   // Built from what was just written, not read back: a second read can fail
   // (the lock held past the store's wait), and the route would then report a
   // decision already on disk as a failure and skip rebuilding the cwd's wrappers.
@@ -150,6 +149,7 @@ export function projectTrustReloadOptions(
   cwd: string,
   agentDir: string,
 ): { resolveProjectTrust: () => Promise<boolean> } | undefined {
+  const { ProjectTrustStore, hasTrustRequiringProjectResources } = trustManager();
   if (!cwd || !hasTrustRequiringProjectResources(cwd)) return undefined;
   const trustStore = new ProjectTrustStore(agentDir);
   return { resolveProjectTrust: async () => trustStore.get(cwd) === true };
@@ -256,7 +256,8 @@ const NESTED_PROJECT_SCAN_SKIP = new Set(["node_modules", ".git", ".pi", ".agent
  */
 export function findInheritingTrustProject(cwd: string, agentDir: string): FreshFolderTrustBreadth | undefined {
   const folder = realPathOr(cwd);
-  let store: ProjectTrustStore | undefined;
+  const { ProjectTrustStore } = trustManager();
+  let store: InstanceType<typeof ProjectTrustStore> | undefined;
   const hasDecision = (path: string): boolean => {
     try {
       store ??= new ProjectTrustStore(agentDir);
@@ -400,6 +401,7 @@ export async function trustFreshFolderAndWrite<T>(
   }
   const key = trustKeyPath(cwd);
   return serializeForFolder(key, async (): Promise<FreshFolderTrustResult<T>> => {
+    const { ProjectTrustStore, hasTrustRequiringProjectResources } = trustManager();
     const store = new ProjectTrustStore(agentDir);
     const notFresh = (error: string): FreshFolderTrustResult<T> => {
       let status: ProjectTrustStatus | undefined;

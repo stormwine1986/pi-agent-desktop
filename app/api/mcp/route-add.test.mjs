@@ -26,6 +26,9 @@ await mkdir(agentDir, { recursive: true });
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
 const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { GET, POST } = await jiti.import("./route.ts");
+// The route reads the trust store through lib/pi-trust-store.ts (TASK-000113),
+// which under jiti is a different class instance than the SDK root `import`.
+const { trustManager } = await jiti.import("../../../lib/pi-trust-store.ts");
 for (const folder of [trusted, untrusted, fresh, outer, inner, root]) allowFileRoot(folder);
 
 after(async () => {
@@ -276,8 +279,9 @@ test("a write that fails after trusting a fresh folder takes the trust back", as
 test("a write that fails after trusting, whose trust cannot be taken back either, says the folder stays trusted", async (t) => {
   await writeFile(join(fresh, ".pi"), "not a folder");
   // The route's store is the test's: the SDK module is shared, so taking the trust back can be made to fail.
-  const set = ProjectTrustStore.prototype.set;
-  t.mock.method(ProjectTrustStore.prototype, "set", function (path, value) {
+  const routeStore = trustManager().ProjectTrustStore;
+  const set = routeStore.prototype.set;
+  t.mock.method(routeStore.prototype, "set", function (path, value) {
     if (value === null) throw new Error("trust.json is locked by another process");
     return set.call(this, path, value);
   });

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "./agent-dir";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 
 // Entity Assistant's own preferences, kept out of pi's settings.json because the pi CLI
@@ -8,8 +8,8 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 
 type StoredSettings = Record<string, unknown> & { artifactsPrompt?: unknown };
 
-export function getPiWebSettingsPath(agentDir = getAgentDir()): string {
-  return join(agentDir, "pi-web", "settings.json");
+export function getPiWebSettingsPath(directory = agentDir()): string {
+  return join(directory, "pi-web", "settings.json");
 }
 
 export function readStored(settingsPath: string): StoredSettings {

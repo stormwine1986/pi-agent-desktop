@@ -1,15 +1,13 @@
-import {
-  createMcpExtension,
-  getPackageDir,
-  type LoadedMcpConfig,
-  type McpExposure,
-  type McpExtensionOptions,
-  type McpServerConfig,
-  type McpServerEntry,
-  type McpTransportFactory,
+import type {
+  LoadedMcpConfig,
+  McpExposure,
+  McpExtensionOptions,
+  McpServerConfig,
+  McpServerEntry,
+  McpTransportFactory,
 } from "@earendil-works/pi-coding-agent";
 import { readFileSync, realpathSync } from "node:fs";
-import { findPackageJSON } from "node:module";
+import { createRequire, findPackageJSON } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -258,6 +256,40 @@ async function importFile(path: string): Promise<Record<string, unknown>> {
   return await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ pathToFileURL(path).href);
 }
 
+/**
+ * One of the SDK's own files, loaded *synchronously* and without the package
+ * root (TASK-000113). For the few reads that a request needs before the first
+ * screen is up and that cannot be made async: the project-trust store, whose
+ * status is asked for on every prompt and on the trust request itself, lives in
+ * `dist/core/trust-manager.js` — forty kilobytes of the SDK's own code — while
+ * the package root it is exported from loads the whole 37 MB graph (~1.4 s of
+ * blocked loop). Node's `require(esm)` (22.12+, this package requires 22.19)
+ * returns the same module instance a dynamic `import()` would, so the trust
+ * store the sessions use and the one this read uses are one class.
+ *
+ * `createRequire` keeps the module out of the bundle: webpack rewrites a
+ * `require("...")` it can see, and a second copy of the class would be a
+ * different `instanceof` and a different `trust.json` writer.
+ */
+export function requireSdkModuleSync<T>(relativePath: string): T {
+  const packageDir = resolvedSdkPackageDir(process.cwd());
+  // The bundler must not see this call. Next rewrites what it recognises as a
+  // CommonJS require — it turned the `createRequire(...)` form into
+  // `(void 0)(path)`, which threw at runtime while the module graph looked
+  // clean — so the require function is fetched from the enclosing module scope
+  // at run time instead. The bundle is CommonJS, so that is Node's own require.
+  // eslint-disable-next-line no-eval
+  let nodeRequire: (request: string) => T;
+  try {
+    nodeRequire = eval("require") as (request: string) => T;
+  } catch {
+    // Only reached outside a CommonJS host (a plain ESM test runner). The
+    // bundled server always takes the branch above.
+    nodeRequire = createRequire(pathToFileURL(join(packageDir, "package.json"))) as (request: string) => T;
+  }
+  return nodeRequire(join(packageDir, relativePath));
+}
+
 // The conditions Node's resolver enables for an `import` by default.
 const IMPORT_CONDITIONS = new Set(["node", "import", "module-sync", "node-addons", "default"]);
 
@@ -372,6 +404,11 @@ export async function importPiSdkInternals(options: {
     return { ok: false, reason: `PI_PACKAGE_DIR is set; MCP support loads only from the ${SDK_PACKAGE} that Entity Assistant runs` };
   }
 
+  // Imported here, not with the module (TASK-000113): the first screen reaches
+  // this file through project-trust's MCP listing, and a static symbol from the
+  // SDK root would load the whole graph on that request. Node caches the module,
+  // so this is the same instance the session runtime gets.
+  const { createMcpExtension, getPackageDir } = await import(SDK_PACKAGE);
   let packageDir: string;
   try {
     packageDir = realpathSync(getPackageDir());

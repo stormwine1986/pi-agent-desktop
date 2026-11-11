@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { userHome } from "./user-home.ts";
 
 /** pi's config directory name, from the SDK's package metadata (`piConfig.configDir`). */
-const CONFIG_DIR_NAME = ".pi";
+export const CONFIG_DIR_NAME = ".pi";
 
 /**
  * The pi agent directory (`~/.pi/agent`), resolved without loading the pi SDK.

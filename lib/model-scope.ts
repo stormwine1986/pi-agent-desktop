@@ -1,9 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import {
-  resolveModelScopeWithDiagnostics,
-  type ModelRuntime,
-  type ModelScopeDiagnostic,
-  type ScopedModel,
+import type {
+  ModelRuntime,
+  ModelScopeDiagnostic,
+  ScopedModel,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
@@ -172,6 +171,9 @@ export async function resolveVisibleModels(
   const snapshotRuntime = {
     getAvailable: async () => available,
   } as ModelRuntime;
+  // Imported at the call: this module is reachable from the first screen's
+  // model list, which must not load the SDK statically (TASK-000113).
+  const { resolveModelScopeWithDiagnostics } = await import("@earendil-works/pi-coding-agent");
   const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(cleaned, snapshotRuntime);
   // A leftover valid glob after a model was removed is not a chat-level problem
   // when other enabledModels entries still matched. Keep exact and malformed

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "./agent-dir";
 import lockfile from "proper-lockfile";
 import { replaceFileAtomicSync } from "./atomic-file";
 
@@ -8,8 +8,8 @@ import { replaceFileAtomicSync } from "./atomic-file";
 // SettingsManager has no setter for (`defaultTools`). The lock is the one
 // SettingsManager takes on the same path, so neither overwrites the other.
 
-export function getGlobalSettingsPath(agentDir = getAgentDir()): string {
-  return join(agentDir, "settings.json");
+export function getGlobalSettingsPath(directory = agentDir()): string {
+  return join(directory, "settings.json");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

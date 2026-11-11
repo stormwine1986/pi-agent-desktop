@@ -102,6 +102,73 @@ if (Number.isFinite(shellSpawnedAt) && shellSpawnedAt > 0) {
   };
 }
 
+// First-screen probe (TASK-000113). Observation only, and only when asked for:
+// `PI_FIRST_SCREEN_PROBE=1` makes every request this server answers print its
+// start, finish and duration to server.log, and prints every event-loop stall
+// the 25 ms tick can see together with the requests that were in flight at the
+// time. That is what "no request before app_ready may silently spend 300 ms"
+// needs as evidence: the packaged server is the only place a stall can be
+// measured, and the desktop shell hides the window until the page reports
+// `app_ready`, so both halves have to come from the same run.
+//
+// The existing 250 ms stall watch above only reports stalls ≥2 s and never says
+// which request was being answered; this one is finer on purpose. Off by
+// default (a cold start must not pay for diagnosis nobody asked for).
+if (process.env.PI_FIRST_SCREEN_PROBE === "1") {
+  const PROBE_TICK_MS = 25;
+  const PROBE_STALL_MS = 50;
+  const PROBE_WATCH_MS = 3 * 60_000;
+  const probeStart = Date.now();
+  let lastProbeTick = Date.now();
+  // Every request of the last few seconds, so a stall can be attributed to the
+  // request whose window it fell inside. `inFlight` alone is not enough: the
+  // blocking work ends, the response finishes, and only then does the tick run
+  // and see the gap — by which time nothing is in flight any more.
+  const recent = [];
+  let nextSequence = 0;
+  const stamp = () => `+${Date.now() - probeStart}ms`;
+
+  const probeTick = setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastProbeTick - PROBE_TICK_MS;
+    lastProbeTick = now;
+    if (gap >= PROBE_STALL_MS) {
+      const gapStart = now - gap;
+      while (recent.length > 0 && (recent[0].finishedAt ?? now) < gapStart - 5_000) recent.shift();
+      const during = recent
+        .filter((entry) => entry.startedAt <= gapStart && (entry.finishedAt === undefined || entry.finishedAt >= gapStart))
+        .map((entry) => `#${entry.sequence} ${entry.label}`)
+        .join(", ") || "-";
+      console.error(`[probe] stall ${gap}ms ending ${stamp()} during ${during}`);
+    }
+    if (now - probeStart > PROBE_WATCH_MS) clearInterval(probeTick);
+  }, PROBE_TICK_MS);
+  probeTick.unref();
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const probeHttp = require("node:http");
+  const probeEmit = probeHttp.Server.prototype.emit;
+  probeHttp.Server.prototype.emit = function emitWithProbe(event, ...args) {
+    if (event === "request") {
+      const [request, response] = args;
+      const sequence = ++nextSequence;
+      const label = `${request?.method ?? "?"} ${String(request?.url ?? "?").split("?")[0]}`;
+      const startedAt = Date.now();
+      const record = { sequence, label, startedAt, finishedAt: undefined };
+      recent.push(record);
+      const inFlight = recent.filter((entry) => entry.finishedAt === undefined).length;
+      console.error(`[probe] #${sequence} ${label} start ${stamp()} inflight ${inFlight}`);
+      response?.once?.("finish", () => {
+        record.finishedAt = Date.now();
+        console.error(
+          `[probe] #${sequence} ${label} done ${stamp()} dur ${record.finishedAt - startedAt}ms status ${response.statusCode} inflight ${recent.filter((entry) => entry.finishedAt === undefined).length}`,
+        );
+      });
+    }
+    return probeEmit.call(this, event, ...args);
+  };
+}
+
 const expectedParentPid = Number.parseInt(process.env.PI_WEB_PARENT_PID ?? "", 10);
 
 // The launcher owns agent/tool subprocesses (MCP servers, shells). A normal

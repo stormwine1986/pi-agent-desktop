@@ -1,9 +1,6 @@
-import {
-  createAgentSessionServices,
-  getAgentDir,
-  ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { agentDir as agentDirectory } from "./agent-dir";
 
 /**
  * ModelRuntime that also includes providers registered by extensions (an
@@ -19,7 +16,12 @@ import { join } from "node:path";
 export async function createModelRuntimeWithExtensions(
   modelRuntime?: ModelRuntime,
 ): Promise<ModelRuntime> {
-  const agentDir = getAgentDir();
+  // Imported at the call, not with the module (TASK-000113): MCP's test
+  // connection reaches this file from the first screen's project-trust
+  // listing, where one static symbol from the SDK root would load the whole
+  // 37 MB graph before the window can be shown.
+  const { createAgentSessionServices, ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+  const agentDir = agentDirectory();
   const runtime = modelRuntime ?? await ModelRuntime.create({
     authPath: join(agentDir, "auth.json"),
     modelsPath: join(agentDir, "models.json"),

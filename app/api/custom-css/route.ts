@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { isApiRequestAllowed } from "@/lib/request-security";
 
 /**
@@ -14,7 +14,7 @@ import { isApiRequestAllowed } from "@/lib/request-security";
  * edits show up on the next reload without restarting the app.
  */
 export async function GET() {
-  const filePath = join(getAgentDir(), "desktop", "custom.css");
+  const filePath = join(agentDir(), "desktop", "custom.css");
   let css = "";
   try {
     css = await readFile(filePath, "utf8");
@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Not allowed" }, { status: 403 });
   }
 
-  const filePath = join(getAgentDir(), "desktop", "custom.css");
+  const filePath = join(agentDir(), "desktop", "custom.css");
   let created = false;
   try {
     await readFile(filePath, "utf8");

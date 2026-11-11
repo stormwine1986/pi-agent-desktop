@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { CONFIG_DIR_NAME, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./agent-dir";
 import type { CodemodeInlineBudgetSetting, CodemodeMode, CodemodeModeSetting } from "./api-types";
 import {
   defaultToolEntries,
@@ -94,8 +94,19 @@ const GLOBAL_SETTINGS_FOR: Record<CodemodePreference, string | undefined> = {
   always: JSON.stringify({ defaultTools: [`+${CODEMODE}`] }),
 };
 
-/** Global and project settings texts merged by pi's own SettingsManager, as a trusted project's session merges them. */
-function mergedSettings(globalText: string | undefined, projectText: string): SettingsManager {
+/**
+ * Global and project settings texts merged by pi's own SettingsManager, as a
+ * trusted project's session merges them.
+ *
+ * The SDK is imported at the call, not with the module (TASK-000113): this file
+ * is reachable from the first screen's project-trust request, and one static
+ * symbol from `@earendil-works/*` loads the whole 37 MB graph there. The merge
+ * still has to be pi's, not a second implementation of its rules, so it is
+ * awaited here instead of copied. The callback form above cannot: Settings
+ * Manager builds its tool list synchronously.
+ */
+async function mergedSettings(globalText: string | undefined, projectText: string) {
+  const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
   const texts = { global: globalText, project: projectText };
   const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
     withLock: (scope, fn) => {
@@ -106,8 +117,8 @@ function mergedSettings(globalText: string | undefined, projectText: string): Se
 }
 
 /** Whether a session starts with `codemode` active, merged and resolved by pi's own SettingsManager. */
-function startsWithCodemode(globalText: string | undefined, projectText: string): boolean {
-  return mergedSettings(globalText, projectText).getDefaultTools()?.includes(CODEMODE) === true;
+async function startsWithCodemode(globalText: string | undefined, projectText: string): Promise<boolean> {
+  return (await mergedSettings(globalText, projectText)).getDefaultTools()?.includes(CODEMODE) === true;
 }
 
 /**
@@ -120,10 +131,10 @@ function startsWithCodemode(globalText: string | undefined, projectText: string)
  * exactly, malformed values included; the two agreeing is what overriding
  * means. A text that does not parse reads as empty, as pi reads it.
  */
-export function projectCodemodePreference(projectText: string | undefined): CodemodePreference | undefined {
+export async function projectCodemodePreference(projectText: string | undefined): Promise<CodemodePreference | undefined> {
   if (projectText === undefined) return undefined;
-  const automatic = startsWithCodemode(GLOBAL_SETTINGS_FOR.automatic, projectText);
-  if (automatic !== startsWithCodemode(GLOBAL_SETTINGS_FOR.always, projectText)) return undefined;
+  const automatic = await startsWithCodemode(GLOBAL_SETTINGS_FOR.automatic, projectText);
+  if (automatic !== await startsWithCodemode(GLOBAL_SETTINGS_FOR.always, projectText)) return undefined;
   return automatic ? "always" : "automatic";
 }
 
@@ -141,9 +152,9 @@ export function projectSettingsPath(cwd: string): string {
  * so a FIFO, a device or a file past `PROJECT_SETTINGS_MAX_BYTES` reports
  * nothing rather than stalling the request.
  */
-export function readProjectCodemodeOverride(cwd: string): ProjectCodemodeOverride | undefined {
+export async function readProjectCodemodeOverride(cwd: string): Promise<ProjectCodemodeOverride | undefined> {
   const settingsPath = projectSettingsPath(cwd);
-  const preference = projectCodemodePreference(readProjectSettingsText(settingsPath));
+  const preference = await projectCodemodePreference(readProjectSettingsText(settingsPath));
   return preference ? { settingsPath, preference } : undefined;
 }
 
@@ -223,9 +234,10 @@ async function writeCodemodeValue<T>(
 }
 
 /** The merged `codemode[key]` a trusted project's session reads, with `globalValue` in the global settings. */
-function mergedCodemodeValue(key: CodemodeKey, globalValue: unknown, projectText: string): unknown {
+async function mergedCodemodeValue(key: CodemodeKey, globalValue: unknown, projectText: string): Promise<unknown> {
   const globalText = JSON.stringify({ codemode: { [key]: globalValue } });
-  return codemodeValueOf({ codemode: mergedSettings(globalText, projectText).getSettings().codemode }, key);
+  const merged = await mergedSettings(globalText, projectText);
+  return codemodeValueOf({ codemode: merged.getSettings().codemode }, key);
 }
 
 /**
@@ -237,14 +249,14 @@ function mergedCodemodeValue(key: CodemodeKey, globalValue: unknown, projectText
  * value at all. Merged by the SDK itself under two global values that differ
  * for the extension, the project decides when both give the same value.
  */
-function projectCodemodeValue(
+async function projectCodemodeValue(
   key: CodemodeKey,
   globalValues: readonly [unknown, unknown],
   projectText: string | undefined,
-): { raw: unknown } | undefined {
+): Promise<{ raw: unknown } | undefined> {
   if (projectText === undefined) return undefined;
-  const first = mergedCodemodeValue(key, globalValues[0], projectText);
-  if (JSON.stringify(first) !== JSON.stringify(mergedCodemodeValue(key, globalValues[1], projectText))) return undefined;
+  const first = await mergedCodemodeValue(key, globalValues[0], projectText);
+  if (JSON.stringify(first) !== JSON.stringify(await mergedCodemodeValue(key, globalValues[1], projectText))) return undefined;
   return { raw: first };
 }
 
@@ -303,8 +315,8 @@ export interface ProjectCodemodeMode extends CodemodeModeSetting {
  * no longer matters there, undefined when the global value still decides
  * (`projectCodemodeValue()`).
  */
-export function projectCodemodeMode(projectText: string | undefined): CodemodeModeSetting | undefined {
-  const decided = projectCodemodeValue("mode", ["on", "only"], projectText);
+export async function projectCodemodeMode(projectText: string | undefined): Promise<CodemodeModeSetting | undefined> {
+  const decided = await projectCodemodeValue("mode", ["on", "only"], projectText);
   return decided && codemodeModeSetting(decided.raw);
 }
 
@@ -313,9 +325,9 @@ export function projectCodemodeMode(projectText: string | undefined): CodemodeMo
  * `.pi/settings.json`; read as `readProjectCodemodeOverride()` reads it, and
  * only for a project whose settings sessions read.
  */
-export function readProjectCodemodeMode(cwd: string): ProjectCodemodeMode | undefined {
+export async function readProjectCodemodeMode(cwd: string): Promise<ProjectCodemodeMode | undefined> {
   const settingsPath = projectSettingsPath(cwd);
-  const mode = projectCodemodeMode(readProjectSettingsText(settingsPath));
+  const mode = await projectCodemodeMode(readProjectSettingsText(settingsPath));
   return mode ? { settingsPath, ...mode } : undefined;
 }
 
@@ -377,8 +389,8 @@ export interface ProjectCodemodeInlineBudget extends CodemodeInlineBudgetSetting
  * value no longer matters there, undefined when the global value still
  * decides (`projectCodemodeValue()`).
  */
-export function projectCodemodeInlineBudget(projectText: string | undefined): CodemodeInlineBudgetSetting | undefined {
-  const decided = projectCodemodeValue("inlineBudget", [1, 2], projectText);
+export async function projectCodemodeInlineBudget(projectText: string | undefined): Promise<CodemodeInlineBudgetSetting | undefined> {
+  const decided = await projectCodemodeValue("inlineBudget", [1, 2], projectText);
   return decided && inlineBudgetSetting(decided.raw);
 }
 
@@ -387,8 +399,8 @@ export function projectCodemodeInlineBudget(projectText: string | undefined): Co
  * `.pi/settings.json`; read as `readProjectCodemodeOverride()` reads it, and
  * only for a project whose settings sessions read.
  */
-export function readProjectCodemodeInlineBudget(cwd: string): ProjectCodemodeInlineBudget | undefined {
+export async function readProjectCodemodeInlineBudget(cwd: string): Promise<ProjectCodemodeInlineBudget | undefined> {
   const settingsPath = projectSettingsPath(cwd);
-  const budget = projectCodemodeInlineBudget(readProjectSettingsText(settingsPath));
+  const budget = await projectCodemodeInlineBudget(readProjectSettingsText(settingsPath));
   return budget ? { settingsPath, ...budget } : undefined;
 }

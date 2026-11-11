@@ -1,8 +1,14 @@
-import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
-import { getSessionListVersion } from "@/lib/session-reader";
+import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/session-registry";
+import { getSessionListVersion } from "@/lib/session-list";
 import { getSubscriptionRuntimeSnapshot, subscribeSubscriptionRuntime } from "@/lib/events/runtime";
 
 export const dynamic = "force-dynamic";
+
+// The running set is read from the SDK-free registry, and the session-list
+// version from the SDK-free half of the catalogue (TASK-000113): this stream
+// opens before the desktop window is shown, and importing `lib/rpc-manager` or
+// `lib/session-reader` for either number loaded the whole pi SDK there (~1.4 s
+// of blocked loop). Nothing here starts or drives an agent.
 
 // GET /api/agent/running/events - SSE stream of the set of currently-running
 // session ids. Pushes an update whenever any session starts or stops working,

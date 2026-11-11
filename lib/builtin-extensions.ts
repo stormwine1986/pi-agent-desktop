@@ -1,18 +1,13 @@
 import { join } from "node:path";
-import {
-  CONFIG_DIR_NAME,
-  createCodemodeExtension,
-  createMcpExtension,
-  createToolSearchExtension,
-  DefaultPackageManager,
-  SettingsManager,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type ExtensionFactory,
-  type InlineExtension,
-  type LoadedMcpConfig,
-  type ToolDefinition,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionFactory,
+  InlineExtension,
+  LoadedMcpConfig,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./agent-dir";
 import { McpHost, type McpHostOptions } from "./mcp-host";
 import { createPiWebMcpTransportFactory } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals, type PiSdkInternalsResult } from "./pi-sdk-internals";
@@ -26,6 +21,19 @@ import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file"
 // `tool_search` behave as in the CLI. `llama.cpp` is not among them: it serves
 // a local model server, not a feature of the session. Chat-only and subagent
 // sessions load none of them.
+
+/**
+ * The SDK's own factories and package manager, imported when a session or a
+ * settings read actually needs them (TASK-000113). This module is reachable
+ * from the first screen (project-trust lists a folder's MCP servers through
+ * `lib/mcp-config-read.ts`), and one static symbol from
+ * `@earendil-works/*` loads the whole 37 MB graph on that request. Every
+ * caller below is already async, so the import is awaited at the call; the
+ * type-only imports stay static because the compiler erases them.
+ */
+async function loadSdk() {
+  return import("@earendil-works/pi-coding-agent");
+}
 
 export const MCP_DISABLE_VARIABLE = "PI_WEB_DISABLE_MCP";
 
@@ -74,7 +82,7 @@ async function sdkCodemodeDefinition(): Promise<ToolDefinition> {
     getAllTools: () => [],
     appendEntry: () => {},
   } as unknown as ExtensionAPI;
-  await createCodemodeExtension({ models: false })(pi);
+  await (await loadSdk()).createCodemodeExtension({ models: false })(pi);
   if (!definition) throw new Error("the codemode extension registered no tool");
   return definition;
 }
@@ -269,6 +277,7 @@ async function resolveBuiltinSwitches(
   paths: Record<SettingsScope, string>,
 ): Promise<Record<BuiltinExtensionName, BuiltinExtensionSwitch>> {
   const { agentDir, cwd, projectTrusted } = options;
+  const { DefaultPackageManager, SettingsManager } = await loadSdk();
   const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
     withLock: (scope, fn) => {
       const extensions = lists[scope];
@@ -360,7 +369,7 @@ export interface PiWebBuiltinExtensions {
 export async function createPiWebBuiltinExtensions(
   options: PiWebBuiltinExtensionsOptions,
 ): Promise<PiWebBuiltinExtensions> {
-  const [sandbox, mcp] = await Promise.all([checkCodemodeSandbox(), loadMcpRuntime()]);
+  const [sandbox, mcp, sdk] = await Promise.all([checkCodemodeSandbox(), loadMcpRuntime(), loadSdk()]);
   const mcpHost = mcp.available
     ? new McpHost({
         ...options.mcpHost,
@@ -370,12 +379,12 @@ export async function createPiWebBuiltinExtensions(
       })
     : undefined;
   const extensions = [
-    builtin("codemode", sandbox.available ? createCodemodeExtension() : unavailableExtension),
-    builtin("tool-search", createToolSearchExtension()),
+    builtin("codemode", sandbox.available ? sdk.createCodemodeExtension() : unavailableExtension),
+    builtin("tool-search", sdk.createToolSearchExtension()),
     builtin(
       "mcp",
       mcp.available && mcpHost
-        ? createMcpExtension({
+        ? sdk.createMcpExtension({
             loadConfig: createMcpExtensionConfigLoader(mcp.internals, options.agentDir),
             createTransport: mcpHost.wrapTransportFactory(createPiWebMcpTransportFactory(mcp.internals)),
             // The host already waited, and Stop ends its wait. The extension's own wait for

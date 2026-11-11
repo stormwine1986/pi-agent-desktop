@@ -1,4 +1,4 @@
-import { ModelRegistry, type McpExposure, type McpServerConfig, type McpServerEntry } from "@earendil-works/pi-coding-agent";
+import type { ModelRegistry, McpExposure, McpServerConfig, McpServerEntry } from "@earendil-works/pi-coding-agent";
 import type { McpScope, McpTestResult, McpTestState, McpTestTool } from "./api-types";
 import {
   argSecretParts,
@@ -394,7 +394,10 @@ function providerTokenReader(): (provider: string) => Promise<string | undefined
   let registry: Promise<ModelRegistry> | undefined;
   return async (provider) => {
     try {
-      registry ??= createModelRuntimeWithExtensions().then((runtime) => new ModelRegistry(runtime));
+      registry ??= createModelRuntimeWithExtensions().then(async (runtime) => {
+        const { ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+        return new ModelRegistry(runtime);
+      });
       return await (await registry).getApiKeyForProvider(provider);
     } catch {
       return undefined;

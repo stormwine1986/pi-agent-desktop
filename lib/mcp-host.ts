@@ -1,15 +1,15 @@
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import {
-  CONFIG_DIR_NAME,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type InlineExtension,
-  type McpExposure,
-  type McpServerConfig,
-  type McpServerEntry,
-  type McpTransportFactory,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  InlineExtension,
+  McpExposure,
+  McpServerConfig,
+  McpServerEntry,
+  McpTransportFactory,
 } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./agent-dir";
 import type { McpHostInactiveInfo, McpScope, McpSessionState, McpSessionStatus } from "./api-types";
 import { isBuiltinMcpCommand, isMcpExtensionCommand } from "./mcp-command";
 import { canonicalJson, mcpConfigKey, mcpEntryConfigKey } from "./mcp-config-key";

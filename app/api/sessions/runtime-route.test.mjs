@@ -202,28 +202,34 @@ test("session listing supports cheap summaries and honors force refresh", () => 
 });
 
 test("session reads use the live SessionManager before requiring a JSONL path", () => {
+  // TASK-000113: the live lookup goes through the SDK-free registry, whose
+  // wrapper carries the manager the runtime already has in memory. It must
+  // still be consulted before any disk path is resolved, and it must win over
+  // the JSONL read.
   for (const source of [detailRoute, contextRoute]) {
-    const liveLookup = source.indexOf("getRpcSession(id)");
+    const liveLookup = source.indexOf("sessionRegistry().get(id)");
     const pathLookup = source.indexOf("resolveSessionPath(id)");
-    assert.ok(liveLookup >= 0);
-    assert.ok(pathLookup > liveLookup);
-    // openSessionManager is the cached read-only opener; the live wrapper's
-    // manager must still win over any disk read, cached or not.
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? openSessionManager\(/);
+    assert.ok(liveLookup >= 0, "the live wrapper is looked up through the registry");
+    assert.ok(pathLookup > liveLookup, "the live lookup precedes the disk path");
+    assert.match(source, /inner\??\.sessionManager/);
+    assert.match(source, /readSessionFile\(/);
   }
 });
 
 test("detail reads probe disk only on force/mount and evict a stale idle wrapper", () => {
   assert.match(detailRoute, /searchParams\.get\("force"\) === "1"/);
-  assert.match(detailRoute, /force && liveWrapper\?\.evictIfDiskAhead\(\)/);
+  assert.match(detailRoute, /force && liveWrapper\?\.evictIfDiskAhead\?\.\(\)/);
   assert.doesNotMatch(contextRoute, /evictIfDiskAhead|readLatestSessionEntryId/);
 });
 
 test("live agent state is available before the session file is persisted", () => {
-  const liveLookup = stateRoute.indexOf("getRpcSession(id)");
+  // The registry answers "is there a wrapper" without the SDK; only a live one
+  // pays for `rpc-manager` (a dynamic import), and the file is resolved after.
+  const liveLookup = stateRoute.indexOf("sessionRegistry().get(id)");
   const pathLookup = stateRoute.indexOf("resolveSessionPath(id)");
   assert.ok(liveLookup >= 0);
   assert.ok(pathLookup > liveLookup);
+  assert.match(stateRoute, /await import\("@\/lib\/rpc-manager"\)/);
   assert.match(stateRoute, /if \(rpc\?\.isAlive\(\)\)/);
 });
 

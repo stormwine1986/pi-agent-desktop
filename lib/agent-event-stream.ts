@@ -302,8 +302,17 @@ export function createAgentEventStream(
       heartbeat = setInterval(() => enqueueText(":\n\n"), HEARTBEAT_INTERVAL_MS);
 
       // Force the response headers through without claiming that the agent is
-      // ready. The client waits for the later `connected` data event.
+      // ready.
       enqueueText(":\n\n");
+      // A stream may now open before any agent exists (TASK-000113: a restored
+      // chat is not running, and the route waits for a wrapper instead of
+      // starting one), so the transport handshake has to be its own frame. The
+      // client's readiness timeout waits for `connected`; without this one an
+      // idle session would be torn down and retried every few seconds.
+      // `pendingExtensionUiIds` is left out on purpose: it would reset the
+      // client's extension dialogs, and nothing has been replayed yet. The
+      // frame the session publishes once it is attached is unchanged.
+      encode({ type: "connected", sessionId, isStreaming: false });
     },
     cancel() {
       cancelStream(false);

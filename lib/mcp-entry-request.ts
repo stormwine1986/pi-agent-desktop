@@ -1,7 +1,8 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
-import { getAgentDir, type McpServerConfig } from "@earendil-works/pi-coding-agent";
+import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
+import { agentDir as resolveAgentDir } from "./agent-dir";
 import type { McpErrorResponse, McpRefusalReason, McpScope } from "./api-types";
 import { isMcpDisabledByOperator, MCP_DISABLE_VARIABLE } from "./builtin-extensions";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
@@ -173,7 +174,7 @@ export async function readConnectableMcpEntry(req: Request): Promise<McpConnecta
   const internals = await mcpInternalsOrRefusal("connects no MCP server");
   if (isMcpEntryRefusal(internals)) return internals;
 
-  const agentDir = getAgentDir();
+  const agentDir = resolveAgentDir();
   if (scope === "project" && project) {
     const refused = mcpProjectTrustRefusal(project.cwd, agentDir);
     if (refused) return refused;

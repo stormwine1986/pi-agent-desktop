@@ -19,7 +19,9 @@ const { buildSessionContext } = await jiti.import("@/lib/session-reader");
 test("context route parses ?tail and ?before, excluding the boundary on paging", () => {
   assert.match(routeSrc, /const tail = Number\.isFinite\(rawTail\) && rawTail > 0 \? Math\.min\(rawTail, 1000\) : 50/);
   assert.match(routeSrc, /const before = url\.searchParams\.get\("before"\)/);
-  assert.match(routeSrc, /buildSessionContext\(sm\.getEntries\(\) as never, before \?\? leafId, \{[^}]*excludeLeaf: Boolean\(before\)/);
+  // The entries come from the JSONL reader now, not from a SessionManager
+  // (TASK-000113); the wiring this test pins is unchanged.
+  assert.match(routeSrc, /buildSessionContext\(entries as never, before \?\? leafId, \{[^}]*excludeLeaf: Boolean\(before\)/);
 });
 
 test("context route: ?before pages upward without duplicating the boundary", () => {

@@ -2,10 +2,8 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync, statSync, writeFileSync } from "fs";
-import { resolve } from "path";
+import { existsSync, statSync, writeFileSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
-import { userImageDisplayText, userMessageImageCount } from "./user-image-display";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
@@ -13,14 +11,32 @@ import {
   createProjectCommandBashOperations,
   preferUserBashExtension,
 } from "./project-command-env";
-import { cacheSessionPath, getLatestModelChange, getLatestResponseModel, getSessionListVersion, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
+import { cacheSessionPath, getLatestModelChange, getLatestResponseModel, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import {
+  destroyRpcSessionsForCwd,
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
+  hasBusyRpcSessionForCwd,
+  notifyRunningChange,
+  notifySessionRegistered,
   sessionRegistry,
+  subscribeRunningSessions,
+  trackStartingSession,
 } from "./session-registry";
-export { getCompletionNotificationSuppressedRpcSessionIds, getRpcSessionInfos, getRunningRpcSessionIds };
+// The running-state and cwd-scoped helpers live in the SDK-free registry
+// (TASK-000113): the first screen subscribes to them, and importing this
+// module for them would load the whole agent runtime. Re-exported so existing
+// importers keep their one-stop import.
+export {
+  destroyRpcSessionsForCwd,
+  getCompletionNotificationSuppressedRpcSessionIds,
+  getRpcSessionInfos,
+  getRunningRpcSessionIds,
+  hasBusyRpcSessionForCwd,
+  notifyRunningChange,
+  subscribeRunningSessions,
+};
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { notifySessionEvent } from "./web-push";
 import type { AgentRunOutcome, AgentTaskSnapshot } from "./types";
@@ -2385,6 +2401,9 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
     previous.onDestroy(() => {});
   }
   registry.set(sessionId, wrapper);
+  // The agent event stream waits for the wrapper instead of starting one
+  // itself (TASK-000113); it must learn about it before the first prompt runs.
+  notifySessionRegistered(sessionId);
   wrapper.onUnwatched(scheduleIdleSessionCap);
   wrapper.start();
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
@@ -2496,31 +2515,6 @@ function closingRpcSessionWait(sessionId: string): Promise<void> | null {
     wait = entry;
   }
   return wait.done ? null : wait.promise;
-}
-
-function normalizeRpcCwd(cwd: string): string {
-  const resolvedCwd = resolve(cwd);
-  try {
-    return realpathSync(resolvedCwd);
-  } catch {
-    return resolvedCwd;
-  }
-}
-
-function getStartingSessionCwds(): Map<string, number> {
-  if (!globalThis.__piStartingSessionCwds) globalThis.__piStartingSessionCwds = new Map();
-  return globalThis.__piStartingSessionCwds;
-}
-
-function trackStartingSession(cwd: string): () => void {
-  const startingCwds = getStartingSessionCwds();
-  const key = normalizeRpcCwd(cwd);
-  startingCwds.set(key, (startingCwds.get(key) ?? 0) + 1);
-  return () => {
-    const remaining = (startingCwds.get(key) ?? 1) - 1;
-    if (remaining > 0) startingCwds.set(key, remaining);
-    else startingCwds.delete(key);
-  };
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
@@ -2664,63 +2658,6 @@ export async function setRpcChatUnlock(
   await existing.shutdown();
   const started = await startRpcSession(sessionId, persistedFile, undefined);
   return { session: started.session, sessionId: started.realSessionId, recreated: true };
-}
-
-export function hasBusyRpcSessionForCwd(cwd: string): boolean {
-  const targetCwd = normalizeRpcCwd(cwd);
-  if (getStartingSessionCwds().has(targetCwd)) return true;
-  return Array.from(getRegistry().values()).some(
-    (session) => normalizeRpcCwd(session.cwd) === targetCwd && session.isRunning(),
-  );
-}
-
-export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
-  const targetCwd = normalizeRpcCwd(cwd);
-  const sessions = Array.from(getRegistry().values()).filter(
-    (session) => normalizeRpcCwd(session.cwd) === targetCwd,
-  );
-  await Promise.all(sessions.map((session) => session.shutdown()));
-  return sessions.length;
-}
-
-declare global {
-  var __piRunningListeners: Set<(ids: string[]) => void> | undefined;
-}
-
-function getRunningListeners(): Set<(ids: string[]) => void> {
-  if (!globalThis.__piRunningListeners) globalThis.__piRunningListeners = new Set();
-  return globalThis.__piRunningListeners;
-}
-
-export function subscribeRunningSessions(listener: (ids: string[]) => void): () => void {
-  const listeners = getRunningListeners();
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
-
-let lastRunningSnapshot = "";
-
-/**
- * Recompute the running-session-id set and, if it changed since the last
- * notification, broadcast it to subscribers.
- */
-export function notifyRunningChange(): void {
-  const listeners = getRunningListeners();
-  if (listeners.size === 0) {
-    // A future subscriber receives its own initial snapshot. Clear this one so
-    // its first state transition cannot match stale state from an old listener.
-    lastRunningSnapshot = "";
-    return;
-  }
-  const ids = getRunningRpcSessionIds();
-  // List changes (including an unpersisted prompt appearing/disappearing)
-  // must reach every window even when the running id set stays unchanged.
-  const snapshot = JSON.stringify({ ids: [...ids].sort(), version: getSessionListVersion() });
-  if (snapshot === lastRunningSnapshot) return;
-  lastRunningSnapshot = snapshot;
-  for (const listener of listeners) {
-    try { listener(ids); } catch { /* ignore listener errors */ }
-  }
 }
 
 /** Live sessions for the Tasks page; sub-agent runs are reported by their parent. */
