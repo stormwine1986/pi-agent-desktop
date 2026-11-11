@@ -5,12 +5,14 @@ import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { desktopTargetTriple } from "./desktop-platform.mjs";
+import { assertPayloadClean, pruneLocalConfig } from "./packaged-payload.mjs";
 import { piPackageDirNames } from "./pi-packages.mjs";
 import { dedupeNestedPackages, externalPackageSpecifiers, findNestedPiScopePackages, stageCompletePackage, stageResolvedClosure } from "./stage-package.mjs";
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const desktopBuildDir = join(rootDir, ".next-desktop");
 const standaloneDir = join(desktopBuildDir, "standalone");
+const tauriTargetDir = join(rootDir, "src-tauri", "target");
 const serverResourcesDir = join(rootDir, "src-tauri", "resources", "server");
 const serverHelperDir = join(rootDir, "src-tauri", "resources", "Entity Assistant Server.app");
 const nodeResourcesDir = join(rootDir, "src-tauri", "resources", "node");
@@ -71,6 +73,81 @@ async function runNextBuildOnce() {
 /** Waits for the closed trace handle to be released before trying again. */
 function pause(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Removes everything under `src-tauri/` that a build has already written.
+ *
+ * DEFECT-000089: the file tracer follows paths, not provenance. Each packaging
+ * run copies the staged payload into the next build, so a second
+ * `desktop:prepare` in one checkout nested `resources/server` inside itself
+ * five levels deep (and carried `.pi/mcp.json` along with it): the third 0.8.2
+ * package failed the Windows path-length gate. Deleting the output before the
+ * build is the mechanism that cannot be defeated by a tracer pattern — unlike
+ * `outputFileTracingExcludes`, which Next applies as
+ * `path.join(dir, exclude)` and picomatch then reads the drive backslash as an
+ * escape, so on Windows every such exclude silently matches nothing.
+ *
+ * The cargo cache stays: only directories that hold a *copy of the payload*
+ * (or the installers built from it) are removed here, and
+ * `assertPayloadClean()` fails the run if any of it still reaches the payload.
+ *
+ * `target/<profile>/resources` is what `tauri build` copies
+ * `src-tauri/resources` into, file by file, never deleting what an earlier
+ * build left behind — stale hashed chunks piled up there (the to-do view work
+ * alone left 496 dead files in the installer), so the copy must start empty.
+ */
+async function clearTracedBuildOutput() {
+  const removed = [];
+  const remove = async (path) => {
+    await rm(path, { recursive: true, force: true });
+    removed.push(relative(rootDir, path));
+  };
+
+  await remove(serverResourcesDir);
+  await remove(serverHelperDir);
+  await remove(nodeResourcesDir);
+
+  const profiles = new Set(["debug", "release"]);
+  const removeProfileOutput = async (dir) => {
+    for (const name of ["resources", "bundle"]) {
+      await remove(join(dir, name));
+    }
+  };
+
+  let targetEntries = [];
+  try {
+    targetEntries = await readdir(tauriTargetDir, { withFileTypes: true });
+  } catch {
+    // No `tauri build` has run in this checkout yet.
+  }
+  for (const entry of targetEntries) {
+    if (!entry.isDirectory()) continue;
+    const full = join(tauriTargetDir, entry.name);
+    if (profiles.has(entry.name)) {
+      await removeProfileOutput(full);
+      continue;
+    }
+    if (entry.name === "nsis") {
+      // The installer stager embeds the whole payload.
+      await remove(full);
+      continue;
+    }
+    // A cross-compilation target triple: `target/<triple>/<profile>/…`.
+    let tripleEntries = [];
+    try {
+      tripleEntries = await readdir(full, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const inner of tripleEntries) {
+      if (inner.isDirectory() && profiles.has(inner.name)) {
+        await removeProfileOutput(join(full, inner.name));
+      }
+    }
+  }
+
+  console.log(`Cleared previous build output: ${removed.length} path(s)`);
 }
 
 async function runNextBuild() {
@@ -303,7 +380,19 @@ async function bundleNodeRuntime() {
   return { binaryPath, triple };
 }
 
+await clearTracedBuildOutput();
 await runNextBuild();
+
+// The tracer is not trusted to have kept this checkout's configuration and
+// credentials out (DEFECT-000089): drop the traced `.pi/` it cannot be told
+// about on Windows, then fail before 276 MB is copied around if anything else
+// got in.
+const pruned = await pruneLocalConfig(standaloneDir);
+if (pruned.length > 0) {
+  console.log(`Dropped ${pruned.length} traced local-config director${pruned.length === 1 ? "y" : "ies"}: ${pruned.join(", ")}`);
+}
+await assertPayloadClean(standaloneDir, { label: ".next-desktop/standalone" });
+
 await assembleServer();
 
 const deduped = await dedupeNestedPackages(serverResourcesDir);
@@ -349,13 +438,9 @@ await writeFile(
   `${JSON.stringify({ node: process.version }, null, 2)}\n`,
 );
 
-// `tauri build` copies `src-tauri/resources` into `target/release/resources`
-// file by file, never deleting what an earlier build left behind. Stale
-// hashed chunks therefore pile up in the installer — the to-do view work alone
-// left 496 dead files there — so the copy is forced to start from empty. The
-// bundler re-creates this directory on every build.
-const staleBundleResources = join(rootDir, "src-tauri", "target", "release", "resources");
-await rm(staleBundleResources, { recursive: true, force: true });
+// Last gate before `tauri build` runs: nothing in the staged payload may carry
+// this checkout's own configuration or credentials (DEFECT-000089).
+await assertPayloadClean(join(rootDir, "src-tauri", "resources"), { label: "src-tauri/resources" });
 
 console.log(`Desktop server staged at ${serverResourcesDir}`);
 console.log(`Node runtime staged at ${nodeBinary} (${triple})`);
