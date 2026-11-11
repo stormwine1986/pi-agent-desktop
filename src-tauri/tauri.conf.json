@@ -4,6 +4,7 @@
   "version": "pi-agent-desktop-package.json",
   "identifier": "com.abcwyc.pi-agent",
   "build": {
+    "beforeBuildCommand": "npm run desktop:check-inputs",
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:30141",
     "frontendDist": "../desktop/frontend"

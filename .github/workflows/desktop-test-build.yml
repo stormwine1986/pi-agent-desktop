@@ -85,6 +85,12 @@ jobs:
       - name: Prepare packaged Next.js server
         run: npm run desktop:prepare
 
+      # TASK-000111: `tauri build` refuses to package unless the manifest names
+      # this checkout and this Next build, so the test installer is built the
+      # same way a release is — prepare, then the manifest, then the shell.
+      - name: Write the build fingerprint
+        run: npm run release:manifest
+
       - name: Test desktop shell
         if: runner.os == 'Windows' || runner.os == 'Linux'
         run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib --target ${{ matrix.target }}
