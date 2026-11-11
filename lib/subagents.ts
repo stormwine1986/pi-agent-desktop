@@ -1,8 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { agentDir as piAgentDir } from "./agent-dir";
 import { parseFrontmatter } from "./frontmatter";
 import { parseNpmSource } from "./npm-source";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -349,7 +349,7 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
 
 function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
   return [
-    [join(getAgentDir(), "agents"), "global"],
+    [join(piAgentDir(), "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
     [join(resolve(cwd), ".pi", "agents"), "project"],
   ];
@@ -401,7 +401,7 @@ function assertProfileName(name: string): string {
 }
 
 function writableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
-  if (scope === "global") return join(getAgentDir(), "agents");
+  if (scope === "global") return join(piAgentDir(), "agents");
   if (scope === "project") return join(resolve(cwd), ".pi", "agents");
   throw new Error("Agent scope must be global or project");
 }

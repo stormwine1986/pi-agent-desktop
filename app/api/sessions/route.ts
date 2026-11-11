@@ -1,17 +1,23 @@
 import { NextResponse } from "next/server";
 import { jsonResponse } from "@/lib/json-response";
+// The SDK-free half of the session reader: this request is the first data a
+// cold start asks for, and the desktop shell waits for that first screen before
+// revealing its window. Reaching the SessionManager-backed module from here
+// would load the whole server-external pi SDK on the user's critical path
+// (TASK-000110; kept by lib/first-screen-graph.test.mjs).
 import {
   attachSessionProjectInfo,
   getSessionListVersion,
   listAllSessions,
   listSessionSummaries,
   mergeSessionLists,
-} from "@/lib/session-reader";
+} from "@/lib/session-list";
+// The live-session registry, also SDK-free (lib/session-registry.ts).
 import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
-} from "@/lib/rpc-manager";
+} from "@/lib/session-registry";
 import { startServerPerf } from "@/lib/perf";
 import { attachScheduledRelations } from "@/lib/scheduled-tasks/run-index";
 import { ensureChatWorkspace, pruneEmptyChatFolders } from "@/lib/chat-workspace";

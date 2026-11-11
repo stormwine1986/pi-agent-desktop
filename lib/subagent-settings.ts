@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as piAgentDir } from "./agent-dir";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 
 export interface SubagentSettings {
@@ -59,7 +59,7 @@ function settingsValue(
   }) as SubagentSettings;
 }
 
-export function getSubagentSettingsPath(agentDir = getAgentDir()): string {
+export function getSubagentSettingsPath(agentDir = piAgentDir()): string {
   return join(agentDir, "agents", "settings.json");
 }
 

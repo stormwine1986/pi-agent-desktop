@@ -9,7 +9,7 @@ import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as piAgentDir } from "./agent-dir";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { attachmentAwareTitle } from "./chat-attachments";
 import { userImageDisplayText, userMessageImageCount } from "./user-image-display";
@@ -300,7 +300,7 @@ function getIndex(): Map<string, IndexEntry> {
 }
 
 function indexFilePath(): string {
-	return join(getAgentDir(), "pi-web-session-index.json");
+	return join(piAgentDir(), "pi-web-session-index.json");
 }
 
 function loadPersistedIndex(): void {
@@ -382,7 +382,7 @@ export async function listSessionsIncremental(
 	loadPersistedIndex();
 	const deferDetails = options.deferDetails ?? false;
 
-	const sessionsDir = join(getAgentDir(), "sessions");
+	const sessionsDir = join(piAgentDir(), "sessions");
 	const files = await enumerateSessionFiles(sessionsDir);
 
 	const index = getIndex();

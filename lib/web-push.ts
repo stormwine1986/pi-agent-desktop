@@ -1,11 +1,11 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { agentDir as piAgentDir } from "./agent-dir";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import webpush from "web-push";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { enLocale } from "./i18n/messages/en";
 import { zhCNLocale } from "./i18n/messages/zh-CN";
-import { getAgentDir } from "./session-reader";
 import { isTailscaleLoginAllowed } from "./remote-access";
 import { isRelayDevicePaired } from "./relay/runtime";
 
@@ -59,7 +59,7 @@ export interface WebPushNotifier {
 }
 
 function stateFilePath(): string {
-  return join(getAgentDir(), "web-push.json");
+  return join(piAgentDir(), "web-push.json");
 }
 
 /**

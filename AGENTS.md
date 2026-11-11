@@ -143,7 +143,9 @@ lib/
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   scheduled-tasks/    scheduler, runner, cron, store, run index for scheduled tasks (see docs/agents/scheduled-tasks.md)
-  session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
+  session-reader.ts   SessionManager-backed half: openSessionManager + cache, buildSessionContext, branch slicing
+  session-list.ts     SDK-free half: listSessionSummaries/listAllSessions, path caches, header reads (first-screen graph)
+  session-registry.ts SDK-free live-session snapshot (getRpcSessionInfos + running/suppressed ids) over the wrappers rpc-manager owns
   tool-presets.ts     PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
@@ -231,6 +233,7 @@ Each one undid a real regression; the linked note has the reasoning.
 - `useAgentSession`: keep the monotonic request ids, `fetchWithRetry` for the session load, `seedStreamingSnapshot()`, the render-phase scroll save, and the `sessionHookMountedRef` re-assert before `maintainEventsConnected()`. ([fork-sessions](docs/agents/fork-sessions.md))
 - The composer sends exactly one `onSend` per submit; a second raw send restores the text into the box. ([fork-sessions](docs/agents/fork-sessions.md))
 - Do not re-add the legacy `auto_compaction_*` event cases or a manual DeepSeek xhigh clamp. ([fork-sessions](docs/agents/fork-sessions.md))
+- Nothing reachable from `app/api/sessions/route.ts` imports `@earendil-works/*` statically: that is the first data request of a cold start. The catalogue lives in `lib/session-list.ts`, the live-session snapshot in `lib/session-registry.ts`, paths in `lib/agent-dir.ts`; `SessionManager` stays behind `lib/session-reader.ts`. ([fork-desktop](docs/agents/fork-desktop.md))
 - `enabledModels`: never compare patterns as strings, never assume `provider/*` covers a provider, never rebuild the list from `getAvailable()`; every toggle is a minimal edit and only `resync` repairs entries. ([fork-models](docs/agents/fork-models.md))
 - Provider catalogs refresh over the network only when the user presses "Refresh catalog". ([fork-models](docs/agents/fork-models.md))
 - Credential deletes go through `removeStoredCredentialIfType()`, and both provider lists refresh after any auth change. ([fork-models](docs/agents/fork-models.md))

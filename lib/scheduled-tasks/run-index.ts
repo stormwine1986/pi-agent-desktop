@@ -1,4 +1,4 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as piAgentDir } from "../agent-dir";
 import { subscribeScheduledTaskEvents } from "./events";
 import { listAllRuns } from "./store";
 import type { ScheduledTaskEvent } from "./types";
@@ -42,7 +42,7 @@ export function invalidateScheduledRunIndex(): void {
 export function getScheduledSessionRuns(
   options: { agentDir?: string; now?: number } = {},
 ): ReadonlyMap<string, ScheduledSessionRun> {
-  const agentDir = options.agentDir ?? getAgentDir();
+  const agentDir = options.agentDir ?? piAgentDir();
   const now = options.now ?? Date.now();
   const existing = holder()[INDEX_KEY];
   if (existing && !existing.stale && existing.agentDir === agentDir && now - existing.builtAt < MAX_AGE_MS) {

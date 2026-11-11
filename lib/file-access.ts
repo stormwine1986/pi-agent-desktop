@@ -3,7 +3,7 @@ import { userHome } from "./user-home.ts";
 import path from "path";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
-import { listAllSessions } from "./session-reader";
+import { listAllSessions } from "./session-list";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 export { isWindowsAbsolutePath } from "./paths";
 

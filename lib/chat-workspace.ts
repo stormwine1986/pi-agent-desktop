@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readdir, rmdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir as piAgentDir } from "./agent-dir";
 import { samePath } from "./paths";
 
 const CHAT_ROOT_DIRNAME = "chats";
@@ -14,40 +14,40 @@ const EMPTY_FOLDER_GRACE_MS = 24 * 60 * 60 * 1000;
  * brand-new chat is requested with; the server swaps it for a fresh folder when the chat is
  * created, so the browser never builds a chat's path.
  */
-export function chatWorkspaceDir(agentDir = getAgentDir()): string {
+export function chatWorkspaceDir(agentDir = piAgentDir()): string {
   return join(agentDir, CHAT_ROOT_DIRNAME);
 }
 
 /** The single shared cwd that chats used before each chat got a folder; those chats keep their old policy. */
-export function legacyChatWorkspaceDir(agentDir = getAgentDir()): string {
+export function legacyChatWorkspaceDir(agentDir = piAgentDir()): string {
   return join(agentDir, LEGACY_CHAT_WORKSPACE_DIRNAME);
 }
 
 /** Create the chat root and make sure it is private to the current user. */
-export async function ensureChatWorkspace(agentDir = getAgentDir()): Promise<string> {
+export async function ensureChatWorkspace(agentDir = piAgentDir()): Promise<string> {
   const dir = chatWorkspaceDir(agentDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
 /** The root a new chat is requested with (not yet a folder of its own). */
-export function isChatRootPath(cwd: string | null | undefined, agentDir = getAgentDir()): boolean {
+export function isChatRootPath(cwd: string | null | undefined, agentDir = piAgentDir()): boolean {
   return Boolean(cwd && samePath(cwd, chatWorkspaceDir(agentDir)));
 }
 
 /** A chat's own folder: a direct child of the chat root. */
-export function isChatFolderPath(cwd: string | null | undefined, agentDir = getAgentDir()): boolean {
+export function isChatFolderPath(cwd: string | null | undefined, agentDir = piAgentDir()): boolean {
   if (!cwd) return false;
   const parent = dirname(cwd.replace(/[\\/]+$/, ""));
   return samePath(parent, chatWorkspaceDir(agentDir)) && !isChatRootPath(cwd, agentDir);
 }
 
-export function isLegacyChatWorkspacePath(cwd: string | null | undefined, agentDir = getAgentDir()): boolean {
+export function isLegacyChatWorkspacePath(cwd: string | null | undefined, agentDir = piAgentDir()): boolean {
   return Boolean(cwd && samePath(cwd, legacyChatWorkspaceDir(agentDir)));
 }
 
 /** Whether a session with this cwd is a chat: the root, a chat's folder, or the legacy shared cwd. */
-export function isChatWorkspacePath(cwd: string | null | undefined, agentDir = getAgentDir()): boolean {
+export function isChatWorkspacePath(cwd: string | null | undefined, agentDir = piAgentDir()): boolean {
   return isChatRootPath(cwd, agentDir) || isChatFolderPath(cwd, agentDir) || isLegacyChatWorkspacePath(cwd, agentDir);
 }
 
@@ -56,7 +56,7 @@ function pad(value: number): string {
 }
 
 /** Create a new chat's folder: `YYYYMMDD-HHMMSS-xxxxxxxx`, sortable and unique. */
-export async function createChatFolder(agentDir = getAgentDir(), now = new Date()): Promise<string> {
+export async function createChatFolder(agentDir = piAgentDir(), now = new Date()): Promise<string> {
   const root = await ensureChatWorkspace(agentDir);
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -72,7 +72,7 @@ export async function createChatFolder(agentDir = getAgentDir(), now = new Date(
 }
 
 /** Make sure the cwd of an existing chat is there (the legacy cwd, or a folder that was pruned while empty). */
-export async function ensureChatCwd(cwd: string, agentDir = getAgentDir()): Promise<void> {
+export async function ensureChatCwd(cwd: string, agentDir = piAgentDir()): Promise<void> {
   if (isChatFolderPath(cwd, agentDir) || isLegacyChatWorkspacePath(cwd, agentDir) || isChatRootPath(cwd, agentDir)) {
     await mkdir(cwd, { recursive: true, mode: 0o700 });
   }
@@ -84,7 +84,7 @@ export async function ensureChatCwd(cwd: string, agentDir = getAgentDir()): Prom
  * loses its empty folder too, which `ensureChatCwd` brings back when the chat is opened.
  */
 export async function pruneEmptyChatFolders(
-  agentDir = getAgentDir(),
+  agentDir = piAgentDir(),
   options: { now?: number; keep?: ReadonlySet<string> } = {},
 ): Promise<number> {
   const root = chatWorkspaceDir(agentDir);
