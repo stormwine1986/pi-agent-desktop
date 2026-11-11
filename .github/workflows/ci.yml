@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The payload gate can be re-run on demand (no commit needed): a desktop build
+  # is slow enough that a reviewer who changes the trace deserves a button
+  # instead of an empty commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
