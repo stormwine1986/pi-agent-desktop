@@ -181,8 +181,9 @@ npm run desktop:build
 
 1. 在隔离目录中生成 Next.js standalone 服务。
 2. 打包当前架构的 Node.js runtime。
-3. 将服务和运行时作为 Tauri Resources 放入 App。
-4. 在 Apple Silicon Mac 上生成 `.app`、`.dmg` 和 updater 产物；在 Windows x64 上生成 NSIS `-setup.exe` 和 updater 产物。
+3. 记下这次构建的身份（`npm run release:manifest`：commit、工作区状态、Next build id），于是 `tauri build` 会在打包前拒绝非本机构建产出的资源。
+4. 将服务和运行时作为 Tauri Resources 放入 App。
+5. 在 Apple Silicon Mac 上生成 `.app`、`.dmg` 和 updater 产物；在 Windows x64 上生成 NSIS `-setup.exe` 和 updater 产物。
 
 本地构建默认不注册生产 updater，不能接受正式更新。正式 Release 必须通过 GitHub Actions 注入 updater 公钥，并使用对应私钥签名。
 

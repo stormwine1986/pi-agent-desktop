@@ -29,7 +29,8 @@ npm run desktop:build
 
 1. 在 `.next-desktop/` 生成隔离的 Next.js standalone build。
 2. 将服务端资源与当前平台架构的 Node runtime 暂存给 Tauri。
-3. 在 macOS 生成 `.app` 和 `.dmg`，在 Windows x64 生成 NSIS `-setup.exe`，在 Linux x64 生成 `.deb`。
+3. 记下这次构建的身份（`npm run release:manifest`：commit、工作区状态、Next build id），于是 `tauri build` 会在打包前拒绝非本机构建产出的资源。
+4. 在 macOS 生成 `.app` 和 `.dmg`，在 Windows x64 生成 NSIS `-setup.exe`，在 Linux x64 生成 `.deb`。
 
 Linux 安装包依赖 WebKitGTK 4.1 和 GTK 3 运行库；Node runtime 已包含在安装包中，用户无需另行安装 Node.js。
 

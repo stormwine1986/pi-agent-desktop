@@ -183,8 +183,9 @@ The desktop build:
 
 1. Generates the Next.js standalone server in an isolated directory.
 2. Bundles the Node.js runtime for the current architecture.
-3. Places the server and runtime into the app as Tauri resources.
-4. Produces `.app`, `.dmg`, and updater artifacts on Apple Silicon Macs; an NSIS `-setup.exe` plus updater artifacts on Windows x64; and a `.deb` package on Linux x64.
+3. Records which build it is (`npm run release:manifest`: commit, tree state, Next build id) so `tauri build` can refuse inputs staged from a different build.
+4. Places the server and runtime into the app as Tauri resources.
+5. Produces `.app`, `.dmg`, and updater artifacts on Apple Silicon Macs; an NSIS `-setup.exe` plus updater artifacts on Windows x64; and a `.deb` package on Linux x64.
 
 On Linux, the package requires a WebKitGTK 4.1 runtime and GTK 3. It includes the Node.js runtime, so users do not need to install Node.js separately.
 
