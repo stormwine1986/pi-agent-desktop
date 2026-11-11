@@ -234,7 +234,12 @@ async function exportSession(filePath: string, outputPath: string): Promise<void
   if (!packageDir) throw new Error("pi CLI not found");
 
   const exporterUrl = pathToFileURL(join(packageDir, "dist", "core", "export-html", "index.js")).href;
-  const { exportFromFile } = (await import(exporterUrl)) as ExportHtmlModule;
+  // The bundler must not see this one (DEFECT-000092): a dynamic import of a
+  // computed specifier is compiled into webpack's placeholder that throws
+  // `Cannot find module` at run time, so this fallback path could never have
+  // worked in a packaged build — it only looked harmless because the CLI above
+  // answers first. Same form as `importFile` in lib/pi-sdk-internals.ts.
+  const { exportFromFile } = (await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ exporterUrl)) as ExportHtmlModule;
   await exportFromFile(filePath, outputPath);
 }
 
