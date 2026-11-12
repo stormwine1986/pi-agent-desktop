@@ -1,5 +1,6 @@
 import { normalizeEnvelope, type EventDescriptor } from "./match";
 import type { ChannelOwnership } from "./channel-lease";
+import { gapNoticeFrom, isBackfill, isRecoverableGap, type GapNotice } from "./catch-up";
 
 /**
  * One SSE connection to a base server's event channel, shared by every
@@ -38,8 +39,14 @@ export interface ConnectionState {
   lastError: string | null;
   /** `event: ready`'s connection id, for the status panel. */
   connectionId: string | null;
-  /** When a `gap` frame said events were not delivered. */
+  /** When a `gap` frame said events were not delivered (the first one, kept for the panel). */
   gapAt: number | null;
+  /**
+   * Which window the last `gap` named, and whether a retry got it back. A `gap`
+   * is never silent: either `recoveredAt` says the events were replayed, or the
+   * window is printed as "this stretch was not delivered".
+   */
+  gap: GapNotice | null;
   /** The last successfully seen SSE id, so a reconnect resumes rather than restarts. */
   lastEventId: string | null;
 }
@@ -93,9 +100,22 @@ export interface EventConnectionOptions {
   /** `<userId>@<server>` — the server's one-connection-per-user key. */
   cid: string;
   lastEventId?: string | null;
-  onEvent: (descriptor: EventDescriptor, meta: { id: string | null; workspaceId: string }) => void;
+  /**
+   * `catchUp` is true for a replayed frame: the server published it before this
+   * connection came up, so the batch may say "this is backfill".
+   */
+  onEvent: (descriptor: EventDescriptor, meta: { id: string | null; workspaceId: string; catchUp: boolean }) => void;
   onState: (state: ConnectionState) => void;
-  onGap: (info: { reason?: string; dropped?: number; lastEventId?: string | null }) => void;
+  /** One `gap` frame. `retrying` says a second replay of the same window was asked for. */
+  onGap: (notice: GapNotice, info: { retrying: boolean }) => void;
+  /**
+   * Extra replays of a recoverable window (`busy` / `unavailable`), each one a
+   * reconnect carrying the same `Last-Event-ID`. Default 2; `0` turns the
+   * catch-up off and makes every gap reported as-is.
+   */
+  maxCatchUpRetries?: number;
+  /** How long after `ready` a retry counts as "the window came back" (ms). */
+  catchUpSettleMs?: number;
   /** Ownership verdict from `claimChannel()`; consulted before every connect. */
   isChannelOwner?: () => ChannelOwnership;
   deps?: Partial<ConnectionDeps>;
@@ -128,6 +148,15 @@ export class EventConnection {
   private abort: AbortController | null = null;
   private lastEventId: string | null;
   private state: ConnectionState;
+  /** The feed head at `ready`: every frame at or below it is replay, not live. */
+  private readyCursor: string | null = null;
+  /** Replays of a recoverable window already spent. */
+  private catchUpAttempts = 0;
+  /** The gap a reconnect is currently trying to close. */
+  private gapRetry: GapNotice | null = null;
+  private settleHandle: unknown = null;
+  /** The current stream is being dropped on purpose, to ask for the window again. */
+  private abortForRetry = false;
 
   constructor(private readonly options: EventConnectionOptions) {
     this.deps = { ...DEFAULT_DEPS, ...options.deps };
@@ -139,6 +168,7 @@ export class EventConnection {
       lastError: null,
       connectionId: null,
       gapAt: null,
+      gap: null,
       lastEventId: this.lastEventId,
     };
   }
@@ -159,9 +189,17 @@ export class EventConnection {
       this.deps.clearTimeout(this.retryHandle);
       this.retryHandle = null;
     }
+    this.clearSettle();
+    this.gapRetry = null;
     this.abort?.abort();
     this.abort = null;
     this.setState({ status: "idle" });
+  }
+
+  private clearSettle(): void {
+    if (this.settleHandle === null) return;
+    this.deps.clearTimeout(this.settleHandle);
+    this.settleHandle = null;
   }
 
   private setState(patch: Partial<ConnectionState>): void {
@@ -283,6 +321,10 @@ export class EventConnection {
 
   private async openStream(ticket: string): Promise<void> {
     this.abort = new AbortController();
+    this.abortForRetry = false;
+    // Per connection: a replay is told apart from a live frame by the cursor
+    // the server reports in this connection's `ready`.
+    this.readyCursor = null;
     const headers: Record<string, string> = { accept: "text/event-stream" };
     if (this.lastEventId) headers["Last-Event-ID"] = this.lastEventId;
 
@@ -323,6 +365,8 @@ export class EventConnection {
       }
     } catch (error) {
       if (this.stopped) return;
+      // A retry drops the stream on purpose (see the `gap` branch below).
+      if (this.abortForRetry) return;
       throw new RetryableError(safeMessage(error, this.options.serverName));
     } finally {
       try { await reader.cancel(); } catch { /* already closed */ }
@@ -356,20 +400,50 @@ export class EventConnection {
     if (event === "ready") {
       const data = this.parseData(dataLines);
       const connectionId = typeof data?.connectionId === "string" ? data.connectionId : null;
+      this.readyCursor = typeof data?.cursor === "string" ? data.cursor : null;
       this.attempt = 0;
       // The stream is alive and the server accepted this cid: the other
       // instance (if any) has been closed by the server.
       this.setState({ status: "active", attempt: 0, nextRetryMs: null, lastError: null, connectionId });
+      this.settleRetry();
       return;
     }
     if (event === "gap") {
       const data = this.parseData(dataLines);
-      this.setState({ gapAt: this.deps.now() });
-      this.options.onGap({
-        reason: typeof data?.reason === "string" ? data.reason : undefined,
-        dropped: typeof data?.dropped === "number" ? data.dropped : undefined,
-        lastEventId: typeof data?.lastEventId === "string" ? data.lastEventId : null,
+      const notice = gapNoticeFrom({
+        at: this.deps.now(),
+        reason: typeof data?.reason === "string" ? data.reason : "unknown",
+        dropped: typeof data?.dropped === "number" ? data.dropped : null,
+        lastEventId: typeof data?.lastEventId === "string" ? data.lastEventId : this.lastEventId,
+        cursor: typeof data?.cursor === "string" ? data.cursor : null,
       });
+      // A gap frame answers the replay of *this* connection: whatever the
+      // previous retry was waiting for, it did not arrive.
+      this.clearSettle();
+      this.gapRetry = null;
+      // The server names the cursor it tried to resume from. Adopting it when
+      // this process has none of its own is what makes the retry ask for the
+      // same window instead of starting from "now".
+      if (!this.lastEventId && typeof data?.lastEventId === "string") {
+        this.lastEventId = data.lastEventId;
+        this.setState({ lastEventId: data.lastEventId });
+      }
+      const budget = this.options.maxCatchUpRetries ?? 2;
+      const retrying = isRecoverableGap(notice.reason)
+        && notice.from !== null
+        && this.catchUpAttempts < budget;
+      this.setState({ gapAt: this.state.gapAt ?? notice.at, gap: notice });
+      this.options.onGap(notice, { retrying });
+      if (retrying) {
+        // Same cursor, new stream: the server replays the window again. This is
+        // the catch-up a `busy` gap is asking for (the token bucket had run
+        // dry); a `truncated` / `overflow` window is not retried, because the
+        // server would answer it exactly the same way again.
+        this.catchUpAttempts += 1;
+        this.gapRetry = notice;
+        this.abortForRetry = true;
+        this.abort?.abort();
+      }
       return;
     }
     if (event === "bye") return;
@@ -393,7 +467,28 @@ export class EventConnection {
     this.options.onEvent(descriptor, {
       id,
       workspaceId: typeof data.workspaceId === "string" ? data.workspaceId : this.options.workspaceId,
+      catchUp: isBackfill(id, this.readyCursor),
     });
+  }
+
+  /**
+   * After a retry's `ready`, wait a moment for the gap frame that would say the
+   * replay failed again. No gap by then means the window was handed back — the
+   * events may simply have been some the rule did not ask for.
+   */
+  private settleRetry(): void {
+    const pending = this.gapRetry;
+    if (!pending) return;
+    this.clearSettle();
+    this.settleHandle = this.deps.setTimeout(() => {
+      this.settleHandle = null;
+      if (this.gapRetry !== pending) return;
+      this.gapRetry = null;
+      this.catchUpAttempts = 0;
+      const settled: GapNotice = { ...pending, recoveredAt: this.deps.now() };
+      this.setState({ gap: settled });
+      this.options.onGap(settled, { retrying: false });
+    }, this.options.catchUpSettleMs ?? 300);
   }
 
   private parseData(lines: string[]): Record<string, unknown> | null {

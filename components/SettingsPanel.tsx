@@ -36,6 +36,7 @@ import { PluginsConfig } from "./PluginsConfig";
 import { AppUpdatesSection } from "./AppUpdatesSection";
 import { DesktopAppSection } from "./desktop";
 import { McpConfig } from "./McpConfig";
+import { EventsConfig } from "./EventsConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 import { ArtifactsSettingRow, AutoTitleSettingRow } from "./ArtifactsSettingRow";
 import { RemoteAccessSection } from "./RemoteAccessSection";
@@ -84,6 +85,7 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   if (section === "agents") return <svg {...common} className="settings-section-icon is-agent"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>;
   if (section === "mcp") return <svg {...common}><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" /></svg>;
   if (section === "plugins") return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
+  if (section === "events") return <svg {...common}><path d="M4 12a8 8 0 0 1 13.7-5.6M20 12a8 8 0 0 1-13.7 5.6" /><path d="M18 3v4h-4M6 21v-4h4" /></svg>;
   return <svg {...common}><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>;
 }
 
@@ -398,6 +400,7 @@ export const SETTINGS_SECTION_ITEMS: { id: SettingsSection; labelKey: string; re
   { id: "agents", labelKey: "common.agents", requiresProject: true },
   { id: "plugins", labelKey: "common.plugins", requiresProject: true },
   { id: "mcp", labelKey: "settings.mcp", requiresProject: false },
+  { id: "events", labelKey: "settings.events", requiresProject: true },
 ];
 
 export function SettingsPanel({
@@ -522,6 +525,7 @@ export function SettingsPanel({
           {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} trust={projectTrust} onClose={onClose} onReloaded={onSessionReloaded} />)}
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} trust={projectTrust} onClose={onClose} onReloaded={onSessionReloaded} />)}
           {/* No project needed: the global mcp.json is listed alone, and a project adds its group. */}
+          {cwd && sectionHost("events", <EventsConfig key={cwd} cwd={cwd} onClose={onClose} />)}
           {sectionHost("mcp", <McpConfig embedded key={cwd ?? ""} cwd={cwd} trust={projectTrust} onTrustProject={onOpenTrustDialog} onProjectTrustChanged={onProjectTrustChanged} onClose={onClose} />)}
         </main>
         {/* Attribution, kept as plain small print in the corner so it never competes

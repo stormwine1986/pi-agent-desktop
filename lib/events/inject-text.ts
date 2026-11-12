@@ -34,8 +34,32 @@ function pad(value: number): string {
 function clockTime(timestamp: string): string {
   const parsed = Date.parse(timestamp);
   if (Number.isNaN(parsed)) return timestamp;
-  const date = new Date(parsed);
+  return clockTimeOf(parsed);
+}
+
+function clockTimeOf(epochMs: number): string {
+  const date = new Date(epochMs);
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * The fixed line that marks a batch as *backfill* — a replayed event, not one
+ * that just happened (SSR-000097 M3 / AC-2: "批次内容里能看出这是补的").
+ *
+ * It is not part of the template either: a batch that claims to be live while
+ * describing a four-minute-old transition is exactly the confusion this line
+ * prevents, and a project file must not be able to remove it.
+ */
+function catchUpLine(batch: CoalescedBatch): string | null {
+  if (!batch.catchUp) return null;
+  const from = batch.catchUpFrom ?? null;
+  const to = batch.catchUpTo ?? null;
+  const window = from !== null && to !== null
+    ? `${clockTimeOf(from)}–${clockTimeOf(to)}`
+    : from !== null
+      ? `${clockTimeOf(from)}`
+      : "断线期间";
+  return `[补投] 这是断线后从服务端回放的事件（${window}），不是刚刚发生的`;
 }
 
 /** One line of the event list. The key is used only when the envelope had one. */
@@ -94,6 +118,7 @@ export function renderInjection(batch: CoalescedBatch): InjectionText {
 
   // The fixed first line is not part of the template: it must not be removable
   // by editing a project file.
-  const text = `[事件] ${batch.subscription.id}\n${body.trim()}\n`;
+  const marker = catchUpLine(batch);
+  const text = `[事件] ${batch.subscription.id}\n${marker ? `${marker}\n` : ""}${body.trim()}\n`;
   return { subscriptionId: batch.subscription.id, text };
 }

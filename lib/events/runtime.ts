@@ -9,6 +9,7 @@ import { Coalescer, mergeBatches, type BatchedHit, type CoalescedBatch } from ".
 import { claimChannel, releaseChannel, type ChannelOwnership } from "./channel-lease";
 import { readEventsConfig, usableSubscriptions, type EventSubscription, type EventsConfig } from "./config";
 import { EventConnection, type ConnectionState, type EventEndpoint } from "./connection";
+import { readGapNotice, streamIdMs, type GapNotice } from "./catch-up";
 import { isSessionRunning, wakeSession } from "./delivery";
 import { evaluateGates, quotaExhausted, recordGateDelivery, stormReached } from "./gate";
 import { renderInjection } from "./inject-text";
@@ -39,6 +40,20 @@ export interface SubscriptionChannelState {
   attempt: number;
   lastError: string | null;
   gapAt: number | null;
+  /**
+   * The last stretch of time whose events were not delivered (`gap`), including
+   * the `recoveredAt` verdict. Kept after the connection is healthy again
+   * precisely because "the channel is fine now" is not the same statement as
+   * "you did not miss anything".
+   */
+  gap: GapNotice | null;
+}
+
+/** One received frame, kept for the panel's dry run (M3 / AC-4). */
+export interface RecentEvent {
+  descriptor: EventDescriptor;
+  receivedAt: number;
+  catchUp: boolean;
 }
 
 interface DeliveryRecord {
@@ -61,6 +76,10 @@ interface ParkedBatch {
   closedAt: number;
   hits: BatchedHit[];
   count: number;
+  /** Whether the parked hits were replayed after a reconnect (`[补投]`). */
+  catchUp?: boolean;
+  catchUpFrom?: number | null;
+  catchUpTo?: number | null;
 }
 
 /**
@@ -119,6 +138,8 @@ export interface EventsRuntime {
   /** Sessions whose persisted pending batches were already re-queued this process. */
   restored: Set<string>;
   chains: Map<string, Promise<void>>;
+  /** Last frames per channel, for the dry run. Memory only: a restart forgets them. */
+  recent: Map<string, RecentEvent[]>;
   listeners: Set<() => void>;
   coalescer: Coalescer | null;
   scanInFlight: boolean;
@@ -148,6 +169,7 @@ function runtime(): EventsRuntime {
       drainTimers: new Map(),
       restored: new Set(),
       chains: new Map(),
+      recent: new Map(),
       listeners: new Set(),
       coalescer: null,
       scanInFlight: false,
@@ -290,6 +312,9 @@ function loadSessionEventState(sessionId: string): SessionEventState {
           hitCount: typeof hit.hitCount === "number" ? hit.hitCount : 1,
         })).filter((hit) => hit.aggregateId.length > 0),
         count: typeof entry.count === "number" ? entry.count : 0,
+        catchUp: entry.catchUp === true,
+        catchUpFrom: typeof entry.catchUpFrom === "number" ? entry.catchUpFrom : null,
+        catchUpTo: typeof entry.catchUpTo === "number" ? entry.catchUpTo : null,
       });
     }
   }
@@ -372,11 +397,24 @@ interface ChannelState {
   lastEventId: string | null;
   seen: Set<string>;
   order: string[];
+  /** The last `gap` this channel reported; persisted so a restart cannot forget it. */
+  gap: GapNotice | null;
   lastWriteAt: number;
 }
 
 const SEEN_CAP = 500;
-const STATE_WRITE_INTERVAL_MS = 1_000;
+/**
+ * How often the cursor + processed ring are written for ordinary live frames.
+ *
+ * Deliberately short. The ring is what makes a replay idempotent, so anything
+ * still sitting in memory when the process dies is delivered a second time after
+ * the restart — the one thing SSR-000097 AC-2 forbids. An abrupt kill cannot be
+ * caught at all, so the window is kept small and a *replayed* frame (the case a
+ * restart is most likely to resend) is written through immediately.
+ */
+const STATE_WRITE_INTERVAL_MS = 250;
+/** Frames kept per channel for the dry run; the panel only needs a recent sample. */
+const RECENT_CAP = 200;
 const channelStates = new Map<string, ChannelState>();
 
 function loadChannelState(key: string): ChannelState {
@@ -396,6 +434,7 @@ function loadChannelState(key: string): ChannelState {
     lastEventId: raw && typeof raw.lastEventId === "string" ? raw.lastEventId : null,
     seen,
     order,
+    gap: raw ? readGapNotice(raw.gap) : null,
     lastWriteAt: 0,
   };
   channelStates.set(key, state);
@@ -411,13 +450,26 @@ function writeChannelState(key: string, force = false): void {
     mkdirSync(join(agentDir(), "events"), { recursive: true });
     writePrivateFileAtomicSync(
       channelStatePath(key),
-      `${JSON.stringify({ lastEventId: state.lastEventId, seen: state.order.slice(-SEEN_CAP) }, null, 2)}
+      `${JSON.stringify({ lastEventId: state.lastEventId, seen: state.order.slice(-SEEN_CAP), gap: state.gap }, null, 2)}
 `,
     );
   } catch {
     // Losing a cursor must not stop the wake-up; the next event rewrites it.
   }
 }
+
+/** Best-effort durability for a graceful exit; an abrupt kill cannot be caught. */
+export function flushChannelStates(): void {
+  for (const key of channelStates.keys()) {
+    try {
+      writeChannelState(key, true);
+    } catch {
+      // Losing a cursor must not block the exit.
+    }
+  }
+}
+
+let exitFlushInstalled = false;
 
 /** True the first time this event id is seen on this channel. */
 function markProcessed(key: string, eventId: string | null): boolean {
@@ -596,6 +648,9 @@ async function refreshScan(): Promise<void> {
           closedAt: entry.closedAt,
           hits: entry.hits,
           count: entry.count,
+          catchUp: entry.catchUp,
+          catchUpFrom: entry.catchUpFrom,
+          catchUpTo: entry.catchUpTo,
         });
       }
       session.pending = [];
@@ -690,6 +745,7 @@ async function startChannel(
         lastError: ownership.reason,
         connectionId: null,
         gapAt: null,
+        gap: null,
         lastEventId: null,
       },
     });
@@ -712,15 +768,26 @@ async function startChannel(
     // (and read as fresh facts now). Only a reconnect of the same filter resumes.
     lastEventId: options.resume ? loadChannelState(key).lastEventId : null,
     isChannelOwner,
-    onEvent: (descriptor, meta) => handleEvent(key, descriptor, meta.id),
-    onGap: (info) => {
+    onEvent: (descriptor, meta) => handleEvent(key, descriptor, meta.id, meta.catchUp),
+    onGap: (notice, info) => {
+      // Written down twice on purpose: `state.channels` is what the status API
+      // answers from, the channel file is what a restart reads. A `gap` that
+      // "healed" on reconnect would hide the window that was never delivered.
+      const channelState = loadChannelState(key);
+      channelState.gap = notice;
+      writeChannelState(key, true);
       const channel = state.channels.get(key);
-      if (!channel) return;
-      channel.state = {
-        ...channel.state,
-        gapAt: Date.now(),
-        lastError: `这段时间的事件没有投递（gap：${info.reason ?? "unknown"}）`,
-      };
+      if (channel) {
+        channel.state = {
+          ...channel.state,
+          gapAt: channel.state.gapAt ?? notice.at,
+          gap: notice,
+          lastError: `这段时间的事件没有投递（gap：${notice.reason}）`,
+        };
+      }
+      console.info(
+        `[events] gap channel=${key} reason=${notice.reason} window=${notice.from ?? "?"}..${notice.to ?? "?"} retrying=${info.retrying}`,
+      );
       notifyListeners();
     },
     onState: (connectionState) => {
@@ -752,21 +819,31 @@ function ruleAppliesToChannel(rule: LoadedRule, key: string): boolean {
   return channelKey(rule.subscription.server, rule.subscription.workspace) === key;
 }
 
-function handleEvent(key: string, descriptor: EventDescriptor, eventId: string | null): void {
+function handleEvent(key: string, descriptor: EventDescriptor, eventId: string | null, catchUp: boolean): void {
   const state = runtime();
   const channelState = loadChannelState(key);
   if (eventId) channelState.lastEventId = eventId;
   // A frame the previous connection (or the previous process) already handled
   // must not be delivered twice: the injection would be a second, stale wake-up.
   if (!markProcessed(key, descriptor.eventId)) return;
-  writeChannelState(key);
+  // A replayed frame is written through at once: a second restart would hand the
+  // same window back, and it must find this event id already in the ring.
+  writeChannelState(key, catchUp);
   if (!state.channels.has(key)) return;
 
+  // The dry run reads this ring: it is "what the channel actually carried",
+  // which is the only honest basis for "would this rule have fired?".
+  const recent = state.recent.get(key) ?? [];
+  recent.push({ descriptor, receivedAt: Date.now(), catchUp });
+  if (recent.length > RECENT_CAP) recent.splice(0, recent.length - RECENT_CAP);
+  state.recent.set(key, recent);
+
+  const publishedAt = streamIdMs(eventId) ?? (Number.isNaN(Date.parse(descriptor.timestamp)) ? null : Date.parse(descriptor.timestamp));
   for (const rule of state.rules) {
     if (!ruleAppliesToChannel(rule, key)) continue;
     if (rule.subscription.workspace !== descriptor.workspaceId && descriptor.workspaceId) continue;
     if (!matchesSubscription(descriptor, rule.subscription.match)) continue;
-    state.coalescer?.add(rule.sessionId, rule.subscription, descriptor, rule.projectCwd);
+    state.coalescer?.add(rule.sessionId, rule.subscription, descriptor, rule.projectCwd, { catchUp, publishedAt });
   }
 }
 
@@ -828,6 +905,9 @@ function parkedOf(batch: CoalescedBatch): ParkedBatch {
     closedAt: batch.closedAt,
     hits: batch.hits,
     count: batch.count,
+    catchUp: batch.catchUp,
+    catchUpFrom: batch.catchUpFrom ?? null,
+    catchUpTo: batch.catchUpTo ?? null,
   };
 }
 
@@ -1073,6 +1153,12 @@ export function startEventRuntime(options: { delayMs?: number; scanIntervalMs?: 
     current.starting = false;
     current.startTimer = null;
     current.coalescer = new Coalescer((batch) => deliverBatch(batch));
+    if (!exitFlushInstalled) {
+      exitFlushInstalled = true;
+      // Not a substitute for the write-through above: it only helps the exits
+      // that are actually graceful.
+      process.once("exit", flushChannelStates);
+    }
     void refreshScan();
     const interval = options.scanIntervalMs ?? 15_000;
     current.scanTimer = setInterval(() => void refreshScan(), interval);
@@ -1176,6 +1262,9 @@ export function ruleRuntimeStatus(sessionId: string, subscription: EventSubscrip
           attempt: channel.state.attempt,
           lastError: channel.state.lastError,
           gapAt: channel.state.gapAt,
+          // The file, not the live connection: a `gap` written before this
+          // process started is still a window nobody was woken for.
+          gap: loadChannelState(key).gap ?? channel.state.gap ?? null,
         }
       : null,
     blockedReason,
@@ -1331,10 +1420,20 @@ export function getEventRuntimeStatus(): {
         attempt: channel.state.attempt,
         lastError: channel.state.lastError,
         gapAt: channel.state.gapAt,
+        gap: loadChannelState(channel.key).gap ?? channel.state.gap ?? null,
       },
     })),
     pending: [...state.pending.entries()].map(([sessionId, parked]) => ({ sessionId, batches: parked.size })),
   };
+}
+
+/**
+ * The frames this channel has carried since the runtime started, newest last.
+ * The dry run (M3 / AC-4) reads them; nothing here touches delivery
+ * state, so asking "would this rule have fired?" can never wake anything.
+ */
+export function recentEventsOf(server: string, workspace: string): RecentEvent[] {
+  return [...(runtime().recent.get(channelKey(server, workspace)) ?? [])];
 }
 
 /** Whether the last scan found the session; null when it has not looked yet. */

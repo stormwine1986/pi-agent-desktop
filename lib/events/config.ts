@@ -576,25 +576,35 @@ export function readEventsConfig(cwd: string): EventsConfig {
     return { path: found.absolute, exists: true, error: `读取失败：${error instanceof Error ? error.message : String(error)}`, sessions: [] };
   }
 
+  return parseEventsText(text, found.absolute);
+}
+
+/**
+ * The same validation, on text — for the panel's editor and dry run, which
+ * build a candidate file and must reject it with **these** messages instead of
+ * a second, invented set (`TASK-000149` AC-3 / AC-4). Nothing else validates a
+ * `.pi/events.yaml`: `readEventsConfig()` is this function plus a read.
+ */
+export function parseEventsText(text: string, path: string): EventsConfig {
   let parsed: unknown;
   try {
     parsed = loadYaml(text);
   } catch (error) {
-    return { path: found.absolute, exists: true, error: `YAML 解析失败：${error instanceof Error ? error.message : String(error)}`, sessions: [] };
+    return { path, exists: true, error: `YAML 解析失败：${error instanceof Error ? error.message : String(error)}`, sessions: [] };
   }
 
   if (!isRecord(parsed)) {
-    return { path: found.absolute, exists: true, error: "根节点必须是对象，形如 sessions: [...]", sessions: [] };
+    return { path, exists: true, error: "根节点必须是对象，形如 sessions: [...]", sessions: [] };
   }
 
   if (parsed.version !== undefined && parsed.version !== null && parsed.version !== 1) {
-    return { path: found.absolute, exists: true, error: `version 只支持 1（写的是 ${JSON.stringify(parsed.version)}）`, sessions: [] };
+    return { path, exists: true, error: `version 只支持 1（写的是 ${JSON.stringify(parsed.version)}）`, sessions: [] };
   }
 
   const unknownRoot = Object.keys(parsed).filter((key) => !(ROOT_KEYS as readonly string[]).includes(key));
   if (unknownRoot.length > 0) {
     return {
-      path: found.absolute,
+      path,
       exists: true,
       error: `根节点只接受 ${ROOT_KEYS.join(" / ")}（多余的是 ${unknownRoot.join("、")}）`,
       sessions: [],
@@ -603,7 +613,7 @@ export function readEventsConfig(cwd: string): EventsConfig {
 
   const rawSessions = parsed.sessions;
   if (!Array.isArray(rawSessions)) {
-    return { path: found.absolute, exists: true, error: "缺少 sessions 数组（sessions: [...]）", sessions: [] };
+    return { path, exists: true, error: "缺少 sessions 数组（sessions: [...]）", sessions: [] };
   }
 
   const sessions = rawSessions.map((raw, index) => parseSession(raw, index));
@@ -620,7 +630,7 @@ export function readEventsConfig(cwd: string): EventsConfig {
     }
   }
 
-  return { path: found.absolute, exists: true, error: null, sessions };
+  return { path, exists: true, error: null, sessions };
 }
 
 /** Every usable rule across the file, with its session id attached. */

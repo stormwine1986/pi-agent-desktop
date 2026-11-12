@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { readEventsConfig } from "@/lib/events/config";
+import { describeGap, type GapNotice } from "@/lib/events/catch-up";
+import { readEventsConfig, type SubscriptionMatch } from "@/lib/events/config";
+import { selfExcitationWarning, type SubscriptionWarning } from "@/lib/events/dry-run";
 import {
   getEventRuntimeStatus,
   ruleRuntimeStatus,
@@ -31,6 +33,10 @@ interface SubscriptionStatus {
   server: string;
   workspace: string;
   action: string;
+  /** The editable fields, so the panel can show and prefill them without a second read. */
+  coalesceSec: number;
+  match: SubscriptionMatch;
+  filter: { events: string[]; entityTypes: string[] };
   health: SubscriptionHealth;
   /** Why it is not firing, in words the panel can print. */
   reason: string | null;
@@ -47,7 +53,16 @@ interface SubscriptionStatus {
     attempt: number;
     lastError: string | null;
     gapAt: number | null;
+    gap: GapNotice | null;
   } | null;
+  /**
+   * Which stretch of time the channel could not replay (SSR-000097 M3 / AC-1).
+   * `copy` is the sentence the panel prints — a gap is never silent, and a
+   * recovered one says it was recovered rather than disappearing.
+   */
+  gap: (GapNotice & { copy: string }) | null;
+  /** Non-blocking configuration warnings (self-excitation, AC-5). */
+  warnings: SubscriptionWarning[];
 }
 
 interface BrokenSubscription {
@@ -83,12 +98,20 @@ export async function GET(request: Request): Promise<Response> {
         const status = ruleRuntimeStatus(session.sessionId, entry.subscription);
         const exists = sessionExistence(session.sessionId);
         const health = subscriptionHealthOf(status, exists !== false);
+        const notice = status.connection?.gap ?? null;
+        const warning = selfExcitationWarning(entry.subscription);
         subscriptions.push({
           id: entry.subscription.id,
           name: entry.subscription.name,
           server: entry.subscription.server,
           workspace: entry.subscription.workspace,
           action: entry.subscription.action,
+          coalesceSec: entry.subscription.coalesceSec,
+          match: entry.subscription.match,
+          filter: {
+            events: entry.subscription.filter.events,
+            entityTypes: entry.subscription.filter.entityTypes,
+          },
           health,
           // `limited` has its own reason: the channel is fine, the budget is not.
           reason: health === "limited" ? status.limitedReason : status.blockedReason,
@@ -99,10 +122,20 @@ export async function GET(request: Request): Promise<Response> {
           lastReason: status.lastReason,
           pendingCount: status.pendingCount,
           connection: status.connection,
+          gap: notice ? { ...notice, copy: describeGap(notice) } : null,
+          warnings: warning ? [warning] : [],
         });
       }
       const verdict = sessionSubscriptionHealth(session.sessionId, usable);
       const facts = sessionEventFacts(session.sessionId);
+      // One line per session, even when several rules share a channel: the gap
+      // is a fact about the channel, not about each rule that reads it.
+      const gaps = subscriptions
+        .filter((item): item is SubscriptionStatus => "gap" in item && item.gap !== null)
+        .map((item) => item.gap!);
+      const latestGap = gaps.length > 0
+        ? gaps.reduce((newest, current) => (current.at > newest.at ? current : newest))
+        : null;
       return {
         sessionId: session.sessionId,
         title: session.title,
@@ -114,6 +147,9 @@ export async function GET(request: Request): Promise<Response> {
         unread: facts.unread,
         lastNotifyAt: facts.lastNotifyAt,
         lastNotifyText: facts.lastNotifyText,
+        /** `gap` windows of every channel this session listens on (newest first). */
+        gaps: gaps.sort((left, right) => right.at - left.at),
+        gap: latestGap,
         pending: facts.pending,
         pausedReason: facts.pausedReason,
         subscriptions,

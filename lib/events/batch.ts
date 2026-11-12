@@ -41,6 +41,17 @@ export interface CoalescedBatch {
   hits: BatchedHit[];
   /** Total events folded in (the sum of `hitCount`). */
   count: number;
+  /**
+   * True when at least one hit is *backfill*: the server replayed it on
+   * reconnect (`lib/events/catch-up.ts`). The injection says so, because "this
+   * happened 4 minutes ago while you were offline" is not the same instruction
+   * as "this just happened".
+   */
+  catchUp?: boolean;
+  /** Publish time of the oldest backfilled event in this batch (epoch ms). */
+  catchUpFrom?: number | null;
+  /** Publish time of the newest one. */
+  catchUpTo?: number | null;
 }
 
 interface PendingBatch extends CoalescedBatch {
@@ -95,7 +106,13 @@ export class Coalescer {
     return this.pending.size;
   }
 
-  add(sessionId: string, subscription: EventSubscription, descriptor: EventDescriptor, projectCwd: string | null = null): void {
+  add(
+    sessionId: string,
+    subscription: EventSubscription,
+    descriptor: EventDescriptor,
+    projectCwd: string | null = null,
+    options: { catchUp?: boolean; publishedAt?: number | null } = {},
+  ): void {
     const key = subscription.id;
     const now = this.deps.now();
     let batch = this.pending.get(key);
@@ -109,12 +126,28 @@ export class Coalescer {
         closedAt: now,
         hits: [],
         count: 0,
+        catchUp: false,
+        catchUpFrom: null,
+        catchUpTo: null,
         timer: null,
         byAggregate: new Map(),
       };
       this.pending.set(key, batch);
       const windowMs = Math.max(0, subscription.coalesceSec * 1000);
       batch.timer = this.deps.setTimeout(() => this.flush(key), windowMs);
+    }
+
+    if (options.catchUp) {
+      const publishedAt = options.publishedAt ?? null;
+      batch.catchUp = true;
+      if (publishedAt !== null) {
+        batch.catchUpFrom = batch.catchUpFrom === null || batch.catchUpFrom === undefined
+          ? publishedAt
+          : Math.min(batch.catchUpFrom, publishedAt);
+        batch.catchUpTo = batch.catchUpTo === null || batch.catchUpTo === undefined
+          ? publishedAt
+          : Math.max(batch.catchUpTo, publishedAt);
+      }
     }
 
     const existing = batch.byAggregate.get(descriptor.aggregateId);
@@ -151,6 +184,9 @@ export class Coalescer {
       closedAt: this.deps.now(),
       hits: batch.hits,
       count: batch.count,
+      catchUp: batch.catchUp,
+      catchUpFrom: batch.catchUpFrom,
+      catchUpTo: batch.catchUpTo,
     });
   }
 
@@ -204,5 +240,18 @@ export function mergeBatches(earlier: CoalescedBatch, later: CoalescedBatch): Co
     closedAt: Math.max(earlier.closedAt, later.closedAt),
     hits,
     count: earlier.count + later.count,
+    catchUp: Boolean(earlier.catchUp || later.catchUp),
+    catchUpFrom: minOf(earlier.catchUpFrom, later.catchUpFrom),
+    catchUpTo: maxOf(earlier.catchUpTo, later.catchUpTo),
   };
+}
+
+function minOf(a: number | null | undefined, b: number | null | undefined): number | null {
+  const values = [a, b].filter((value): value is number => typeof value === "number");
+  return values.length > 0 ? Math.min(...values) : null;
+}
+
+function maxOf(a: number | null | undefined, b: number | null | undefined): number | null {
+  const values = [a, b].filter((value): value is number => typeof value === "number");
+  return values.length > 0 ? Math.max(...values) : null;
 }
