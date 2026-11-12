@@ -52,6 +52,7 @@
     "preview-runtime": "node scripts/build-preview-runtime.mjs",
     "desktop:check-payload": "node scripts/check-packaged-payload.mjs",
     "desktop:verify": "node scripts/verify-packaged-codemode.mjs && node scripts/verify-packaged-terminal.mjs",
+    "verify:install": "node scripts/verify-install.mjs",
     "test:release-tools": "node --test scripts/*.test.mjs",
     "check:deps": "node scripts/check-installed-deps.mjs",
     "relay:shell": "node scripts/build-relay-shell.mjs",

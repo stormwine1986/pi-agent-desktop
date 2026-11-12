@@ -83,6 +83,17 @@ pub fn desktop_log(app: &AppHandle, message: &str) {
     append_desktop_log(&dir, message);
 }
 
+/// Appends to the same `desktop.log`, for the paths that have no `AppHandle`
+/// left: the exit path (`DesktopServer::stop`) runs from `RunEvent::Exit` and
+/// from `Drop`, and its record is exactly what a support report needs
+/// (SSR-000095 AC-10). No-op until some `desktop_log` call has found the
+/// directory, which the startup line always does.
+pub fn log_desktop(message: &str) {
+    if let Some(dir) = DESKTOP_LOG_DIR.get() {
+        append_desktop_log(dir, message);
+    }
+}
+
 /// Writes panics to `desktop.log` before the default hook runs. The release
 /// profile uses `panic = "abort"`, so without this a panic on any thread kills
 /// the app with nothing but a macOS crash report to show for it.

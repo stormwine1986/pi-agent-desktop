@@ -1,6 +1,7 @@
 import { access, chmod, copyFile, cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { existsSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
@@ -18,6 +19,17 @@ const tauriTargetDir = join(rootDir, "src-tauri", "target");
 const serverResourcesDir = join(rootDir, "src-tauri", "resources", "server");
 const serverHelperDir = join(rootDir, "src-tauri", "resources", "Entity Assistant Server.app");
 const nodeResourcesDir = join(rootDir, "src-tauri", "resources", "node");
+
+/** hex sha256 of a file, streamed: the bundled runtime is ~87 MB. */
+function sha256File(path) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
 
 /**
  * CI canary for DEFECT-000089.
@@ -494,9 +506,16 @@ const { binaryPath: nodeBinary, triple } = await bundleNodeRuntime();
 // launcher (desktop/server-launcher.cjs) can refuse a mixed install instead of
 // running new server code on an old Node. `bundleNodeRuntime` copies
 // process.execPath, so this is exactly the runtime shipped in resources/node.
+//
+// The sha256 is the second half of that stamp (SSR-000095 AC-8): the version
+// alone cannot tell two builds of the same Node apart, and `npm run
+// verify:install` has to be able to prove the binary on disk is the one the
+// package was built with. Hashing 87 MB once per packaging run is cheap next to
+// the build it follows.
+const nodeBinarySha256 = await sha256File(nodeBinary);
 await writeFile(
   join(serverResourcesDir, "node-runtime.json"),
-  `${JSON.stringify({ node: process.version }, null, 2)}\n`,
+  `${JSON.stringify({ node: process.version, sha256: nodeBinarySha256 }, null, 2)}\n`,
 );
 
 // Last gate before `tauri build` runs: nothing in the staged payload may carry

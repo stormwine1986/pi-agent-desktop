@@ -36,6 +36,14 @@ mod windows_impl {
             Self { _handle: None }
         }
 
+        /// Whether descendants are really guarded by a kill-on-close job. The
+        /// exit record (SSR-000095 AC-10) says which of the two strategies
+        /// applies, so a stray process after a crash can be explained instead of
+        /// guessed at.
+        pub fn is_attached(&self) -> bool {
+            self._handle.is_some()
+        }
+
         /// Puts `child` (and everything it spawns later) in a kill-on-close
         /// job. Must be called before the child spawns descendants.
         #[cfg(feature = "custom-protocol")]
@@ -79,6 +87,10 @@ mod other {
     impl ServerJob {
         pub fn none() -> Self {
             Self
+        }
+
+        pub fn is_attached(&self) -> bool {
+            false
         }
 
         #[cfg(feature = "custom-protocol")]

@@ -5,6 +5,10 @@ const eslintConfig = [
   {
     ignores: [
       ".claude/**",
+      // Local agent state: skills of this machine and the scratch files a
+      // session leaves behind (evidence, patch copies). Nothing here is
+      // tracked; linting it only makes the gate depend on the day's leftovers.
+      ".pi/**",
       ".next/**",
       ".next-desktop/**",
       "relay-shell/dist/**",

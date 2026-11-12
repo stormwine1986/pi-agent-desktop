@@ -1,6 +1,7 @@
 use std::{io, process::Child, sync::Mutex};
 
 use super::job::ServerJob;
+use crate::logging::log_desktop;
 
 // Each platform's `stop()` path needs its own imports; the split out of
 // lib.rs lost these, which only a Windows build notices.
@@ -58,14 +59,35 @@ impl DesktopServer {
             return;
         };
         let Some(child) = guard.take() else { return };
-        terminate_process_tree(child);
+        terminate_process_tree(child, self._job.is_attached());
     }
 }
 
-fn terminate_process_tree(mut child: Child) {
+/// How the server (and everything it started) was taken down, in the same
+/// `desktop.log` timeline the installer appends its own record to
+/// (SSR-000095 AC-10).
+///
+/// There is no Restart Manager here and the shell reports that honestly: the
+/// shell owns the child handle and a kill-on-close Job Object, and the path it
+/// started is the one the installer record names. A force-killed or crashed
+/// shell writes nothing at all — that case is covered from the other side, by
+/// `server-launcher.cjs` ("desktop shell … is gone") in `server.log`.
+fn record_cleanup(strategy: &str, pid: u32, job_attached: bool, code: &str) {
+    log_desktop(&format!(
+        "cleanup: strategy={strategy} pid={pid} job={} restart-manager=not-used-by-shell code={code}",
+        if job_attached {
+            "kill-on-close"
+        } else {
+            "none-watchdog-only"
+        }
+    ));
+}
+
+fn terminate_process_tree(mut child: Child, job_attached: bool) {
     #[cfg(unix)]
     {
         let pid = child.id();
+        record_cleanup("kill-process-group", pid, job_attached, "pending");
         unsafe {
             // The Node server owns its process group, so this also stops any
             // agent/tool subprocesses that are active when the App quits.
@@ -83,7 +105,15 @@ fn terminate_process_tree(mut child: Child) {
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
                 match child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(status)) => {
+                        record_cleanup(
+                            "kill-process-group",
+                            pid,
+                            job_attached,
+                            &format!("exited ({status})"),
+                        );
+                        return;
+                    }
                     Ok(None) => thread::sleep(Duration::from_millis(50)),
                     Err(_) => return,
                 }
@@ -94,19 +124,31 @@ fn terminate_process_tree(mut child: Child) {
             }
             let _ = child.kill();
             let _ = child.wait();
+            record_cleanup(
+                "kill-process-group",
+                pid,
+                job_attached,
+                "sigkill-after-2000ms",
+            );
         });
     }
 
     #[cfg(windows)]
     {
+        let pid = child.id();
         // taskkill /T terminates the packaged Node server and any agent/tool
         // subprocesses it started. CREATE_NO_WINDOW avoids flashing a console.
-        let _ = Command::new("taskkill.exe")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        let status = Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
+        let code = match status {
+            Ok(status) => status.code().map_or_else(|| "terminated".to_string(), |code| code.to_string()),
+            Err(error) => format!("spawn-failed ({error})"),
+        };
         let _ = child.kill();
         let _ = child.wait();
+        record_cleanup("taskkill-tree", pid, job_attached, &code);
     }
 }
 
