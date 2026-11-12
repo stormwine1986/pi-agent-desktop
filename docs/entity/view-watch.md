@@ -82,6 +82,10 @@ server boot → startWatchPump()
 
 代价（接受）：从未在应用里出现过的项目（一条会话都没有）不会被派发——它本来也看不见。
 
+**首 tick 不得加载 pi SDK**（DEFECT-000100 / TASK-000172）。`startWatchPump()` 立刻跑一次 `tick()`，这一 tick 落在桌面壳等待的启动窗口里（`listening → serving`），所以它取「可见项目」只能用 SDK-free 的 `lib/session-list.ts`（`listAllSessions` 在那里，`lib/session-reader.ts` 只是再导出）。曾经用 `session-reader`：那一句 `await import()` 让首 tick 同步加载 pi SDK 的 37 MB ESM 图，隔离构建上量到 `event loop blocked for 3415 ms`、首个 204 被推到 3788 ms。`lib/instrumentation-graph.test.mjs` 现在钉住这条规则（`lib/views/watch/index.ts` 的惰性 import 不得到达 `@earendil-works/*`，也不得出现 `../../session-reader` / `../../rpc-manager`）。
+
+`lib/views/watch/runtime.ts` 的那个 `session-reader` 是有意保留的：它只在 `startWatchSession()`（真派发一条实体）时才被 import，不在启动路径上。
+
 ## 2. 两个项目角色
 
 ```

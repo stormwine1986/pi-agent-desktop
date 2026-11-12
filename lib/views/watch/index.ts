@@ -156,8 +156,17 @@ export function startWatchPump(options: WatchPumpOptions = {}): () => void {
 }
 
 async function visibleProjects(): Promise<string[]> {
+  // DEFECT-000100 / TASK-000172: this runs on the pump's *first* tick, which
+  // `startWatchPump()` performs immediately — inside the window the desktop
+  // shell waits on (`listening → serving`). `../../session-reader` is the
+  // SDK-backed half of the session catalogue, so importing it here paid the pi
+  // SDK's 1.5–2.3 s synchronous module load before any view was looked at; the
+  // catalogue itself (`listAllSessions`, re-exported unchanged) lives in the
+  // SDK-free `lib/session-list.ts`. `lib/views/watch/runtime.ts` keeps its own
+  // `session-reader` door on purpose: it is reached from `startWatchSession()`,
+  // i.e. when a claimed item is actually dispatched, which is not this path.
   const [{ listAllSessions }, { getRecentProjects }] = await Promise.all([
-    import("../../session-reader"),
+    import("../../session-list"),
     import("../../project-groups"),
   ]);
   const sessions = await listAllSessions({ allowStale: true });
