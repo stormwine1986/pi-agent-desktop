@@ -242,10 +242,6 @@ const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
 const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
 // Retry temporary model-list failures without requiring a page refresh.
 const MODELS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
-// A warming catalogue (DEFECT-000101) is not a failure: the server already
-// started the load and only needs the request repeated.
-const MODELS_WARMING_DELAY_MS = 1_200;
-const MODELS_WARMING_RETRIES = 6;
 /** Longest the model list waits for the session read before it is requested anyway. */
 const MODELS_AFTER_SESSION_MAX_WAIT_MS = 1_500;
 const MAX_NOTICES = 5;
@@ -2992,11 +2988,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (controller.signal.aborted) return;
           if (!pending) return;
           // The server answered before the catalogue was ready and is building it
-          // off-thread (DEFECT-000101). Ask again shortly; the warm needs a few
-          // seconds at most, and the placeholder list must not become the answer.
-          if (warming >= MODELS_WARMING_RETRIES) return;
+          // off-thread (DEFECT-000101). Ask again on the same backoff the error
+          // path uses; the warm needs a few seconds at most, and the placeholder
+          // list must not become the answer. Not counted as a failed attempt.
+          if (warming >= MODELS_RETRY_DELAYS_MS.length) return;
+          await delay(MODELS_RETRY_DELAYS_MS[warming]);
           warming += 1;
-          await delay(MODELS_WARMING_DELAY_MS);
           if (controller.signal.aborted) return;
         } catch (e) {
           if (controller.signal.aborted) return;
