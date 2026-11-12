@@ -19,12 +19,12 @@
     }
   ],
   "build": {
-    "gitCommit": "ba6f4ecc0f27fdc4341e9634269869b6d64c29e0",
-    "gitCommitShort": "ba6f4ec",
+    "gitCommit": "d021583ae7ec0863451e02c4931c1c92af421827",
+    "gitCommitShort": "d021583",
     "gitBranch": "main",
     "gitDirty": false,
-    "builtAt": "2026-11-12T13:41:08+08:00",
+    "builtAt": "2026-11-12T15:18:21+08:00",
     "node": "v22.22.2",
-    "buildId": "8Yw8fO6i_aRoWUfCzVP9l"
+    "buildId": "0mYc95vYdYZb43hpDB8zj"
   }
 }
