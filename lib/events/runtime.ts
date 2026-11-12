@@ -27,7 +27,10 @@ import { applyRecheck, snapshotOf, type AggregateSnapshot } from "./recheck";
  * Startup discipline: nothing here runs on the request path or on the boot path.
  * `startEventRuntime()` waits two seconds after instrumentation, then scans
  * asynchronously; the watch pump (`lib/views/watch`) is already running by then,
- * so the two do not touch the network at the same moment.
+ * so the two do not touch the network at the same moment. The scan itself must
+ * not load the pi SDK, not even through a dynamic `import()`: that two-second
+ * delay lands inside the window the desktop shell waits on, so the module load
+ * is charged to the cold start (DEFECT-000100 — see `visibleProjects()`).
  *
  * The runtime never writes `.pi/events.yaml`. Bad configuration is *reported*:
  * a rule that cannot be used is listed with its reason instead of being dropped.
@@ -506,11 +509,16 @@ async function resolveCid(target: McpHttpTarget, serverName: string): Promise<st
 }
 
 async function visibleProjects(): Promise<string[]> {
-  // The session reader is the first thing here that needs the pi SDK. It is a
-  // 1.5–2.3 s synchronous module load, and it must not happen while the desktop
-  // shell is waiting for its identity probe (DEFECT-000090), so it is reached
-  // only when a scan actually needs the project list.
-  const { listAllSessions } = await import("../session-reader");
+  // `../session-list`, never `../session-reader` (DEFECT-000100). The reader
+  // re-exports the very same catalogue but statically imports the pi SDK, and
+  // that module load is 1.5–2.3 s of blocked event loop *inside the packaged
+  // Node*. The first scan runs 2 s after the hook, i.e. exactly while the shell
+  // is still waiting for its identity probe, so reaching the reader here cost
+  // every cold start 3.1–3.6 s (`listening → serving`, A/B: the same payload
+  // with `PI_WEB_DISABLE_EVENTS=1` showed no stall at all). The catalogue half
+  // (`listAllSessions`, `resolveSessionPath`) lives in the SDK-free module, so
+  // the scan needs nothing from the SDK at all.
+  const { listAllSessions } = await import("../session-list");
   const sessions = await listAllSessions({ allowStale: true });
   return getRecentProjects(sessions).map((project) => project.root);
 }
@@ -615,7 +623,9 @@ async function refreshScan(): Promise<void> {
     // reported, never re-created and never edited out of the file.
     const sessionIds = [...new Set(rules.map((rule) => rule.sessionId))];
     const exists = new Map<string, boolean>();
-    const { resolveSessionPath } = await import("../session-reader");
+    // Same rule as `visibleProjects()`: the SDK-free half, loaded lazily so the
+    // scan never trades a cold start for a session-existence check.
+    const { resolveSessionPath } = await import("../session-list");
     for (const sessionId of sessionIds) {
       try {
         exists.set(sessionId, Boolean(await resolveSessionPath(sessionId)));
@@ -657,7 +667,8 @@ async function refreshScan(): Promise<void> {
       writeSessionState(sessionId);
       if (parked.size > 0) {
         state.pending.set(sessionId, parked);
-        scheduleDrain(sessionId);
+        // Restored, not live: the first question waits out the startup window.
+        scheduleDrain(sessionId, Date.now() + RESTORED_DRAIN_DELAY_MS);
       }
     }
 
@@ -861,6 +872,18 @@ function deliverBatch(batch: CoalescedBatch): void {
 
 const RECHECK_TIMEOUT_MS = 8_000;
 const PENDING_DRAIN_MS = 1_000;
+/**
+ * How long a batch restored from disk waits before the drain may touch it.
+ *
+ * Draining reaches the SDK-backed session runtime (`isSessionRunning` →
+ * `../rpc-manager`), which is a 1.5–2.3 s module load. A batch parked by an
+ * earlier process is restored by the *first scan*, i.e. two seconds into a cold
+ * start — still inside the window the desktop shell waits on (DEFECT-000100).
+ * The batch itself is unaffected: it is parked until the session is idle, and
+ * waiting a few more seconds to ask that question changes nothing about the
+ * delivery, only when the question is allowed to cost the SDK.
+ */
+const RESTORED_DRAIN_DELAY_MS = 8_000;
 
 /**
  * Re-read every aggregate of the batch through the very same MCP entry the rule
@@ -933,10 +956,22 @@ function stopDrain(sessionId: string): void {
   state.drainTimers.delete(sessionId);
 }
 
-function scheduleDrain(sessionId: string): void {
+/**
+ * Starts asking, once a second, whether the parked batches may be delivered.
+ * `notBefore` holds the first question back without moving the interval: the
+ * restore path passes it so a cold start is not charged the SDK (see
+ * `RESTORED_DRAIN_DELAY_MS`).
+ */
+function scheduleDrain(sessionId: string, notBefore = 0): void {
   const state = runtime();
   if (state.drainTimers.has(sessionId)) return;
-  const timer = setInterval(() => void attemptDrain(sessionId), PENDING_DRAIN_MS);
+  const timer = setInterval(() => {
+    if (notBefore !== 0) {
+      if (Date.now() < notBefore) return;
+      notBefore = 0;
+    }
+    void attemptDrain(sessionId);
+  }, PENDING_DRAIN_MS);
   (timer as { unref?: () => void }).unref?.();
   state.drainTimers.set(sessionId, timer);
 }
