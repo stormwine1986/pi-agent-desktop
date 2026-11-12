@@ -22,6 +22,9 @@ export async function GET() {
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       subscribedSessionIds: subscriptions.subscribedSessionIds,
       subscriptionHealth: subscriptions.subscriptionHealth,
+      // `action: notify` receipts: the sidebar shows the same unread dot a
+      // completed background run gets, and raises one system notification.
+      subscriptionNotifications: subscriptions.notifications,
     },
     { headers: { "Cache-Control": "no-store" } },
   );

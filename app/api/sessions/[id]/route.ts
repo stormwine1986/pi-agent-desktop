@@ -13,6 +13,7 @@ import type { SessionEntry, SessionHeader } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
+import { markEventsRead } from "@/lib/events/runtime";
 
 /**
  * One session's first screen: header info, tree, context window, stats.
@@ -55,6 +56,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // Opening the conversation is the receipt for `action: notify` hits: the
+  // unread dot clears here and nowhere else (the event runtime never does it).
+  markEventsRead(id);
   const perf = startServerPerf("GET /api/sessions/[id]");
   try {
     perf?.span("resolve");

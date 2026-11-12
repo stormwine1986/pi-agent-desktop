@@ -504,6 +504,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [subscribedSessionIds, setSubscribedSessionIds] = useState<Set<string>>(() => new Set());
   const [subscriptionHealth, setSubscriptionHealth] = useState<Record<string, SubscriptionHealth>>({});
   const [subscriptionBadges, setSubscriptionBadges] = useState<Record<string, SubscriptionBadge>>({});
+  // `action: notify` hits (SSR-000097 AC-4): unread count + newest text per
+  // session, pushed by the running stream. Deliberately a separate state from the
+  // rule badges: this one changes on every hit, the badges on a minute tick.
+  const [subscriptionNotifications, setSubscriptionNotifications] = useState<
+    Record<string, { unread: number; lastAt: number; text: string }>
+  >({});
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -664,6 +670,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             sessionListVersion?: number;
             subscribedSessionIds?: string[];
             subscriptionHealth?: Record<string, SubscriptionHealth>;
+            subscriptionNotifications?: Record<string, { unread: number; lastAt: number; text: string }>;
           };
           if (data.type === "running") {
             sseAuthoritativeRef.current = true;
@@ -672,6 +679,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             // that is not running may still be waiting for an event.
             if (data.subscribedSessionIds) setSubscribedSessionIds(new Set(data.subscribedSessionIds));
             if (data.subscriptionHealth) setSubscriptionHealth(data.subscriptionHealth);
+            if (data.subscriptionNotifications) setSubscriptionNotifications(data.subscriptionNotifications);
           }
           if (typeof data.sessionListVersion === "number"
             && data.sessionListVersion !== sessionListVersionRef.current) {
@@ -866,6 +874,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return next;
     });
   }, [selectedSessionId]);
+
+  // A `notify` rule spends no token, so the only way the person learns about it
+  // is this: the same unread dot a completed background run gets, plus one
+  // system notification. `lastAt` is the dedupe key — the counter only grows
+  // until the session is opened, and a reconnect replays the same numbers.
+  const notifiedAtRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    for (const [sessionId, note] of Object.entries(subscriptionNotifications)) {
+      if (note.unread <= 0) continue;
+      const seen = notifiedAtRef.current.get(sessionId) ?? 0;
+      if (note.lastAt <= seen) continue;
+      notifiedAtRef.current.set(sessionId, note.lastAt);
+      if (sessionId === selectedSessionId) continue;
+      setUnreadSessionIds((prev) => {
+        if (prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.add(sessionId);
+        return next;
+      });
+      const session = allSessions.find((item) => item.id === sessionId);
+      const name = session?.name || session?.firstMessage || sessionId.slice(0, 8);
+      void notifyDesktop({
+        title: t("sidebar.eventNotifyTitle"),
+        body: t("sidebar.eventNotifyBody", { name, text: note.text }),
+      });
+    }
+  }, [subscriptionNotifications, selectedSessionId, allSessions, t]);
 
   useEffect(() => {
     fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
@@ -2576,12 +2611,14 @@ function SubscriptionIndicator({
 
   const lines = [t("sidebar.subscriptionTitle", { count: count ?? 0, health: healthLabel })];
   if (badge?.reason) lines.push(t("sidebar.subscriptionReason", { reason: badge.reason }));
+  if (badge && badge.unread > 0) lines.push(t("sidebar.subscriptionUnread", { count: badge.unread }));
   for (const rule of badge?.rules ?? []) {
     lines.push(t("sidebar.subscriptionRule", {
       name: rule.name,
       last: formatWakeTime(rule.lastWakeAt) ?? t("sidebar.subscriptionNever"),
       count: rule.todayCount,
     }));
+    if (rule.pendingCount > 0) lines.push(t("sidebar.subscriptionPending", { count: rule.pendingCount }));
   }
   for (const broken of badge?.broken ?? []) lines.push(t("sidebar.subscriptionBroken", { error: broken }));
 

@@ -1,15 +1,13 @@
 /**
  * `action: wake` — inject a prompt into an existing session so it runs a turn.
  *
- * The lifecycle rules this follows (SSR-000097【反应与投递】, M1 subset):
+ * The lifecycle rules this follows (SSR-000097【反应与投递】):
  * - the session must exist; a subscription whose `sessionId` is not on disk is
  *   reported, never created (`ifNotRunning` does not create anything);
  * - a session that exists but is not loaded is *resumed*: same id, same file;
- * - a session that is running is not interrupted. M1 records the batch as
- *   skipped — `pendingBatch` (deliver after the current turn) is M2.
- *
- * Delivery is serialized per session by the caller (`runtime.ts`), so two
- * batches never enter one session at the same time.
+ * - a session that is running is **not interrupted**: the caller parks the batch
+ *   (`pendingBatch`) and delivers once when the turn ends (M2);
+ * - one injection at a time per session — the caller serializes this.
  *
  * The two modules below are the pi SDK's front door (a session runtime and its
  * session store). They are imported when a delivery actually happens, not when
@@ -22,7 +20,14 @@ const sessionReader = () => import("../session-reader");
 
 export type DeliveryOutcome =
   | { status: "delivered" }
+  | { status: "busy" }
   | { status: "skipped"; reason: string };
+
+/** Whether this session is in the middle of a turn right now. */
+export async function isSessionRunning(sessionId: string): Promise<boolean> {
+  const running = (await sessionRuntime()).getRpcSession(sessionId);
+  return Boolean(running?.isAlive() && running.isRunning());
+}
 
 export async function wakeSession(sessionId: string, text: string): Promise<DeliveryOutcome> {
   let sessionFile: string | null;
@@ -37,7 +42,9 @@ export async function wakeSession(sessionId: string, text: string): Promise<Deli
 
   const running = (await sessionRuntime()).getRpcSession(sessionId);
   if (running?.isAlive() && running.isRunning()) {
-    return { status: "skipped", reason: "会话正在跑这一轮，忙时排队属 M2，本次未注入" };
+    // Not a skip any more: the caller keeps the batch and delivers it after the
+    // current turn, once, with every event that arrived meanwhile.
+    return { status: "busy" };
   }
 
   try {

@@ -16,6 +16,10 @@ export interface SubscriptionRuleView {
   reason: string | null;
   lastWakeAt: number | null;
   todayCount: number;
+  /** Delivered in the rolling hour (`maxPerHour` window). */
+  hourlyCount: number;
+  /** Batches parked behind the session's current turn. */
+  pendingCount: number;
   action: string;
 }
 
@@ -29,6 +33,10 @@ export interface SubscriptionBadge {
   rules: SubscriptionRuleView[];
   /** A rule the file declares but cannot use; shown instead of a healthy count. */
   broken: string[];
+  /** Unread `action: notify` hits (`/api/events/subscriptions` per session). */
+  unread: number;
+  /** Why the session is paused (storm fuse), when it is. */
+  pausedReason: string | null;
 }
 
 interface RawSubscription {
@@ -39,6 +47,8 @@ interface RawSubscription {
   reason?: unknown;
   lastWakeAt?: unknown;
   todayCount?: unknown;
+  hourlyCount?: unknown;
+  pendingCount?: unknown;
   error?: unknown;
   label?: unknown;
 }
@@ -47,6 +57,8 @@ interface RawSession {
   sessionId?: unknown;
   health?: unknown;
   reason?: unknown;
+  unread?: unknown;
+  pausedReason?: unknown;
   subscriptions?: unknown;
 }
 
@@ -91,6 +103,8 @@ export function toSubscriptionBadges(payload: unknown): Record<string, Subscript
         reason: typeof entry.reason === "string" ? entry.reason : null,
         lastWakeAt: asNumber(entry.lastWakeAt),
         todayCount: asNumber(entry.todayCount) ?? 0,
+        hourlyCount: asNumber(entry.hourlyCount) ?? 0,
+        pendingCount: asNumber(entry.pendingCount) ?? 0,
         action: typeof entry.action === "string" ? entry.action : "wake",
       });
     }
@@ -109,6 +123,8 @@ export function toSubscriptionBadges(payload: unknown): Record<string, Subscript
       todayCount,
       rules,
       broken,
+      unread: asNumber(raw.unread) ?? 0,
+      pausedReason: typeof raw.pausedReason === "string" ? raw.pausedReason : null,
     };
   }
   return badges;

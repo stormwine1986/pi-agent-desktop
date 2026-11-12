@@ -3,6 +3,7 @@ import { readEventsConfig } from "@/lib/events/config";
 import {
   getEventRuntimeStatus,
   ruleRuntimeStatus,
+  sessionEventFacts,
   sessionExistence,
   sessionSubscriptionHealth,
   subscriptionHealthOf,
@@ -35,8 +36,12 @@ interface SubscriptionStatus {
   reason: string | null;
   lastWakeAt: number | null;
   todayCount: number;
+  /** Delivered in the rolling hour (`maxPerHour` window). */
+  hourlyCount: number;
   totalDeliveries: number;
   lastReason: string | null;
+  /** Batches parked behind the session's current turn (`pendingBatch`). */
+  pendingCount: number;
   connection: {
     status: string;
     attempt: number;
@@ -64,6 +69,7 @@ export async function GET(request: Request): Promise<Response> {
       started: runtime.started,
       lastScanAt: runtime.lastScanAt,
       lastScanError: runtime.lastScanError,
+      pending: runtime.pending,
     },
     sessions: config.sessions.map((session) => {
       const subscriptions: (SubscriptionStatus | BrokenSubscription)[] = [];
@@ -76,22 +82,27 @@ export async function GET(request: Request): Promise<Response> {
         usable.push(entry.subscription);
         const status = ruleRuntimeStatus(session.sessionId, entry.subscription);
         const exists = sessionExistence(session.sessionId);
+        const health = subscriptionHealthOf(status, exists !== false);
         subscriptions.push({
           id: entry.subscription.id,
           name: entry.subscription.name,
           server: entry.subscription.server,
           workspace: entry.subscription.workspace,
           action: entry.subscription.action,
-          health: subscriptionHealthOf(status, exists !== false),
-          reason: status.blockedReason,
+          health,
+          // `limited` has its own reason: the channel is fine, the budget is not.
+          reason: health === "limited" ? status.limitedReason : status.blockedReason,
           lastWakeAt: status.lastWakeAt,
           todayCount: status.todayCount,
+          hourlyCount: status.hourlyCount,
           totalDeliveries: status.totalDeliveries,
           lastReason: status.lastReason,
+          pendingCount: status.pendingCount,
           connection: status.connection,
         });
       }
       const verdict = sessionSubscriptionHealth(session.sessionId, usable);
+      const facts = sessionEventFacts(session.sessionId);
       return {
         sessionId: session.sessionId,
         title: session.title,
@@ -99,6 +110,12 @@ export async function GET(request: Request): Promise<Response> {
         error: session.error,
         health: verdict.health,
         reason: verdict.reason,
+        /** Unread `action: notify` hits; opened sessions clear it. */
+        unread: facts.unread,
+        lastNotifyAt: facts.lastNotifyAt,
+        lastNotifyText: facts.lastNotifyText,
+        pending: facts.pending,
+        pausedReason: facts.pausedReason,
         subscriptions,
       };
     }),

@@ -5,13 +5,15 @@ import { agentDir } from "../agent-dir";
 import { writePrivateFileAtomicSync } from "../atomic-file";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../mcp-call";
 import { getRecentProjects } from "../project-groups";
-import { Coalescer, type CoalescedBatch } from "./batch";
+import { Coalescer, mergeBatches, type BatchedHit, type CoalescedBatch } from "./batch";
 import { claimChannel, releaseChannel, type ChannelOwnership } from "./channel-lease";
 import { readEventsConfig, usableSubscriptions, type EventSubscription, type EventsConfig } from "./config";
 import { EventConnection, type ConnectionState, type EventEndpoint } from "./connection";
-import { wakeSession } from "./delivery";
+import { isSessionRunning, wakeSession } from "./delivery";
+import { evaluateGates, quotaExhausted, recordGateDelivery, stormReached } from "./gate";
 import { renderInjection } from "./inject-text";
 import { matchesSubscription, union, type EventDescriptor } from "./match";
+import { applyRecheck, snapshotOf, type AggregateSnapshot } from "./recheck";
 
 /**
  * The event-subscription runtime: which sessions asked to be woken, and by what.
@@ -45,6 +47,35 @@ interface DeliveryRecord {
   dayCount: number;
   total: number;
   lastReason: string | null;
+  /** Delivered timestamps of this rule, for `maxPerHour` and the quiet period. */
+  delivered: number[];
+  /** Delivered timestamps per aggregate id, for the loop fuse. */
+  aggregates: Record<string, number[]>;
+}
+
+/** One parked batch, as it is written to disk (`pendingBatch` survives a restart). */
+interface ParkedBatch {
+  subscriptionId: string;
+  projectCwd: string | null;
+  openedAt: number;
+  closedAt: number;
+  hits: BatchedHit[];
+  count: number;
+}
+
+/**
+ * Runtime facts of one **session** (as opposed to one rule): the storm fuse, the
+ * unread notification count, and the batches waiting for the current turn.
+ *
+ * Persisted in the same file as the per-rule counters, so a paused session stays
+ * paused after a restart — the fuse is not allowed to "heal" itself silently.
+ */
+interface SessionEventState {
+  paused: { at: number; reason: string } | null;
+  /** Delivered timestamps of every rule of this session, for the storm fuse. */
+  deliveries: number[];
+  notify: { unread: number; lastAt: number; lastText: string } | null;
+  pending: ParkedBatch[];
 }
 
 export interface LoadedRule {
@@ -62,6 +93,9 @@ interface ManagedChannel {
   endpoint: EventEndpoint;
   types: string[];
   entityTypes: string[];
+  operator: string | null;
+  linkTypes: string[];
+  custom: boolean;
   connection: EventConnection;
   state: ConnectionState;
 }
@@ -78,6 +112,12 @@ export interface EventsRuntime {
   sessionExists: Map<string, boolean>;
   sessionChannels: Map<string, string>;
   deliveries: Map<string, Record<string, DeliveryRecord>>;
+  sessionStates: Map<string, SessionEventState>;
+  /** Parked batches per session → rule id (`pendingBatch`). */
+  pending: Map<string, Map<string, CoalescedBatch>>;
+  drainTimers: Map<string, ReturnType<typeof setInterval>>;
+  /** Sessions whose persisted pending batches were already re-queued this process. */
+  restored: Set<string>;
   chains: Map<string, Promise<void>>;
   listeners: Set<() => void>;
   coalescer: Coalescer | null;
@@ -103,6 +143,10 @@ function runtime(): EventsRuntime {
       sessionExists: new Map(),
       sessionChannels: new Map(),
       deliveries: new Map(),
+      sessionStates: new Map(),
+      pending: new Map(),
+      drainTimers: new Map(),
+      restored: new Set(),
       chains: new Map(),
       listeners: new Set(),
       coalescer: null,
@@ -167,11 +211,15 @@ function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
+function sessionStatePath(sessionId: string): string {
+  return join(sessionStateDir(), `${sessionId.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`);
+}
+
 function loadSessionDeliveries(sessionId: string): Record<string, DeliveryRecord> {
   const state = runtime();
   const cached = state.deliveries.get(sessionId);
   if (cached) return cached;
-  const raw = readJson(join(sessionStateDir(), `${sessionId.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`));
+  const raw = readJson(sessionStatePath(sessionId));
   const deliveries: Record<string, DeliveryRecord> = {};
   const stored = raw && isRecord(raw.deliveries) ? raw.deliveries : {};
   for (const [id, value] of Object.entries(stored)) {
@@ -182,17 +230,119 @@ function loadSessionDeliveries(sessionId: string): Record<string, DeliveryRecord
       dayCount: typeof value.dayCount === "number" ? value.dayCount : 0,
       total: typeof value.total === "number" ? value.total : 0,
       lastReason: typeof value.lastReason === "string" ? value.lastReason : null,
+      delivered: numbersOf(value.delivered),
+      aggregates: timestampsByKey(value.aggregates),
     };
   }
   state.deliveries.set(sessionId, deliveries);
   return deliveries;
 }
 
+function numbersOf(value: unknown): number[] {
+  return Array.isArray(value) ? value.filter((item): item is number => typeof item === "number") : [];
+}
+
+function timestampsByKey(value: unknown): Record<string, number[]> {
+  const result: Record<string, number[]> = {};
+  if (!isRecord(value)) return result;
+  for (const [key, list] of Object.entries(value)) result[key] = numbersOf(list);
+  return result;
+}
+
+function loadSessionEventState(sessionId: string): SessionEventState {
+  const state = runtime();
+  const cached = state.sessionStates.get(sessionId);
+  if (cached) return cached;
+  const raw = readJson(sessionStatePath(sessionId));
+  const stored = raw && isRecord(raw.session) ? raw.session : {};
+  const paused = isRecord(stored.paused)
+    ? {
+        at: typeof stored.paused.at === "number" ? stored.paused.at : 0,
+        reason: typeof stored.paused.reason === "string" ? stored.paused.reason : "风暴保护已暂停",
+      }
+    : null;
+  const notify = isRecord(stored.notify)
+    ? {
+        unread: typeof stored.notify.unread === "number" ? stored.notify.unread : 0,
+        lastAt: typeof stored.notify.lastAt === "number" ? stored.notify.lastAt : 0,
+        lastText: typeof stored.notify.lastText === "string" ? stored.notify.lastText : "",
+      }
+    : null;
+  const pending: ParkedBatch[] = [];
+  if (Array.isArray(stored.pending)) {
+    for (const entry of stored.pending) {
+      if (!isRecord(entry) || typeof entry.subscriptionId !== "string" || !Array.isArray(entry.hits)) continue;
+      pending.push({
+        subscriptionId: entry.subscriptionId,
+        projectCwd: typeof entry.projectCwd === "string" ? entry.projectCwd : null,
+        openedAt: typeof entry.openedAt === "number" ? entry.openedAt : 0,
+        closedAt: typeof entry.closedAt === "number" ? entry.closedAt : 0,
+        hits: entry.hits.filter(isRecord).map((hit) => ({
+          aggregateType: typeof hit.aggregateType === "string" ? hit.aggregateType : "",
+          aggregateId: typeof hit.aggregateId === "string" ? hit.aggregateId : "",
+          key: typeof hit.key === "string" ? hit.key : null,
+          from: typeof hit.from === "string" ? hit.from : null,
+          to: typeof hit.to === "string" ? hit.to : null,
+          eventType: typeof hit.eventType === "string" ? hit.eventType : "",
+          operator: typeof hit.operator === "string" ? hit.operator : "",
+          workspaceId: typeof hit.workspaceId === "string" ? hit.workspaceId : "",
+          timestamp: typeof hit.timestamp === "string" ? hit.timestamp : "",
+          hitCount: typeof hit.hitCount === "number" ? hit.hitCount : 1,
+        })).filter((hit) => hit.aggregateId.length > 0),
+        count: typeof entry.count === "number" ? entry.count : 0,
+      });
+    }
+  }
+  const loaded: SessionEventState = {
+    paused,
+    deliveries: numbersOf(stored.deliveries),
+    notify,
+    pending,
+  };
+  state.sessionStates.set(sessionId, loaded);
+  return loaded;
+}
+
+/** One file per session: per-rule counters + session facts. Losing it must not lose a wake-up. */
+function writeSessionState(sessionId: string): void {
+  const deliveries = loadSessionDeliveries(sessionId);
+  const session = loadSessionEventState(sessionId);
+  try {
+    mkdirSync(sessionStateDir(), { recursive: true });
+    writePrivateFileAtomicSync(
+      sessionStatePath(sessionId),
+      `${JSON.stringify(
+        {
+          deliveries,
+          session: {
+            paused: session.paused,
+            deliveries: session.deliveries,
+            notify: session.notify,
+            pending: session.pending,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } catch {
+    // Losing a counter must not lose the wake-up.
+  }
+}
+
 function recordDelivery(sessionId: string, subscriptionId: string, outcome: "delivered" | "skipped", reason: string | null): void {
   const deliveries = loadSessionDeliveries(sessionId);
   const now = Date.now();
   const today = dayKey(now);
-  const record = deliveries[subscriptionId] ?? { lastWakeAt: null, day: today, dayCount: 0, total: 0, lastReason: null };
+  const record = deliveries[subscriptionId] ?? {
+    lastWakeAt: null,
+    day: today,
+    dayCount: 0,
+    total: 0,
+    lastReason: null,
+    delivered: [],
+    aggregates: {},
+  };
   if (outcome === "delivered") {
     record.lastWakeAt = now;
     record.total += 1;
@@ -204,15 +354,7 @@ function recordDelivery(sessionId: string, subscriptionId: string, outcome: "del
   }
   record.lastReason = reason;
   deliveries[subscriptionId] = record;
-  try {
-    mkdirSync(sessionStateDir(), { recursive: true });
-    writePrivateFileAtomicSync(
-      join(sessionStateDir(), `${sessionId.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`),
-      `${JSON.stringify({ deliveries }, null, 2)}\n`,
-    );
-  } catch {
-    // Losing a counter must not lose the wake-up.
-  }
+  writeSessionState(sessionId);
 }
 
 /**
@@ -353,8 +495,29 @@ async function collectRules(): Promise<{ rules: LoadedRule[]; configs: Map<strin
   return { rules, configs };
 }
 
-export function desiredChannels(rules: LoadedRule[]): Map<string, { server: string; workspace: string; projectCwd: string; types: string[]; entityTypes: string[] }> {
-  const wanted = new Map<string, { server: string; workspace: string; projectCwd: string; types: string[]; entityTypes: string[] }>();
+export interface ChannelShape {
+  server: string;
+  workspace: string;
+  projectCwd: string;
+  types: string[];
+  entityTypes: string[];
+  /** Coarse server-side dimensions (`filter`), unioned over the channel's rules. */
+  operator: string | null;
+  linkTypes: string[];
+  custom: boolean;
+}
+
+/**
+ * One entry per `(server, workspace)` with the union of its rules' filters.
+ *
+ * `operator` is the one dimension a union cannot honestly widen: the server takes
+ * a single value, and sending one rule's operator would silently starve another
+ * rule on the same channel. It is sent only when every rule that names one names
+ * the same; `match.operator` still enforces it per rule either way.
+ */
+export function desiredChannels(rules: LoadedRule[]): Map<string, ChannelShape> {
+  const wanted = new Map<string, ChannelShape>();
+  const operators = new Map<string, Set<string>>();
   for (const rule of rules) {
     const key = channelKey(rule.subscription.server, rule.subscription.workspace);
     const entry = wanted.get(key) ?? {
@@ -363,14 +526,27 @@ export function desiredChannels(rules: LoadedRule[]): Map<string, { server: stri
       projectCwd: rule.projectCwd,
       types: [],
       entityTypes: [],
+      operator: null,
+      linkTypes: [],
+      custom: false,
     };
     entry.types.push(...rule.subscription.filter.events);
     entry.entityTypes.push(...rule.subscription.filter.entityTypes);
+    entry.linkTypes.push(...rule.subscription.filter.linkTypes);
+    if (rule.subscription.filter.custom === true) entry.custom = true;
+    if (rule.subscription.filter.operator) {
+      const set = operators.get(key) ?? new Set<string>();
+      set.add(rule.subscription.filter.operator);
+      operators.set(key, set);
+    }
     wanted.set(key, entry);
   }
-  for (const entry of wanted.values()) {
+  for (const [key, entry] of wanted) {
     entry.types = union(entry.types);
     entry.entityTypes = union(entry.entityTypes);
+    entry.linkTypes = union(entry.linkTypes);
+    const named = operators.get(key);
+    entry.operator = named && named.size === 1 ? [...named][0] : null;
   }
   return wanted;
 }
@@ -397,6 +573,39 @@ async function refreshScan(): Promise<void> {
     }
     state.sessionExists = exists;
 
+    // `pendingBatch` outlives a restart: a batch parked behind a turn that the
+    // app never saw end is delivered once the session is idle again. A rule that
+    // no longer exists (or is no longer usable) is dropped instead of delivered.
+    for (const sessionId of sessionIds) {
+      if (state.restored.has(sessionId)) continue;
+      state.restored.add(sessionId);
+      const session = loadSessionEventState(sessionId);
+      if (session.pending.length === 0) continue;
+      const rulesOfSession = new Map(
+        rules.filter((rule) => rule.sessionId === sessionId).map((rule) => [rule.subscription.id, rule]),
+      );
+      const parked = new Map<string, CoalescedBatch>();
+      for (const entry of session.pending) {
+        const rule = rulesOfSession.get(entry.subscriptionId);
+        if (!rule || rule.subscription.action === "notify") continue;
+        parked.set(entry.subscriptionId, {
+          sessionId,
+          subscription: rule.subscription,
+          projectCwd: entry.projectCwd ?? rule.projectCwd,
+          openedAt: entry.openedAt,
+          closedAt: entry.closedAt,
+          hits: entry.hits,
+          count: entry.count,
+        });
+      }
+      session.pending = [];
+      writeSessionState(sessionId);
+      if (parked.size > 0) {
+        state.pending.set(sessionId, parked);
+        scheduleDrain(sessionId);
+      }
+    }
+
     const wanted = desiredChannels(rules);
     const reshaped = new Set<string>();
     const claimDir = join(agentDir(), "events");
@@ -404,7 +613,10 @@ async function refreshScan(): Promise<void> {
       const entry = wanted.get(key);
       const sameShape = entry
         && entry.types.join(",") === channel.types.join(",")
-        && entry.entityTypes.join(",") === channel.entityTypes.join(",");
+        && entry.entityTypes.join(",") === channel.entityTypes.join(",")
+        && entry.operator === channel.operator
+        && entry.linkTypes.join(",") === channel.linkTypes.join(",")
+        && entry.custom === channel.custom;
       if (entry && sameShape) {
         // Superseded is not permanent: the other instance may have gone away.
         // One local claim check per scan — never a network round trip — and the
@@ -440,7 +652,7 @@ async function refreshScan(): Promise<void> {
 
 async function startChannel(
   key: string,
-  entry: { server: string; workspace: string; projectCwd: string; types: string[]; entityTypes: string[] },
+  entry: ChannelShape,
   options: { resume: boolean } = { resume: true },
 ): Promise<void> {
   const state = runtime();
@@ -467,6 +679,9 @@ async function startChannel(
       endpoint,
       types: entry.types,
       entityTypes: entry.entityTypes,
+      operator: entry.operator,
+      linkTypes: entry.linkTypes,
+      custom: entry.custom,
       connection: null as unknown as EventConnection,
       state: {
         status: "superseded",
@@ -488,6 +703,9 @@ async function startChannel(
     endpoint,
     types: entry.types,
     entityTypes: entry.entityTypes,
+    operator: entry.operator,
+    linkTypes: entry.linkTypes,
+    custom: entry.custom,
     cid,
     // A widened filter is a new subscription set: replaying it from an old
     // cursor would deliver events that were not relevant when they happened
@@ -521,6 +739,9 @@ async function startChannel(
     endpoint,
     types: entry.types,
     entityTypes: entry.entityTypes,
+    operator: entry.operator,
+    linkTypes: entry.linkTypes,
+    custom: entry.custom,
     connection,
     state: connection.getState(),
   });
@@ -545,7 +766,7 @@ function handleEvent(key: string, descriptor: EventDescriptor, eventId: string |
     if (!ruleAppliesToChannel(rule, key)) continue;
     if (rule.subscription.workspace !== descriptor.workspaceId && descriptor.workspaceId) continue;
     if (!matchesSubscription(descriptor, rule.subscription.match)) continue;
-    state.coalescer?.add(rule.sessionId, rule.subscription, descriptor);
+    state.coalescer?.add(rule.sessionId, rule.subscription, descriptor, rule.projectCwd);
   }
 }
 
@@ -561,33 +782,280 @@ function deliverBatch(batch: CoalescedBatch): void {
   state.chains.set(batch.sessionId, next);
 }
 
+const RECHECK_TIMEOUT_MS = 8_000;
+const PENDING_DRAIN_MS = 1_000;
+
+/**
+ * Re-read every aggregate of the batch through the very same MCP entry the rule
+ * names, and drop the hits whose entity no longer satisfies the rule.
+ *
+ * A failed read is *not* "probably fine": injecting a state we could not confirm
+ * is exactly the mistake `recheck` exists to prevent, so the batch is skipped
+ * with its reason written down (`skipped:recheck-failed`).
+ */
+async function recheckBatch(batch: CoalescedBatch): Promise<{ batch: CoalescedBatch | null; stale: string[]; error: string | null }> {
+  const resolved = resolveMcpTarget(agentDir(), batch.projectCwd ?? "", batch.subscription.server);
+  if (!resolved.ok) return { batch: null, stale: [], error: `无法解析 mcp.json 条目：${resolved.error}` };
+
+  const snapshots = new Map<string, AggregateSnapshot>();
+  for (const hit of batch.hits) {
+    const result = await callMcpTool(
+      resolved.target,
+      "get",
+      { id: hit.aggregateId, includeAttachments: false },
+      RECHECK_TIMEOUT_MS,
+    );
+    if (!result.ok) {
+      const status = typeof result.structured?.statusCode === "number" ? result.structured.statusCode : null;
+      if (status === 404) {
+        snapshots.set(hit.aggregateId, { exists: false, state: null, aggregateType: null, workspaceId: null });
+        continue;
+      }
+      return { batch: null, stale: [], error: `重读 ${hit.aggregateId} 失败：${result.error}` };
+    }
+    snapshots.set(hit.aggregateId, snapshotOf(result.value, batch.subscription.workspace));
+  }
+
+  const outcome = applyRecheck(batch, snapshots, batch.subscription.match, batch.subscription.workspace);
+  return { batch: outcome.batch, stale: outcome.stale, error: null };
+}
+
+function parkedOf(batch: CoalescedBatch): ParkedBatch {
+  return {
+    subscriptionId: batch.subscription.id,
+    projectCwd: batch.projectCwd,
+    openedAt: batch.openedAt,
+    closedAt: batch.closedAt,
+    hits: batch.hits,
+    count: batch.count,
+  };
+}
+
+/** Keeps a batch for after the current turn; more windows of the same rule merge into it. */
+function parkBatch(batch: CoalescedBatch): void {
+  const state = runtime();
+  const parked = state.pending.get(batch.sessionId) ?? new Map<string, CoalescedBatch>();
+  const existing = parked.get(batch.subscription.id);
+  parked.set(batch.subscription.id, existing ? mergeBatches(existing, batch) : batch);
+  state.pending.set(batch.sessionId, parked);
+
+  const session = loadSessionEventState(batch.sessionId);
+  session.pending = [...parked.values()].map(parkedOf);
+  writeSessionState(batch.sessionId);
+  scheduleDrain(batch.sessionId);
+  notifyListeners();
+}
+
+function stopDrain(sessionId: string): void {
+  const state = runtime();
+  const timer = state.drainTimers.get(sessionId);
+  if (timer) clearInterval(timer);
+  state.drainTimers.delete(sessionId);
+}
+
+function scheduleDrain(sessionId: string): void {
+  const state = runtime();
+  if (state.drainTimers.has(sessionId)) return;
+  const timer = setInterval(() => void attemptDrain(sessionId), PENDING_DRAIN_MS);
+  (timer as { unref?: () => void }).unref?.();
+  state.drainTimers.set(sessionId, timer);
+}
+
+/** After the turn: deliver every parked batch once, through the usual gates. */
+async function attemptDrain(sessionId: string): Promise<void> {
+  const state = runtime();
+  const parked = state.pending.get(sessionId);
+  if (!parked || parked.size === 0) {
+    stopDrain(sessionId);
+    return;
+  }
+  if (await isSessionRunning(sessionId)) return;
+
+  stopDrain(sessionId);
+  state.pending.delete(sessionId);
+  const session = loadSessionEventState(sessionId);
+  session.pending = [];
+  writeSessionState(sessionId);
+  for (const batch of parked.values()) deliverBatch(batch);
+  notifyListeners();
+}
+
+/** Delivered: stamps the rule's quota/loop history and the session's storm history. */
+function markDelivered(batch: CoalescedBatch): { storm: boolean; count: number } {
+  const subscription = batch.subscription;
+  const deliveries = loadSessionDeliveries(batch.sessionId);
+  const now = Date.now();
+  const today = dayKey(now);
+  const record = deliveries[subscription.id] ?? {
+    lastWakeAt: null,
+    day: today,
+    dayCount: 0,
+    total: 0,
+    lastReason: null,
+    delivered: [],
+    aggregates: {},
+  };
+  const gated = recordGateDelivery(record.delivered, record.aggregates, batch.hits, now);
+  record.delivered = gated.delivered;
+  record.aggregates = gated.aggregateDeliveries;
+  record.lastWakeAt = now;
+  record.total += 1;
+  if (record.day !== today) {
+    record.day = today;
+    record.dayCount = 0;
+  }
+  record.dayCount += 1;
+  record.lastReason = subscription.action === "notify" ? `notify：${batch.count} 条变化` : null;
+  deliveries[subscription.id] = record;
+
+  const session = loadSessionEventState(batch.sessionId);
+  session.deliveries = [...session.deliveries, now].slice(-200);
+  const storm = stormReached(session.deliveries, now, subscription.stormWindowSec, subscription.stormMaxDeliveries);
+  if (storm.tripped && !session.paused) {
+    session.paused = {
+      at: now,
+      reason: `${Math.round(subscription.stormWindowSec / 60)} 分钟内已投递 ${storm.count} 次（上限 ${subscription.stormMaxDeliveries}）：已暂停本会话全部订阅，不会自动恢复`,
+    };
+  }
+  writeSessionState(batch.sessionId);
+  if (storm.tripped && session.paused) {
+    void sendSystemNotification(
+      batch.sessionId,
+      "事件订阅已暂停（风暴保护）",
+      session.paused.reason,
+    );
+  }
+  return { storm: storm.tripped, count: storm.count };
+}
+
+function notificationText(batch: CoalescedBatch): { title: string; text: string } {
+  const latest = batch.hits[batch.hits.length - 1];
+  const subject = latest
+    ? `${latest.aggregateType} ${latest.key ?? latest.aggregateId}${batch.hits.length > 1 ? ` 等 ${batch.hits.length} 个实体` : ""}`
+    : "";
+  return {
+    title: `${batch.subscription.name}（事件提醒）`,
+    text: [
+      `${batch.count} 条变化`,
+      subject ? `：${subject}` : "",
+      latest?.to ? `，现在 ${latest.from ?? "?"} → ${latest.to}` : "",
+    ].join(""),
+  };
+}
+
+/**
+ * A system notification and no injection (`action: notify`).
+ *
+ * Two receipts, because either alone is easy to miss: the browser/phone push
+ * (`notifySessionEvent`) and the unread counter the sidebar turns into the same
+ * dot a completed background run gets. No prompt is sent, so no token is spent.
+ */
+async function sendSystemNotification(sessionId: string, title: string, text: string): Promise<void> {
+  try {
+    const push = await import("../web-push");
+    await push.notifySessionEvent(sessionId, { kind: "attention", detail: text }, title);
+  } catch (error) {
+    console.error(
+      "[events] system notification failed:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+  // A line in the app log is the third receipt: "was I notified?" is answerable
+  // from the outside when push is not configured on this machine.
+  console.info(`[events] notify session=${sessionId} ${title}：${text}`);
+}
+
+async function deliverNotification(batch: CoalescedBatch): Promise<void> {
+  const { title, text } = notificationText(batch);
+  const session = loadSessionEventState(batch.sessionId);
+  session.notify = {
+    unread: (session.notify?.unread ?? 0) + 1,
+    lastAt: Date.now(),
+    lastText: text,
+  };
+  markDelivered(batch);
+  await sendSystemNotification(batch.sessionId, title, text);
+  notifyListeners();
+}
+
 /** One batch into one session, never two at a time (`state.chains`). */
 async function deliverNow(batch: CoalescedBatch): Promise<void> {
   const state = runtime();
   const subscription = batch.subscription;
-
-  if (subscription.action !== "wake") {
-    // M1 implements `wake` only. A `notify` rule is reported as paused rather
-    // than pretending it did something.
-    recordDelivery(batch.sessionId, subscription.id, "skipped", "action: notify 属 M2，M1 不投递");
+  const skip = (reason: string): void => {
+    recordDelivery(batch.sessionId, subscription.id, "skipped", reason);
     notifyListeners();
-    return;
-  }
+  };
+
   if (state.sessionExists.get(batch.sessionId) === false) {
-    recordDelivery(batch.sessionId, subscription.id, "skipped", "会话不存在");
-    notifyListeners();
+    skip("会话不存在");
     return;
   }
 
-  const { text, subscriptionId } = renderInjection(batch);
+  const session = loadSessionEventState(batch.sessionId);
+  if (session.paused) {
+    skip(`skipped:paused：${session.paused.reason}`);
+    return;
+  }
+
+  // ① recheck — after coalescing, before any counter is charged.
+  let effective = batch;
+  if (subscription.recheck) {
+    const result = await recheckBatch(batch);
+    if (result.error) {
+      skip(`skipped:recheck-failed：${result.error}`);
+      return;
+    }
+    if (!result.batch) {
+      skip(`skipped:stale：重读后已不满足 match（${result.stale.join("、")}）`);
+      return;
+    }
+    effective = result.batch;
+  }
+
+  // ② quota, quiet period, loop fuse — on the coalesced batch, never on raw events.
+  const deliveries = loadSessionDeliveries(batch.sessionId);
+  const record = deliveries[subscription.id];
+  const verdict = evaluateGates({
+    now: Date.now(),
+    selfQuietSec: subscription.selfQuietSec,
+    lastDeliveredAt: record?.lastWakeAt ?? null,
+    delivered: record?.delivered ?? [],
+    maxPerHour: subscription.maxPerHour,
+    loopWindowSec: subscription.loopWindowSec,
+    loopMaxHits: subscription.loopMaxHits,
+    aggregateDeliveries: record?.aggregates ?? {},
+    hits: effective.hits,
+  });
+  if (verdict.skip) {
+    skip(`skipped:${verdict.skip}：${verdict.detail}`);
+    return;
+  }
+
+  // ③ `notify` never interrupts a turn, so it is delivered even while one runs.
+  if (subscription.action === "notify") {
+    await deliverNotification(effective);
+    return;
+  }
+
+  // ④ Busy: park the batch; the drain delivers it once when the turn ends.
+  if (await isSessionRunning(batch.sessionId)) {
+    parkBatch(effective);
+    return;
+  }
+
+  const { text, subscriptionId } = renderInjection(effective);
   const outcome = await wakeSession(batch.sessionId, text);
-  recordDelivery(
-    batch.sessionId,
-    subscription.id,
-    outcome.status === "delivered" ? "delivered" : "skipped",
-    outcome.status === "delivered" ? null : `${outcome.reason}（${subscriptionId}）`,
-  );
-  notifyListeners();
+  if (outcome.status === "busy") {
+    parkBatch(effective);
+    return;
+  }
+  if (outcome.status === "delivered") {
+    markDelivered(effective);
+    notifyListeners();
+    return;
+  }
+  skip(`${outcome.reason}（${subscriptionId}）`);
 }
 
 /**
@@ -626,6 +1094,9 @@ export function stopEventRuntime(): void {
   if (state.scanTimer) clearInterval(state.scanTimer);
   state.startTimer = null;
   state.scanTimer = null;
+  for (const sessionId of [...state.drainTimers.keys()]) stopDrain(sessionId);
+  state.pending.clear();
+  state.restored.clear();
   state.coalescer?.dispose();
   state.coalescer = null;
   for (const [key, channel] of state.channels) {
@@ -660,6 +1131,13 @@ export interface RuleRuntimeStatus {
   connection: SubscriptionChannelState | null;
   /** Why the rule cannot fire, decided here (connection/channel/action). */
   blockedReason: string | null;
+  /** The hourly quota is used up (`maxPerHour`): health `limited`. */
+  limited: boolean;
+  limitedReason: string | null;
+  /** Delivered in the rolling hour, for the tooltip. */
+  hourlyCount: number;
+  /** Batches waiting for this session's current turn to end. */
+  pendingCount: number;
 }
 
 export function ruleRuntimeStatus(sessionId: string, subscription: EventSubscription): RuleRuntimeStatus {
@@ -667,16 +1145,24 @@ export function ruleRuntimeStatus(sessionId: string, subscription: EventSubscrip
   const deliveries = loadSessionDeliveries(sessionId)[subscription.id];
   const key = channelKey(subscription.server, subscription.workspace);
   const channel = state.channels.get(key);
-  const today = dayKey(Date.now());
+  const now = Date.now();
+  const today = dayKey(now);
   const todayCount = deliveries && deliveries.day === today ? deliveries.dayCount : 0;
+  const hourlyCount = deliveries ? deliveries.delivered.filter((time) => time > now - 3_600_000).length : 0;
+  const session = loadSessionEventState(sessionId);
+  const pendingCount = state.pending.get(sessionId)?.size ?? 0;
 
   let blockedReason: string | null = null;
-  if (subscription.action !== "wake") blockedReason = "action: notify 属 M2";
+  // The storm fuse outranks everything: no rule of this session will fire again
+  // until a person clears it.
+  if (session.paused) blockedReason = session.paused.reason;
   else if (!channel) blockedReason = state.started ? "事件连接尚未建立（或该 server 不可用）" : "事件订阅尚未启动（启动后 2s 惰性连接）";
   else if (channel.state.status === "superseded") blockedReason = channel.state.lastError ?? "另一实例接管了事件连接";
   else if (channel.state.status === "auth_failed") blockedReason = channel.state.lastError ?? "凭据失效";
   else if (channel.state.status === "reconnecting") blockedReason = channel.state.lastError ? `重连中：${channel.state.lastError}` : "重连中";
   else if (channel.state.status === "unavailable") blockedReason = channel.state.lastError ?? "事件通道不可用";
+
+  const limited = quotaExhausted(deliveries?.delivered ?? [], now, subscription.maxPerHour);
 
   return {
     id: subscription.id,
@@ -693,13 +1179,16 @@ export function ruleRuntimeStatus(sessionId: string, subscription: EventSubscrip
         }
       : null,
     blockedReason,
+    limited,
+    limitedReason: limited ? `一小时内已投递 ${hourlyCount} 次（maxPerHour: ${subscription.maxPerHour}）` : null,
+    hourlyCount,
+    pendingCount,
   };
 }
 
 export function subscriptionHealthOf(rule: RuleRuntimeStatus, sessionExists: boolean): SubscriptionHealth {
   if (!sessionExists) return "unavailable";
-  // Deliberately paused: the rule asked for a response M1 does not implement,
-  // or another app instance owns the channel.
+  // Paused by the storm fuse, or another app instance owns the channel.
   if (rule.connection?.status === "superseded") return "paused";
   switch (rule.connection?.status) {
     case "auth_failed":
@@ -711,6 +1200,7 @@ export function subscriptionHealthOf(rule: RuleRuntimeStatus, sessionExists: boo
       break;
   }
   if (rule.blockedReason) return "paused";
+  if (rule.limited) return "limited";
   return "active";
 }
 
@@ -740,19 +1230,25 @@ export function sessionSubscriptionHealth(sessionId: string, subscriptions: Even
     } else if (ruleHealth === "unavailable" && health !== "paused") {
       health = "unavailable";
       reason ??= rule.blockedReason;
+    } else if (ruleHealth === "limited" && health === "active") {
+      health = "limited";
+      reason ??= rule.limitedReason;
     }
   }
   return { health, reason };
 }
 
 /**
- * The two fields `/api/agent/running` adds (SSR-000097【会话列表标记】).
+ * The two fields `/api/agent/running` adds (SSR-000097【会话列表标记】), plus the
+ * unread notifications of `action: notify` rules — the sidebar turns an increase
+ * into the same dot a completed background run gets.
  * Read from the runtime's last scan; never queries the network.
  */
 export function getSubscriptionRuntimeSnapshot(): {
   subscribedSessionIds: string[];
   subscriptionHealth: Record<string, SubscriptionHealth>;
   reasons: Record<string, string | null>;
+  notifications: Record<string, { unread: number; lastAt: number; text: string }>;
 } {
   const state = runtime();
   const bySession = new Map<string, EventSubscription[]>();
@@ -769,7 +1265,48 @@ export function getSubscriptionRuntimeSnapshot(): {
     subscriptionHealth[sessionId] = verdict.health;
     reasons[sessionId] = verdict.reason;
   }
-  return { subscribedSessionIds, subscriptionHealth, reasons };
+  const notifications: Record<string, { unread: number; lastAt: number; text: string }> = {};
+  for (const [sessionId, session] of state.sessionStates) {
+    if (!session.notify || session.notify.unread <= 0) continue;
+    notifications[sessionId] = {
+      unread: session.notify.unread,
+      lastAt: session.notify.lastAt,
+      text: session.notify.lastText,
+    };
+  }
+  return { subscribedSessionIds, subscriptionHealth, reasons, notifications };
+}
+
+/**
+ * The unread notifications of one session, cleared when a person opens it.
+ * Called from the session route (opening the conversation is "I have seen it"),
+ * never from the event runtime itself.
+ */
+export function markEventsRead(sessionId: string): void {
+  const session = loadSessionEventState(sessionId);
+  if (!session.notify || session.notify.unread === 0) return;
+  session.notify = { ...session.notify, unread: 0 };
+  writeSessionState(sessionId);
+  notifyListeners();
+}
+
+/** Per-session event facts for the status route (unread, pending, paused). */
+export function sessionEventFacts(sessionId: string): {
+  unread: number;
+  lastNotifyAt: number | null;
+  lastNotifyText: string | null;
+  pending: number;
+  pausedReason: string | null;
+} {
+  const state = runtime();
+  const session = loadSessionEventState(sessionId);
+  return {
+    unread: session.notify?.unread ?? 0,
+    lastNotifyAt: session.notify?.lastAt ?? null,
+    lastNotifyText: session.notify?.lastText ?? null,
+    pending: state.pending.get(sessionId)?.size ?? 0,
+    pausedReason: session.paused?.reason ?? null,
+  };
 }
 
 /** Where the runtime is, for the status panel's "why is nothing happening". */
@@ -778,6 +1315,7 @@ export function getEventRuntimeStatus(): {
   lastScanAt: number | null;
   lastScanError: string | null;
   channels: { key: string; server: string; workspace: string; state: SubscriptionChannelState }[];
+  pending: { sessionId: string; batches: number }[];
 } {
   const state = runtime();
   return {
@@ -795,6 +1333,7 @@ export function getEventRuntimeStatus(): {
         gapAt: channel.state.gapAt,
       },
     })),
+    pending: [...state.pending.entries()].map(([sessionId, parked]) => ({ sessionId, batches: parked.size })),
   };
 }
 

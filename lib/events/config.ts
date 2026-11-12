@@ -37,6 +37,42 @@ import { load as loadYaml } from "js-yaml";
 export const FILTER_KEYS = ["events", "entityTypes", "operator", "linkTypes", "custom"] as const;
 
 /**
+ * Keys one `subscriptions:` item may contain — a closed set.
+ *
+ * There is deliberately no "ignore what we do not know" branch: a misspelt key
+ * (`selfQuiet: 15`, `coalesce_sec: 5`, `max_per_hour: 5`) used to be read as
+ * "absent", so the rule validated, the field vanished, and the guard a person
+ * thought they had configured was air (the M1 failure mode this closes).
+ */
+export const SUBSCRIPTION_KEYS = [
+  "name",
+  "server",
+  "workspace",
+  "action",
+  "filter",
+  "match",
+  "inject",
+  "coalesceSec",
+  "maxPerHour",
+  "recheck",
+  "selfQuietSec",
+  "loopWindowSec",
+  "loopMaxHits",
+] as const;
+
+/** Keys one `sessions:` item may contain. `storm*` belongs to the session: the fuse pauses every rule of it. */
+export const SESSION_KEYS = [
+  "sessionId",
+  "title",
+  "subscriptions",
+  "stormWindowSec",
+  "stormMaxDeliveries",
+] as const;
+
+/** Keys the document root may contain. */
+export const ROOT_KEYS = ["version", "sessions"] as const;
+
+/**
  * Keys `match:` may contain — the normalized descriptor, never a key.
  *
  * `filter` cannot carry a state (the server silently ignores it, SSR-000097
@@ -95,9 +131,20 @@ export interface EventSubscription {
   filter: SubscriptionFilter;
   match: SubscriptionMatch;
   coalesceSec: number;
+  /** Delivered wake-ups allowed in a rolling hour; the next one is `skipped:limited`. */
   maxPerHour: number;
-  /** Whether M2's re-read-before-deliver is asked for; M1 stores it, never acts on it. */
+  /** Re-read each aggregate before delivering; a hit that no longer matches is `skipped:stale`. */
   recheck: boolean;
+  /** Quiet period after a delivery of this rule, in seconds (`0` disables). */
+  selfQuietSec: number;
+  /** Rolling window of the per-aggregate loop fuse, in seconds. */
+  loopWindowSec: number;
+  /** Deliveries of one aggregate allowed inside `loopWindowSec`; the next one is `skipped:loop`. */
+  loopMaxHits: number;
+  /** Session-wide storm fuse window (inherited from the `sessions:` item). */
+  stormWindowSec: number;
+  /** Session-wide deliveries inside the window that pause every rule of the session. */
+  stormMaxDeliveries: number;
   /** The template, or null when the rule uses the built-in one. */
   inject: string | null;
 }
@@ -114,6 +161,8 @@ export interface SessionSubscriptions {
   title: string | null;
   error: string | null;
   subscriptions: SubscriptionEntry[];
+  stormWindowSec: number;
+  stormMaxDeliveries: number;
 }
 
 export interface EventsConfig {
@@ -131,8 +180,13 @@ export const EVENTS_CONFIG_RELATIVE_PATHS = [
   "events.yml",
 ] as const;
 
-const DEFAULT_COALESCE_SEC = 30;
-const DEFAULT_MAX_PER_HOUR = 20;
+export const DEFAULT_COALESCE_SEC = 30;
+export const DEFAULT_MAX_PER_HOUR = 20;
+export const DEFAULT_SELF_QUIET_SEC = 15;
+export const DEFAULT_LOOP_WINDOW_SEC = 300;
+export const DEFAULT_LOOP_MAX_HITS = 3;
+export const DEFAULT_STORM_WINDOW_SEC = 600;
+export const DEFAULT_STORM_MAX_DELIVERIES = 6;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -293,11 +347,40 @@ function positiveInt(raw: unknown, fallback: number, field: string, problems: st
   return parsed;
 }
 
+/** `0` is meaningful here: it switches the fuse off, which is said in the error text. */
+function nonNegativeInt(raw: unknown, fallback: number, field: string, problems: string[]): number {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const parsed = typeof raw === "string" ? Number(raw.trim()) : raw;
+  if (typeof parsed !== "number" || !Number.isInteger(parsed) || parsed < 0) {
+    problems.push(`${field} 必须是 ≥0 的整数（写的是 ${JSON.stringify(raw)}；0 表示关闭这道保险丝）`);
+    return fallback;
+  }
+  return parsed;
+}
+
+function readBoolean(raw: unknown, fallback: boolean, field: string, problems: string[]): boolean {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw !== "boolean") {
+    problems.push(`${field} 只能是 true 或 false（写的是 ${JSON.stringify(raw)}）`);
+    return fallback;
+  }
+  return raw;
+}
+
+/** Every unknown key is an error: silently dropping one hides a guard the author meant to configure. */
+function rejectUnknownKeys(raw: Record<string, unknown>, allowed: readonly string[], where: string, problems: string[]): void {
+  for (const key of Object.keys(raw)) {
+    if ((allowed as readonly string[]).includes(key)) continue;
+    problems.push(`${where}${key}：未知配置项（只接受 ${allowed.join(" / ")}）`);
+  }
+}
+
 /** One list item of `subscriptions:`; a broken rule never fails the others. */
 function parseSubscription(
   raw: unknown,
   index: number,
   sessionId: string,
+  storm: { stormWindowSec: number; stormMaxDeliveries: number },
 ): { entry: SubscriptionEntry; problems: string[] } {
   const ordinal = `#${index + 1}`;
   const problems: string[] = [];
@@ -310,6 +393,8 @@ function parseSubscription(
     problems.push(`订阅 ${label}：${message}`);
     return { entry: { label, error: message, subscription: null }, problems };
   };
+
+  rejectUnknownKeys(raw, SUBSCRIPTION_KEYS, "订阅级 ", problems);
 
   if (!name) return fail("缺少 name（它是注入首行的标识，必须写）");
   if (name.includes("#")) return fail("name 不能包含 #（id 由 sessionId#name 组成）");
@@ -347,12 +432,12 @@ function parseSubscription(
 
   const coalesceSec = positiveInt(raw.coalesceSec, DEFAULT_COALESCE_SEC, "coalesceSec", problems);
   const maxPerHour = positiveInt(raw.maxPerHour, DEFAULT_MAX_PER_HOUR, "maxPerHour", problems);
-
-  let recheck = false;
-  if (raw.recheck !== undefined && raw.recheck !== null) {
-    if (typeof raw.recheck !== "boolean") problems.push(`recheck 只能是 true 或 false（写的是 ${JSON.stringify(raw.recheck)}）`);
-    else recheck = raw.recheck;
-  }
+  const recheck = readBoolean(raw.recheck, false, "recheck", problems);
+  const selfQuietSec = nonNegativeInt(raw.selfQuietSec, DEFAULT_SELF_QUIET_SEC, "selfQuietSec", problems);
+  const loopWindowSec = positiveInt(raw.loopWindowSec, DEFAULT_LOOP_WINDOW_SEC, "loopWindowSec", problems);
+  // 1 would refuse every delivery of an aggregate after the first one, which is
+  // a quota, not a fuse; the hourly quota is `maxPerHour`.
+  const loopMaxHits = positiveInt(raw.loopMaxHits, DEFAULT_LOOP_MAX_HITS, "loopMaxHits", problems);
 
   if (problems.length > 0) return fail(problems.join("；"));
 
@@ -371,6 +456,11 @@ function parseSubscription(
         coalesceSec,
         maxPerHour,
         recheck,
+        selfQuietSec,
+        loopWindowSec,
+        loopMaxHits,
+        stormWindowSec: storm.stormWindowSec,
+        stormMaxDeliveries: storm.stormMaxDeliveries,
         inject,
       },
     },
@@ -381,25 +471,67 @@ function parseSubscription(
 function parseSession(raw: unknown, index: number): SessionSubscriptions {
   const ordinal = `#${index + 1}`;
   if (!isRecord(raw)) {
-    return { sessionId: `#${index + 1}`, title: null, error: `sessions 第 ${index + 1} 项不是对象`, subscriptions: [] };
+    return {
+      sessionId: `#${index + 1}`,
+      title: null,
+      error: `sessions 第 ${index + 1} 项不是对象`,
+      subscriptions: [],
+      stormWindowSec: DEFAULT_STORM_WINDOW_SEC,
+      stormMaxDeliveries: DEFAULT_STORM_MAX_DELIVERIES,
+    };
   }
   const sessionId = asText(raw.sessionId);
   const title = asText(raw.title) || null;
   if (!sessionId) {
-    return { sessionId: ordinal, title, error: `sessions 第 ${index + 1} 项缺少 sessionId`, subscriptions: [] };
+    return {
+      sessionId: ordinal,
+      title,
+      error: `sessions 第 ${index + 1} 项缺少 sessionId`,
+      subscriptions: [],
+      stormWindowSec: DEFAULT_STORM_WINDOW_SEC,
+      stormMaxDeliveries: DEFAULT_STORM_MAX_DELIVERIES,
+    };
   }
 
   const rawSubscriptions = raw.subscriptions;
   if (!Array.isArray(rawSubscriptions) || rawSubscriptions.length === 0) {
-    return { sessionId, title, error: "订阅为空：subscriptions 必须是非空数组", subscriptions: [] };
+    return {
+      sessionId,
+      title,
+      error: "订阅为空：subscriptions 必须是非空数组",
+      subscriptions: [],
+      stormWindowSec: DEFAULT_STORM_WINDOW_SEC,
+      stormMaxDeliveries: DEFAULT_STORM_MAX_DELIVERIES,
+    };
   }
 
   const problems: string[] = [];
+  // A problem in the `sessions:` item itself (an unknown key, a bad storm value)
+  // makes every rule of that session unusable: the alternative is a rule that
+  // looks configured while the setting it names was read as absent.
+  const sessionProblems: string[] = [];
+  rejectUnknownKeys(raw, SESSION_KEYS, "会话级 ", sessionProblems);
+  const stormWindowSec = positiveInt(raw.stormWindowSec, DEFAULT_STORM_WINDOW_SEC, "stormWindowSec", sessionProblems);
+  const stormMaxDeliveries = positiveInt(
+    raw.stormMaxDeliveries,
+    DEFAULT_STORM_MAX_DELIVERIES,
+    "stormMaxDeliveries",
+    sessionProblems,
+  );
   const subscriptions = rawSubscriptions.map((item, position) => {
-    const parsed = parseSubscription(item, position, sessionId);
+    const parsed = parseSubscription(item, position, sessionId, { stormWindowSec, stormMaxDeliveries });
     problems.push(...parsed.problems);
     return parsed.entry;
   });
+
+  if (sessionProblems.length > 0) {
+    const message = sessionProblems.join("；");
+    problems.push(message);
+    for (const entry of subscriptions) {
+      entry.subscription = null;
+      entry.error = entry.error ? `${entry.error}；${message}` : message;
+    }
+  }
 
   // Two rules with one name share an id, so the injection's first line could not
   // say which rule woke the session.
@@ -416,7 +548,14 @@ function parseSession(raw: unknown, index: number): SessionSubscriptions {
     }
   }
 
-  return { sessionId, title, error: problems.length > 0 ? problems.join("；") : null, subscriptions };
+  return {
+    sessionId,
+    title,
+    error: problems.length > 0 ? problems.join("；") : null,
+    subscriptions,
+    stormWindowSec,
+    stormMaxDeliveries,
+  };
 }
 
 /** Reads and validates `<cwd>/.pi/events.yaml`. Never throws: problems come back as text. */
@@ -450,6 +589,16 @@ export function readEventsConfig(cwd: string): EventsConfig {
 
   if (parsed.version !== undefined && parsed.version !== null && parsed.version !== 1) {
     return { path: found.absolute, exists: true, error: `version 只支持 1（写的是 ${JSON.stringify(parsed.version)}）`, sessions: [] };
+  }
+
+  const unknownRoot = Object.keys(parsed).filter((key) => !(ROOT_KEYS as readonly string[]).includes(key));
+  if (unknownRoot.length > 0) {
+    return {
+      path: found.absolute,
+      exists: true,
+      error: `根节点只接受 ${ROOT_KEYS.join(" / ")}（多余的是 ${unknownRoot.join("、")}）`,
+      sessions: [],
+    };
   }
 
   const rawSessions = parsed.sessions;

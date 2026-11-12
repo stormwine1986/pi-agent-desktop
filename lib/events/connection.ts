@@ -84,6 +84,12 @@ export interface EventConnectionOptions {
   /** Coarse server-side filters: the union over every subscription on this channel. */
   types: string[];
   entityTypes: string[];
+  /** `filter.operator`, sent only when every rule on the channel agrees on one. */
+  operator?: string | null;
+  /** `filter.linkTypes` → the server's `link` parameter (union). */
+  linkTypes?: string[];
+  /** `filter.custom` → `custom=1`; the server hides `x.*` events unless asked. */
+  custom?: boolean;
   /** `<userId>@<server>` — the server's one-connection-per-user key. */
   cid: string;
   lastEventId?: string | null;
@@ -264,6 +270,12 @@ export class EventConnection {
     url.searchParams.set("cid", this.options.cid);
     if (this.options.types.length > 0) url.searchParams.set("types", this.options.types.join(","));
     if (this.options.entityTypes.length > 0) url.searchParams.set("entityTypes", this.options.entityTypes.join(","));
+    // The remaining server-side dimensions of `filter:`. They were parsed from
+    // the day M1 shipped but never sent — a switch that reads as configured and
+    // changes nothing (SSR-000097 M2 的「配置面收口」).
+    if (this.options.operator) url.searchParams.set("operator", this.options.operator);
+    if (this.options.linkTypes && this.options.linkTypes.length > 0) url.searchParams.set("link", this.options.linkTypes.join(","));
+    if (this.options.custom) url.searchParams.set("custom", "1");
     // `coalesce` stays at the server default; it only collapses queue overflow,
     // never a time window, so the client-side coalescing owns that job.
     return url.toString();

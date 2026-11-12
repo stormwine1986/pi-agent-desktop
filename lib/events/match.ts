@@ -100,7 +100,8 @@ export function normalizeEnvelope(envelope: unknown): EventDescriptor | null {
  * including null. A null value never matches a concrete list: "transitioned to
  * BLOCKED" must not fire on an event that has no state at all.
  */
-function matchesValue(predicate: string[] | null, value: string | null): boolean {
+/** Exported for the recheck layer, which compares one value against one predicate. */
+export function matchesValue(predicate: string[] | null, value: string | null): boolean {
   if (!predicate || predicate.length === 0) return true;
   if (predicate.includes("*")) return true;
   return value !== null && predicate.includes(value);

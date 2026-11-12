@@ -28,6 +28,7 @@ export async function GET(req: Request) {
         return {
           subscribedSessionIds: subscriptions.subscribedSessionIds,
           subscriptionHealth: subscriptions.subscriptionHealth,
+          subscriptionNotifications: subscriptions.notifications,
         };
       };
       let heartbeat: ReturnType<typeof setInterval> | null = null;

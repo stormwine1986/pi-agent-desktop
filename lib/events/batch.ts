@@ -33,6 +33,8 @@ export interface BatchedHit {
 export interface CoalescedBatch {
   sessionId: string;
   subscription: EventSubscription;
+  /** The project the rule was read from; the recheck resolves its `server` from here. */
+  projectCwd: string | null;
   openedAt: number;
   closedAt: number;
   /** One entry per aggregate, in first-seen order. */
@@ -93,7 +95,7 @@ export class Coalescer {
     return this.pending.size;
   }
 
-  add(sessionId: string, subscription: EventSubscription, descriptor: EventDescriptor): void {
+  add(sessionId: string, subscription: EventSubscription, descriptor: EventDescriptor, projectCwd: string | null = null): void {
     const key = subscription.id;
     const now = this.deps.now();
     let batch = this.pending.get(key);
@@ -102,6 +104,7 @@ export class Coalescer {
       batch = {
         sessionId,
         subscription,
+        projectCwd,
         openedAt: now,
         closedAt: now,
         hits: [],
@@ -143,6 +146,7 @@ export class Coalescer {
     this.onFlush({
       sessionId: batch.sessionId,
       subscription: batch.subscription,
+      projectCwd: batch.projectCwd,
       openedAt: batch.openedAt,
       closedAt: this.deps.now(),
       hits: batch.hits,
@@ -158,4 +162,47 @@ export class Coalescer {
     for (const batch of this.pending.values()) this.deps.clearTimeout(batch.timer);
     this.pending.clear();
   }
+}
+
+/**
+ * Two batches of one rule into one — the busy path (SSR-000097 AC-6).
+ *
+ * A session that is already running a turn must not be interrupted, so the hits
+ * of every window that closes meanwhile are parked. When the turn ends they are
+ * delivered **once**, carrying all of them; the rule's own `coalesceSec` is
+ * still respected, this just merges the windows that closed while it was busy.
+ *
+ * Same aggregate merging as `add()`: the newer event wins for `from`/`to`, and
+ * `hitCount` keeps saying how often the entity moved.
+ */
+export function mergeBatches(earlier: CoalescedBatch, later: CoalescedBatch): CoalescedBatch {
+  const hits: BatchedHit[] = earlier.hits.map((hit) => ({ ...hit }));
+  const byAggregate = new Map(hits.map((hit) => [hit.aggregateId, hit]));
+  for (const hit of later.hits) {
+    const existing = byAggregate.get(hit.aggregateId);
+    if (existing) {
+      existing.hitCount += hit.hitCount;
+      existing.from = hit.from;
+      existing.to = hit.to;
+      existing.eventType = hit.eventType;
+      existing.operator = hit.operator;
+      existing.timestamp = hit.timestamp;
+      if (hit.key) existing.key = hit.key;
+      continue;
+    }
+    const copy = { ...hit };
+    byAggregate.set(copy.aggregateId, copy);
+    hits.push(copy);
+  }
+  return {
+    sessionId: later.sessionId,
+    // The newest rule configuration wins: the file is the intent, and it may
+    // have been edited while the session was busy.
+    subscription: later.subscription,
+    projectCwd: later.projectCwd ?? earlier.projectCwd,
+    openedAt: Math.min(earlier.openedAt, later.openedAt),
+    closedAt: Math.max(earlier.closedAt, later.closedAt),
+    hits,
+    count: earlier.count + later.count,
+  };
 }
