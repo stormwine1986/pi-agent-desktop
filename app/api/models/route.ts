@@ -1,115 +1,14 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { agentDir as agentDirectory } from "@/lib/agent-dir";
-import {
-  loadModelsWithCache,
-  withModelRuntimeError,
-  withSafeModelLoadFailure,
-  type ModelsData,
-} from "@/lib/models-cache";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { peekModelsCache, withSafeModelLoadFailure, type ModelsData } from "@/lib/models-cache";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
-import { chatWorkspaceDir, isChatFolderPath, isChatWorkspacePath } from "@/lib/chat-workspace";
-import { readChatSettings, resolveChatStartDefaults } from "@/lib/chat-settings";
+import { chatWorkspaceDir } from "@/lib/chat-workspace";
+import { modelsCacheKey, modelsDataFromCatalogue } from "@/lib/models-catalogue";
+import { loadModelCatalogue } from "@/lib/models-worker";
 
 export const dynamic = "force-dynamic";
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
-
-async function loadModels(cwd: string): Promise<ModelsData> {
-  const nameMap = new Map<string, string>();
-  let modelList: { id: string; name: string; provider: string }[] = [];
-  let defaultModel: { provider: string; modelId: string } | null = null;
-  const thinkingLevels: Record<string, string[]> = {};
-  const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
-
-  // Imported at the call (TASK-000113): this route is on the first screen's
-  // request set, and a static symbol from either SDK package would load its
-  // whole graph there.
-  const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
-  const { getSupportedThinkingLevels } = await import("@earendil-works/pi-ai");
-  const agentDir = agentDirectory();
-  // Gate untrusted project extensions: enumerating models still imports and
-  // runs a repository's .pi/extensions factories, so honor project trust here
-  // too (see lib/project-trust.ts, #236).
-  const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-  const services = await createAgentSessionServices({
-    cwd,
-    agentDir,
-    ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
-  });
-  const modelError = services.modelRuntime.getError();
-  const settings: SettingsManager = services.settingsManager;
-  // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
-  // way the CLI does instead of comparing pattern strings literally (#307).
-  const scope = await resolveVisibleModels(
-    services.modelRuntime,
-    settings.getEnabledModels(),
-  );
-  const { visible, thinkingLevelPins, warnings } = scope;
-  modelList = visible.map((m) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-    input: m.input,
-  })).sort(compareModelEntries);
-  for (const m of visible) {
-    const key = `${m.provider}:${m.id}`;
-    nameMap.set(key, m.name);
-    thinkingLevels[key] = getSupportedThinkingLevels(m);
-    if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
-  }
-
-  const defaultProvider = settings.getDefaultProvider();
-  const defaultModelId = settings.getDefaultModel();
-  // A new chat starts on the model and reasoning level chosen in Settings › Chats, so the
-  // composer must show the same ones the server will start with.
-  const chatStart = isChatWorkspacePath(cwd)
-    ? resolveChatStartDefaults(readChatSettings(), visible)
-    : {};
-  const initial = selectInitialModelScope(scope, {
-    ...(chatStart.requestedModel ? { requestedModel: chatStart.requestedModel } : {}),
-    ...(chatStart.thinkingLevel ? { thinkingLevel: chatStart.thinkingLevel } : {}),
-    ...(defaultProvider && defaultModelId
-      ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
-      : {}),
-  });
-  if (initial.model) {
-    defaultModel = { provider: initial.model.provider, modelId: initial.model.id };
-  }
-  const defaultThinkingLevel = initial.thinkingLevel
-    ?? (initial.model
-      ? settings.getModelThinkingLevel(initial.model.provider, initial.model.id)
-      : undefined)
-    ?? settings.getDefaultThinkingLevel()
-    ?? null;
-
-  return withModelRuntimeError(
-    {
-      models: Object.fromEntries(nameMap),
-      modelList,
-      defaultModel,
-      defaultThinkingLevel,
-      savedDefaultThinkingLevel: settings.getDefaultThinkingLevel() ?? null,
-      thinkingLevels,
-      thinkingLevelMaps,
-      thinkingLevelPins,
-      ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
-    },
-    modelError,
-  );
-}
 
 const EMPTY_MODELS: ModelsData = {
   models: {},
@@ -121,6 +20,29 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevelMaps: {},
   thinkingLevelPins: {},
 };
+
+/**
+ * The catalogue is built in a worker thread (DEFECT-000101).
+ *
+ * This route answers the composer's model selector, and it is the first request
+ * after the window appears. Building the list needs the pi SDK, whose root
+ * import blocks the event loop for 2.6–2.9 s inside the packaged Node — the
+ * freeze every cold start reported (`event loop blocked for 2751–2999 ms`,
+ * ended +5.6–+6.0 s, while the user was already interacting). The work itself is
+ * a read: `lib/models-worker.ts` runs it off-thread and this route assembles the
+ * response from plain JSON, so nothing here may load the SDK — not statically
+ * and not with a dynamic `import()` (see `lib/first-screen-graph.test.mjs`).
+ */
+async function loadModels(cwd: string): Promise<ModelsData> {
+  const agentDir = agentDirectory();
+  // The SDK wants a `resolveProjectTrust()` closure; resolve the verdict here,
+  // where the trust file is already read on every prompt, and hand the worker a
+  // boolean (a closure cannot cross the thread boundary).
+  const trust = projectTrustReloadOptions(cwd, agentDir);
+  const trusted = trust ? await trust.resolveProjectTrust() : null;
+  const snapshot = await loadModelCatalogue({ cwd, agentDir, trusted });
+  return modelsDataFromCatalogue(snapshot, { cwd });
+}
 
 export async function GET(req: Request) {
   const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
@@ -140,11 +62,20 @@ export async function GET(req: Request) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
+  // Never await the SDK here (DEFECT-000101). A fresh or stale list answers now;
+  // with none at all this answers a placeholder and the warm runs in the
+  // background. `modelsPending` tells the client to fetch again in a moment, so
+  // an empty selector is always followed by the real list, not left standing.
+  //
+  // Every chat folder gets the same list (same chat policy, no project config),
+  // so they share the chat root's entry instead of a cold load for each chat opened.
+  const cacheKey = modelsCacheKey(cwd, chatWorkspaceDir);
   try {
-    // Every chat folder gets the same list (same chat policy, no project config), so they
-    // share the chat root's entry instead of a cold load for each chat opened.
-    const cacheKey = isChatFolderPath(cwd) ? chatWorkspaceDir() : cwd;
-    return Response.json(await loadModelsWithCache(cacheKey, () => loadModels(cwd)));
+    const peeked = peekModelsCache(cacheKey, () => loadModels(cwd));
+    if (!peeked.data) {
+      return Response.json({ ...EMPTY_MODELS, modelsPending: true });
+    }
+    return Response.json(peeked.pending ? { ...peeked.data, modelsPending: true } : peeked.data);
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }

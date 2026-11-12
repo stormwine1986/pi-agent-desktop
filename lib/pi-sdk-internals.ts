@@ -6,10 +6,11 @@ import type {
   McpServerEntry,
   McpTransportFactory,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { createRequire, findPackageJSON } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { resolvePackageImportEntryFrom } from "./package-entry";
 
 // MCP support the SDK ships but its package does not export (ADR 0006): the
 // connection class, the stdio transport, the `mcp.json` editor and OAuth
@@ -241,10 +242,6 @@ export type PiSdkInternalsResult = ({ ok: true } & PiSdkInternals) | { ok: false
 
 type LoadedModules = Record<SdkModuleName, Record<string, unknown>>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -297,48 +294,16 @@ export function requireSdkModuleSync<T>(relativePath: string): T {
   return nodeRequire(join(packageDir, relativePath));
 }
 
-// The conditions Node's resolver enables for an `import` by default.
-const IMPORT_CONDITIONS = new Set(["node", "import", "module-sync", "node-addons", "default"]);
-
-/**
- * The target conditional exports give an `import`: the first matching key in
- * object order whose own target resolves, as Node's resolver picks it. A
- * `null` target excludes the entry point.
- */
-function conditionalTarget(target: unknown): string | null | undefined {
-  if (typeof target === "string" || target === null) return target;
-  const candidates = Array.isArray(target)
-    ? target
-    : isRecord(target)
-      ? Object.entries(target).filter(([key]) => IMPORT_CONDITIONS.has(key)).map(([, value]) => value)
-      : [];
-  for (const candidate of candidates) {
-    const resolved = conditionalTarget(candidate);
-    if (resolved !== undefined) return resolved;
-  }
-  return undefined;
-}
-
-/** The ESM entry a package's `exports` (or `main`) gives for an `import` of its root. */
-function packageImportEntry(manifest: unknown): string | undefined {
-  if (!isRecord(manifest)) return undefined;
-  const { exports } = manifest;
-  if (exports === undefined) return typeof manifest.main === "string" ? manifest.main : "index.js";
-  return conditionalTarget(isRecord(exports) && "." in exports ? exports["."] : exports) ?? undefined;
-}
-
 /**
  * pi-mcp is a dependency of the SDK, not of pi-web, so it is resolved from the
  * SDK file that imports it: the copy runtime.js uses, whether npm nested it
  * under the SDK or hoisted it.
  */
 function resolveMcpClientEntry(packageDir: string): string {
-  const importer = pathToFileURL(join(packageDir, SDK_MODULES.mcpRuntime)).href;
-  const manifestPath = findPackageJSON(MCP_PACKAGE, importer);
-  if (!manifestPath) throw new Error(`cannot resolve ${MCP_PACKAGE}`);
-  const entry = packageImportEntry(JSON.parse(readFileSync(manifestPath, "utf8")));
-  if (!entry) throw new Error(`${manifestPath} declares no import entry`);
-  return join(manifestPath, "..", entry);
+  return resolvePackageImportEntryFrom(
+    MCP_PACKAGE,
+    pathToFileURL(join(packageDir, SDK_MODULES.mcpRuntime)).href,
+  );
 }
 
 function resolvedSdkPackageDir(cwd: string): string {

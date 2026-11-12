@@ -81,6 +81,22 @@ The two gaps that remain over 300 ms are the server process bootstrapping Next
 which no request can be blamed for and which the shell already waits on before
 it asks for `/api/desktop/identity`.
 
+## 之后的那一段：reveal 之后仍会冻结的请求（DEFECT-000101）
+
+上面的清单回答的是「这个请求可以静态加载 SDK 吗」。0.10.0 的六次冷启动暴露了第二种形状：
+请求落在**窗口出现之后**，用一次刻意的 `await import()` 付掉 SDK 的 2.6–2.9 s 模块加载，
+于是用户正在打字时主线程被按住（`event loop blocked for 2751–2999 ms`，ended +5.6~+6.0 s）。
+
+`GET /api/models` 就是这类：它答的是输入框的模型列表，实测在 reveal 后 +2.5 s 左右到达。
+现在它不再等 SDK —— 有缓存（含上一次运行留下的快照 `~/.pi/agent/pi-web-models-cache.json`）
+直接返回，没有就回一个占位体并带 `modelsPending: true`，真正的构建在 worker 线程里
+（`lib/models-worker.ts` + `lib/models-worker-source.ts`），完成后写缓存，客户端看到
+`modelsPending` 会再取一次。
+
+`lib/first-screen-graph.test.mjs` 的 `OFF_THREAD_ROUTES` 为这类「reveal 之后的请求」再压一条断言：
+该 route 的静态图里**不得出现任何运行时的 SDK specifier**（静态或 `import()` 都算），
+且必须通过 worker 模块取数——否则去掉功能也能"满足"第一条。
+
 ## Route files under the rule
 
 `lib/first-screen-graph.test.mjs` walks exactly these, and fails when this
