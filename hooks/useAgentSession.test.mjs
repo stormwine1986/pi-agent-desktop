@@ -794,12 +794,14 @@ test("keeps prompt anchor measurement outside the React update cycle", () => {
 });
 
 test("sizes the floating-composer spacer without a React render", () => {
-  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>\s*<div ref=\{composerOverlaySpacerRef\} aria-hidden="true" \/>/);
+  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>[\s\S]{0,400}?ref=\{composerOverlaySpacerRef\}\s*\n\s*aria-hidden="true"\s*\n\s*style=\{\{ height: "var\(--chat-composer-inset, 0px\)" \}\}/);
   // Upstream's state-driven spacer (bottomComposerHeight) made streaming
   // scroll-follow jitter; the overlay spacer is written from the observer.
   assert.doesNotMatch(chatWindowSource, /bottomComposer(?:Ref|Height|ScrollFrameRef)/);
-  assert.match(chatWindowSource, /spacer\.style\.height = `\$\{next\}px`/);
-  assert.match(chatWindowSource, /if \(atBottom\) container\.scrollTop = container\.scrollHeight/);
+  // DEFECT-000105: the height goes to the region's CSS variable, and the spacer
+  // reads it — a spacer React remounts comes back with its height instead of 0.
+  assert.match(chatWindowSource, /region\.style\.setProperty\("--chat-composer-inset", `\$\{next\}px`\)/);
+  assert.match(chatWindowSource, /if \(atBottom\) \{\s*\n\s*pinToTail\(\);/);
   // chat-composer-overlay only carries the fade above the composer; the positioning classes are what matter.
   assert.match(chatWindowSource, /className=\{isEmptyNew \? "relative shrink-0" : "chat-composer-overlay absolute inset-x-0 z-20"\}/);
 });

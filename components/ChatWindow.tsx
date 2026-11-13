@@ -101,6 +101,13 @@ interface Props {
 // the overlay keeps the name with zero width so the toast column spans full width.
 const CHAT_MINIMAP_WIDTH = 0;
 const CHAT_COLUMN_PADDING = 16;
+/**
+ * The least room the floating composer must leave under the last line
+ * (DEFECT-000105). The spacer is the composer's measured height, which is
+ * several times this in practice; the floor only matters when the measurement
+ * comes back collapsed, where "0" would put the last row under the border.
+ */
+const CHAT_COMPOSER_CLEARANCE = 8;
 
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
   if (message.role !== "assistant") return false;
@@ -968,37 +975,119 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
   // under its rounded box stays visible instead of being cut at a row edge.
   // The list ends with a spacer of the composer's live height so the last
   // lines can still scroll clear of it, and extension overlays stop above it
-  // through --chat-composer-inset. Both are written straight to the DOM from
-  // the ResizeObserver: upstream dropped an earlier state-driven spacer
+  // through --chat-composer-inset. The value is written straight to the DOM
+  // from the ResizeObserver: upstream dropped an earlier state-driven spacer
   // because the extra render made streaming scroll-follow jitter.
+  //
+  // DEFECT-000105 / TASK-000215 hardened three silent paths here:
+  // - the spacer *reads* `--chat-composer-inset` from CSS instead of carrying
+  //   its own inline height, so a remounted spacer (branch switch, session
+  //   reload) comes back with the right height instead of 0;
+  // - a collapsed measurement (0, e.g. a hidden ancestor at first paint) is
+  //   never written out, and the inset has a floor of `CHAT_COMPOSER_CLEARANCE`
+  //   so "量到 0" cannot become "贴到边框上";
+  // - a missing region falls back to `padding-bottom` on the scrollport, and
+  //   `atBottom` is re-checked on the next frame after the size change (the
+  //   spacer is written before the new scrollHeight has settled).
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const composerOverlaySpacerRef = useRef<HTMLDivElement | null>(null);
   const chatContentRegionRef = useRef<HTMLDivElement | null>(null);
+  const composerInsetFallbackRef = useRef(false);
   useLayoutEffect(() => {
     const composer = composerOverlayRef.current;
-    const spacer = composerOverlaySpacerRef.current;
     const region = chatContentRegionRef.current;
     const container = scrollContainerRef.current;
-    if (isEmptyNew || !composer || !spacer || !region || !container) return;
+    if (isEmptyNew || !composer || !container) return;
     let applied = -1;
-    const apply = () => {
-      const next = Math.ceil(composer.getBoundingClientRect().height);
-      if (next === applied) return;
-      // A viewport following the tail keeps following it as the composer
-      // grows or shrinks; one scrolled into history keeps its scrollTop, and
-      // the spacer sits below everything, so its content does not move.
-      const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
-      applied = next;
-      spacer.style.height = `${next}px`;
-      region.style.setProperty("--chat-composer-inset", `${next}px`);
-      if (atBottom) container.scrollTop = container.scrollHeight;
+    let frame: number | null = null;
+    // Whether the viewport was following the tail *before* the last change. A
+    // window that gets shorter does not scroll, so the row below would end up
+    // off-screen (and the last row under the composer) unless the tail is
+    // re-pinned for a reader who was already at the bottom.
+    let following = true;
+    const gapToBottom = () =>
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const pinToTail = () => {
+      container.scrollTop = container.scrollHeight;
+      following = true;
     };
+    const apply = () => {
+      // Never trust a collapsed box: `getBoundingClientRect()` is 0 for a
+      // subtree that is not laid out yet (and for `display: none`), and writing
+      // that out is exactly the "spacer 高度 0" state the defect report saw.
+      const measured = Math.ceil(composer.getBoundingClientRect().height);
+      if (!(measured > 0)) return;
+      const next = Math.max(CHAT_COMPOSER_CLEARANCE, measured);
+      if (next !== applied) {
+        // A viewport following the tail keeps following it as the composer
+        // grows or shrinks; one scrolled into history keeps its scrollTop, and
+        // the spacer sits below everything, so its content does not move.
+        const atBottom = gapToBottom() <= 2;
+        applied = next;
+        if (region) {
+          region.style.setProperty("--chat-composer-inset", `${next}px`);
+          if (composerInsetFallbackRef.current) {
+            container.style.removeProperty("padding-bottom");
+            composerInsetFallbackRef.current = false;
+          }
+        } else if (!composerInsetFallbackRef.current) {
+          // No region to inherit the variable: keep the guarantee on the
+          // scrollport itself, and say so once instead of failing silently.
+          composerInsetFallbackRef.current = true;
+          console.warn("[chat] composer inset: region ref missing, using scrollport padding");
+        }
+        if (!region) container.style.paddingBottom = `${next}px`;
+        if (atBottom) {
+          pinToTail();
+          // The spacer was written before the new scrollHeight settled; one
+          // frame later the tail can sit a few pixels short (table rows, code
+          // blocks, a wrapped last line). Re-assert only if it drifted.
+          if (typeof requestAnimationFrame === "function" && frame === null) {
+            frame = requestAnimationFrame(() => {
+              frame = null;
+              if (gapToBottom() > 2) pinToTail();
+            });
+          }
+        }
+      }
+    };
+    const onScroll = () => {
+      following = gapToBottom() <= 2;
+    };
+    // The scrollport itself resizes on a window change, a sidebar/panel toggle
+    // and when the scrollbar appears; the composer does not, so `apply` alone
+    // would not run.
+    const containerObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            if (following) pinToTail();
+            apply();
+          });
+    containerObserver?.observe(container);
+    container.addEventListener("scroll", onScroll, { passive: true });
     apply();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
     observer?.observe(composer);
+    // A spacer that React replaces carries no inline height; the CSS variable it
+    // reads is still on the region, so re-running `apply` is only needed for the
+    // fallback path and the scroll correction.
+    const mutations =
+      typeof MutationObserver === "undefined" || region
+        ? null
+        : new MutationObserver(() => apply());
+    mutations?.observe(container, { childList: true, subtree: true });
     return () => {
       observer?.disconnect();
-      region.style.removeProperty("--chat-composer-inset");
+      containerObserver?.disconnect();
+      container.removeEventListener("scroll", onScroll);
+      mutations?.disconnect();
+      if (frame !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+      region?.style.removeProperty("--chat-composer-inset");
+      if (composerInsetFallbackRef.current) {
+        container.style.removeProperty("padding-bottom");
+        composerInsetFallbackRef.current = false;
+      }
     };
   }, [isEmptyNew, scrollContainerRef]);
 
@@ -1614,7 +1703,15 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
             )}
 
             <div ref={promptAnchorSpacerRef} aria-hidden="true" />
-            <div ref={composerOverlaySpacerRef} aria-hidden="true" />
+            {/* Height comes from the region's --chat-composer-inset, not from
+                an inline style: a spacer React remounts carries no inline
+                height, and 0 is exactly the "last row under the composer"
+                state (DEFECT-000105). */}
+            <div
+              ref={composerOverlaySpacerRef}
+              aria-hidden="true"
+              style={{ height: "var(--chat-composer-inset, 0px)" }}
+            />
             </div>
           </div>
         </div>
