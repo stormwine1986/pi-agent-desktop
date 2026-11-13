@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { asRecord, asStrings } from "@/lib/entity-permissions";
 import { evaluateLinkKeys, KEY_PATTERN, MAX_LINK_KEYS, type LinkKeyCheck } from "@/lib/entity-links";
@@ -74,7 +74,7 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({ error: `一次最多校验 ${MAX_LINK_KEYS * 2} 个 key` }, { status: 400 });
   }
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
   const target: McpHttpTarget = resolved.target;
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
 import { normalizeMembers, type WorkspaceMember } from "@/lib/entity-members";
 
@@ -33,7 +33,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!server) return NextResponse.json({ error: "server is required" }, { status: 400 });
   if (!workspace) return NextResponse.json({ error: "workspace is required" }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
 
   const result = await callMcpTool(resolved.target, "list_workspace_members", { workspaceId: workspace });

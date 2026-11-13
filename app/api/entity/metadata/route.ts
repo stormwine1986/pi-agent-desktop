@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!server) return NextResponse.json({ error: "server is required" }, { status: 400 });
   if (!type) return NextResponse.json({ error: "type is required" }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
 
   const result = await callMcpTool(resolved.target, "get_metadata", { type });

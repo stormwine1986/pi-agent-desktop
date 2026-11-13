@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget } from "@/lib/mcp-call";
 import { acceptedKey } from "@/lib/idempotency";
 
@@ -47,7 +47,7 @@ export async function POST(request: Request): Promise<Response> {
   const fields = Object.fromEntries(Object.entries(raw).filter(([name]) => name !== "state"));
   if (!type) return NextResponse.json({ error: "缺少类型" }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
 
   const created = await callMcpTool(resolved.target, "create", {

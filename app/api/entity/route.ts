@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, readServerIdentity, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { globalMcpConfigPath, projectMcpConfigPath } from "@/lib/mcp-config-read";
 import { asRecord, asStrings, availableRoutesOf, linkOptionsOf, rolesIn, writableFieldsOf, type AvailableRoute, type LinkOption } from "@/lib/entity-permissions";
@@ -140,7 +140,7 @@ interface Failure {
 /** Every server named by the project's and the global `mcp.json`, project first. */
 function candidateServers(cwd: string): string[] {
   const names: string[] = [];
-  for (const file of [projectMcpConfigPath(cwd), globalMcpConfigPath(getAgentDir())]) {
+  for (const file of [projectMcpConfigPath(cwd), globalMcpConfigPath(agentDir())]) {
     try {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: Record<string, unknown> };
       for (const name of Object.keys(parsed.mcpServers ?? {})) {
@@ -400,7 +400,9 @@ async function pickTarget(
   workspace: string | null,
   requested: string | null,
 ): Promise<Target | Failure> {
-  const agentDir = getAgentDir();
+  // Resolved without loading the SDK: the first panel open pays this route's
+  // module graph, and `@earendil-works/*` is a 37 MB ESM graph (TASK-000208).
+  const configDir = agentDir();
   const names = candidateServers(cwd);
   if (names.length === 0) {
     return { error: "这个项目没有配置任何 MCP 服务器，无法确定这条实体在哪", status: 400, code: "channel" };
@@ -420,14 +422,14 @@ async function pickTarget(
    * open would cost one handshake per configured entry (AC-6).
    */
   const describeAll = async () => {
-    const attempts = await Promise.all(ordered.map((name) => describeServer(cwd, agentDir, name)));
+    const attempts = await Promise.all(ordered.map((name) => describeServer(cwd, configDir, name)));
     const usable = attempts.filter((attempt) => attempt.target !== undefined);
     return { attempts, usable, declarations: declarationsOf(usable) };
   };
 
   // The named entry, on its own: one handshake for the environment it declares.
   if (namedName) {
-    const named = await describeServer(cwd, agentDir, namedName);
+    const named = await describeServer(cwd, configDir, namedName);
     const declaresRequested = requested !== null && named.identity?.instanceId === requested;
     if (declaresRequested || (requested === null && named.identity)) {
       const decided = judgeIdentity({

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { resolveMcpTarget } from "@/lib/mcp-call";
 import {
   attachmentContentUrl,
@@ -48,7 +48,7 @@ export async function GET(request: Request): Promise<Response> {
   const view = parseAttachmentView(url.searchParams);
   if ("error" in view) return NextResponse.json({ error: view.error }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) {
     return NextResponse.json({ error: resolved.error, code: "channel", statusCode: 400, retriable: false }, { status: 400 });
   }

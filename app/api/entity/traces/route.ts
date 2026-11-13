@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { asRecord, canManageTraceOf, rolesIn } from "@/lib/entity-permissions";
 import { normalizeTraces, type TracesResponse } from "@/lib/entity-traces";
@@ -40,7 +40,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!server) return NextResponse.json({ error: "server is required" }, { status: 400 });
   if (!key) return NextResponse.json({ error: "key is required" }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
   const target: McpHttpTarget = resolved.target;
 

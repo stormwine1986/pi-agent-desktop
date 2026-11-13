@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { asRecord } from "@/lib/entity-permissions";
 import { KEY_PATTERN, MAX_LINK_KEYS } from "@/lib/entity-links";
@@ -84,7 +84,7 @@ export async function POST(request: Request): Promise<Response> {
   const bad = targetKeys.find((key) => !KEY_PATTERN.test(key));
   if (bad) return NextResponse.json({ error: `key 不合法：${bad}` }, { status: 400 });
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
   const target: McpHttpTarget = resolved.target;
 
@@ -125,7 +125,7 @@ export async function DELETE(request: Request): Promise<Response> {
     return NextResponse.json({ error: "key 不合法" }, { status: 400 });
   }
 
-  const resolved = resolveMcpTarget(getAgentDir(), cwd, server);
+  const resolved = resolveMcpTarget(agentDir(), cwd, server);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 400 });
   const target: McpHttpTarget = resolved.target;
 
