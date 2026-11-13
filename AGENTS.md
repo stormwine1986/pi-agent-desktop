@@ -42,6 +42,23 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
   test process; trust fixtures must not inherit the user's ancestor skills. Await
   session shutdown before deleting MCP working directories. Real PTY integration
   runs in a child process; fake-clock tests use a controlled PTY.
+- **Never kill processes by image name.** `taskkill /F /IM node.exe`, `killall node` and
+  `Get-Process node | Stop-Process` are forbidden here: the app the user is working in *is*
+  Electron + node, and the same image name covers every running agent session, the MCP
+  servers and the local API. One such command takes the whole workspace down — on
+  2026-11-13 15:41 a cleanup step between two A/B runs (`taskkill //F //IM node.exe`,
+  TASK-000207) killed the user's live session; the app restarted and every in-flight
+  session died mid-turn. To clean up what you started, record the PID at launch and kill
+  only that tree: `taskkill /PID <pid> /T /F`, after confirming the command line with
+  `Get-CimInstance Win32_Process | ? { $_.ProcessId -eq <pid> }`. If you did not record a
+  PID, resolve the listener (`netstat -ano | findstr :<port>`) and take that single PID.
+  Never sweep by image name, not even for "just node".
+- **A dev/test server must not steal the desktop's event channel.** Anything started with the
+  default `~/.pi/agent` shares the event lease (`events/*.owner.json`, "later process wins"),
+  so a `next dev` supersedes the app the user is reading the ledger in and its
+  `.pi/events.yaml` subscriptions silently go `paused` (events are consumed by the new
+  process and dropped). Set `PI_CODING_AGENT_DIR` to a temp dir before starting one, and
+  never delete `owner.json` to take the channel back — two connections would trade it.
 - **`next dev` rewrites `AGENTS.md`**: it appends a "This is NOT the Next.js you know" block
   to this file on every start. Preserve the project and user instructions here; review generated
   additions separately and never reset the entire file to discard development output.
