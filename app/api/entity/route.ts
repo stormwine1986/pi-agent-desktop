@@ -17,6 +17,13 @@ import {
 } from "@/lib/entity-identity";
 import { sameMcpServer } from "@/lib/mcp-server-name";
 import { acceptedKey } from "@/lib/idempotency";
+import {
+  attachmentCategoriesView,
+  normalizeAttachments,
+  parseAttachmentView,
+  type AttachmentCategoryView,
+  type EntityAttachment,
+} from "@/lib/entity-attachments";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +75,16 @@ export interface EntityResponse {
    * attributed afterwards instead of guessed at.
    */
   identity: EntityIdentity;
+  /**
+   * Attachment metadata for this view, already filtered by the base's read
+   * predicate (`SSR-000126` ①③). Content never travels through a tool call
+   * (`AR-000008` ②) — the panel downloads from the REST channel.
+   */
+  attachments: EntityAttachment[];
+  /** Declared categories in declaration order, with the write verdict per category. */
+  attachmentCategories: AttachmentCategoryView[];
+  /** The view this read answered at; both null means the current revision. */
+  view: { revision: number | null; asOf: string | null };
 }
 
 function text(value: unknown): string {
@@ -336,7 +353,10 @@ async function openOn(
   if (!attempt.target) return { error: attempt.handshakeError ?? "这个 server 没有可用的地址", status: 502, code: "channel" };
   let loaded = entity;
   if (!loaded) {
-    const found = await callMcpTool(attempt.target, "get", { id: key, includeAttachments: false });
+    // Metadata only, and already filtered by this reader's read permission: the
+    // panel renders what this answer holds, so a category it may not read never
+    // reaches the client (SSR-000126 ③).
+    const found = await callMcpTool(attempt.target, "get", { id: key, includeAttachments: true });
     if (!found.ok) return { error: found.error, status: 502, code: "entity" };
     loaded = unwrapEntity(found.value) ?? undefined;
     if (!loaded) return { error: "服务器没有返回这条实体", status: 502, code: "entity" };
@@ -479,7 +499,7 @@ async function pickTarget(
 
   // 4. No entry of this project answers, or none declares an identity: probe.
   const probed = await Promise.all(usable.map(async (attempt): Promise<Attempt> => {
-    const found = await callMcpTool(attempt.target!, "get", { id: key, includeAttachments: false });
+    const found = await callMcpTool(attempt.target!, "get", { id: key, includeAttachments: true });
     const entity = found.ok ? unwrapEntity(found.value) : null;
     return entity
       ? { ...attempt, entity }
@@ -566,13 +586,27 @@ async function resolveTarget(search: URLSearchParams): Promise<Target | Failure>
  * identity to trust — so it is refused here rather than displayed as if it were
  * the environment the link asked for.
  */
-async function loadEntity(target: Target): Promise<{ payload: EntityResponse } | Failure> {
+async function loadEntity(
+  target: Target,
+  view: { revision: number | null; asOf: string | null } = { revision: null, asOf: null },
+): Promise<{ payload: EntityResponse } | Failure> {
   const { server, workspace, key } = target;
+  // A historic view is a different read, so the snapshot `resolveTarget` took
+  // (which is the current revision) must not stand in for it.
+  const historic = view.revision !== null || view.asOf !== null;
   // `get` rejects a `workspaceId` (it answers nothing), so it is not passed; the
   // entity reports its own.
-  let entity = target.entity;
+  let entity = historic ? undefined : target.entity;
   if (!entity) {
-    const entityResult = await callMcpTool(target.target, "get", { id: key, includeAttachments: false });
+    const entityResult = await callMcpTool(target.target, "get", {
+      id: key,
+      // One read carries the entity, its attachments and (with a view) the
+      // attachments as they stood then — no second request on panel open
+      // (SSR-000126 ⑦).
+      includeAttachments: true,
+      ...(view.revision !== null ? { revision: view.revision } : {}),
+      ...(view.asOf ? { asOf: view.asOf } : {}),
+    });
     if (!entityResult.ok) return { error: entityResult.error, code: "entity", status: 502 };
     entity = unwrapEntity(entityResult.value) ?? undefined;
     if (!entity) return { error: "服务器没有返回这条实体", code: "entity", status: 502 };
@@ -605,6 +639,8 @@ async function loadEntity(target: Target): Promise<{ payload: EntityResponse } |
   const hiddenFields = asStrings(entity.hiddenFields);
   const state = text(entity.state) || text(fields.state);
   const roles = meResult.ok ? rolesIn(meResult.value, scope) : [];
+  const writableFields = writableFieldsOf(metadata, state, roles);
+  const attachments = normalizeAttachments(entity.attachments);
 
   // The panel and the log both read this: which id was compared with what, and
   // which verdict followed (ENV-RESOLVE 5). Never extend the claim beyond what
@@ -638,10 +674,23 @@ async function loadEntity(target: Target): Promise<{ payload: EntityResponse } |
     properties: Array.isArray(metadata.fields) ? metadata.fields : [],
     lifecycle: metadata.lifecycle ?? null,
     roles,
-    writableFields: writableFieldsOf(metadata, state, roles),
+    writableFields,
     routes: availableRoutesOf(metadata, state, roles),
     linkOptions: linkOptionsOf(metadata, state, roles),
     identity,
+    // The base filtered these by the same read predicate REST uses, so the list
+    // and the download cannot disagree about what this reader may see
+    // (SSR-000126 ③). Grouping and the "当前状态只读" verdict are the panel's
+    // own — the model declares the policy, the panel only states it.
+    attachments,
+    attachmentCategories: attachmentCategoriesView({
+      metadata,
+      state,
+      roles,
+      entityWritable: writableFields.length > 0,
+      present: attachments.map((attachment) => attachment.category),
+    }),
+    view: { revision: view.revision, asOf: view.asOf },
   };
   return { payload };
 }
@@ -659,12 +708,17 @@ function failureBody(failure: Failure): Record<string, unknown> {
 
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  // A view is part of the read, not a post-filter: the base answers the
+  // attachments as they stood at that revision / time (`SSR-000126` ⑤).
+  const view = parseAttachmentView(url.searchParams);
+  if ("error" in view) return NextResponse.json({ error: view.error }, { status: 400 });
+
   const resolved = await resolveTarget(url.searchParams);
   if (!("target" in resolved)) {
     return NextResponse.json(failureBody(resolved), { status: resolved.status });
   }
 
-  const loaded = await loadEntity(resolved);
+  const loaded = await loadEntity(resolved, view);
   if (!("payload" in loaded)) return NextResponse.json(failureBody(loaded), { status: loaded.status });
   return NextResponse.json(loaded.payload);
 }
@@ -679,6 +733,14 @@ export async function GET(request: Request): Promise<Response> {
  */
 export async function POST(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  // A historic view is read-only: writing from one would carry an old revision
+  // into the base's CAS and a state that may no longer exist.
+  const view = parseAttachmentView(url.searchParams);
+  if ("error" in view) return NextResponse.json({ error: view.error }, { status: 400 });
+  if (view.revision !== null || view.asOf !== null) {
+    return NextResponse.json({ error: "历史视图是只读的，先回到当前版本再修改" }, { status: 400 });
+  }
+
   const resolved = await resolveTarget(url.searchParams);
   if (!("target" in resolved)) {
     return NextResponse.json(failureBody(resolved), { status: resolved.status });

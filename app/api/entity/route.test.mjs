@@ -27,6 +27,10 @@ let entities = new Map();
 let serverInfos = new Map();
 /** Every tool call the handler made, in order: `${url} ${tool}`. */
 let calls = [];
+/** Every `get` argument set, in order — the panel's read carries the view. */
+let getArguments = [];
+/** Overrides the `about_me` answer, so a test can hold real roles. */
+let meFixture = null;
 /** Every handshake the handler made, in order: url. */
 let handshakes = [];
 const originalFetch = globalThis.fetch;
@@ -67,8 +71,19 @@ function stubMcp() {
 
     if (tool === "get") {
       const byKey = entities.get(url) ?? new Map();
-      const entity = byKey.get(body.params.arguments?.id);
+      const args = body.params.arguments ?? {};
+      getArguments.push(args);
+      let entity = byKey.get(args.id);
       if (!entity) return rpcResponse(id, { isError: true, content: [{ type: "text", text: "NOT_FOUND" }] });
+      // A historic view is answered by the base, not filtered here: `history`
+      // holds the attachment metadata each revision had.
+      if (typeof args.revision === "number" && entity.history?.[args.revision]) {
+        entity = {
+          ...entity,
+          revision: args.revision,
+          attachments: entity.history[args.revision],
+        };
+      }
       return rpcResponse(id, { structuredContent: entity });
     }
     if (tool === "get_metadata") {
@@ -82,6 +97,26 @@ function stubMcp() {
             routes: [
               { from: "DRAFT", to: "DEFINED", name: "定稿" },
               { from: "DEFINED", to: "IN_PROGRESS", name: "开始" },
+            ],
+          },
+          // Attachment categories as a type declares them (`SSR-000101`): one
+          // public-read category, one role-gated and frozen once DEFINED.
+          attachments: {
+            permissions: { read: [], write: { DRAFT: ["RD"] } },
+            categories: [
+              {
+                key: "note",
+                label: "备注附件",
+                multiple: true,
+                contentTypes: ["application/pdf"],
+                maxSizeMb: 20,
+              },
+              {
+                key: "solution",
+                label: "解决方案附件",
+                multiple: false,
+                permissions: { read: ["RD"], write: { DRAFT: ["RD"], DEFINED: [] } },
+              },
             ],
           },
         },
@@ -121,7 +156,9 @@ function stubMcp() {
       return rpcResponse(id, { content: [{ type: "text", text: JSON.stringify(next, null, 2) }] });
     }
     if (tool === "about_me") {
-      return rpcResponse(id, { structuredContent: { userId: "evan", workspaceRoles: [] } });
+      return rpcResponse(id, {
+        structuredContent: meFixture ?? { userId: "evan", workspaceRoles: [] },
+      });
     }
     return rpcResponse(id, { isError: true, content: [{ type: "text", text: `no tool ${tool}` }] });
   };
@@ -204,6 +241,8 @@ test.beforeEach(() => {
   entities = new Map();
   serverInfos = new Map();
   calls = [];
+  getArguments = [];
+  meFixture = null;
   handshakes = [];
   stubMcp();
 });
@@ -965,4 +1004,153 @@ test("the pre-transition revision is a CAS conflict, which is what the panel ren
   // wasted work rather than data loss.
   assert.equal(entities.get(url).get("SSR-000033").fields.name, "示例");
   assert.equal(entities.get(url).get("SSR-000033").revision, 4);
+});
+
+// --- Attachments in the panel (SSR-000126 / ATTM-PANEL) ---------------------
+//
+// The panel reads attachments in the same request as the entity (`get` with
+// `includeAttachments: true`), so opening a panel costs no extra round trip and
+// the list comes back already filtered by the base's read predicate. Grouping
+// and the "当前状态只读" verdict are computed from the type definition; content
+// is never read here (`AR-000008` ②).
+
+/** An attachment as the base's `get` reports it. */
+function attachment(overrides) {
+  return {
+    id: "att_1",
+    category: "note",
+    fileName: "note.pdf",
+    fileSize: 95,
+    contentType: "application/pdf",
+    description: "",
+    sha256: "14fea7704c102aaa60754fb4da73ce9ee2002e67ca7892629e37408132830969",
+    sourceRevision: 2,
+    validFrom: "2026-11-13T06:53:18.541Z",
+    createdAt: "2026-11-13T06:53:18.541Z",
+    contentUrl: "/entity/attachments/att_1/content",
+    ...overrides,
+  };
+}
+
+test("an entity read carries its attachments, in one request", async (t) => {
+  const url = "http://att1.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", {
+    ...entity("SSR-000033", "ws_entity_base"),
+    attachments: [attachment({ id: "att_note", category: "note" }), attachment({ id: "att_sol", category: "solution" })],
+  }]]));
+
+  const { status, body } = await read(cwd, { server: "entity-base", key: "SSR-000033" });
+
+  assert.equal(status, 200);
+  // The metadata flag that was hard-wired to `false` everywhere: without it the
+  // base answers an empty list and the panel can only say "暂无附件".
+  assert.equal(getArguments.at(-1).includeAttachments, true);
+  assert.deepEqual(body.attachments.map((row) => row.category), ["note", "solution"]);
+  assert.equal(body.attachments[0].fileName, "note.pdf");
+  // Labels come from the model, so the panel never invents a taxonomy.
+  assert.deepEqual(body.attachmentCategories.map((category) => category.label), ["备注附件", "解决方案附件"]);
+  // One read per open: nothing else fetches the attachments.
+  assert.equal(calls.filter((call) => call === `${url} get`).length, 1);
+});
+
+test("a frozen category is stated as 当前状态只读 before any click", async (t) => {
+  const url = "http://att2.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  // This reader is an RD: allowed to add `solution` while the entity is DRAFT.
+  meFixture = { userId: "evan", workspaceRoles: [{ id: "ws_entity_base", roles: ["RD"] }] };
+  // `DEFINED` is where the model freezes `solution` (`write: { DEFINED: [] }`).
+  entities.set(url, new Map([["SSR-000033", {
+    ...entity("SSR-000033", "ws_entity_base"),
+    state: "DEFINED",
+    attachments: [attachment({ id: "att_sol", category: "solution" })],
+  }]]));
+
+  const { body } = await read(cwd, { server: "entity-base", key: "SSR-000033" });
+  const solution = body.attachmentCategories.find((category) => category.key === "solution");
+  assert.equal(solution.blockedBy, "state");
+
+  // The same category is writable where the model allows it.
+  entities.get(url).get("SSR-000033").state = "DRAFT";
+  const draft = await read(cwd, { server: "entity-base", key: "SSR-000033" });
+  assert.equal(draft.body.attachmentCategories.find((category) => category.key === "solution").blockedBy, null);
+});
+
+test("a category the model does not declare still renders, labelled from the model's default", async (t) => {
+  const url = "http://att3.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", {
+    ...entity("SSR-000033", "ws_entity_base"),
+    attachments: [attachment({ id: "att_legacy", category: "default" })],
+  }]]));
+
+  const { body } = await read(cwd, { server: "entity-base", key: "SSR-000033" });
+  const legacy = body.attachmentCategories.find((category) => category.key === "default");
+  assert.equal(legacy.declared, false);
+  assert.equal(legacy.label, "默认附件");
+});
+
+test("a historic view is read from the base at that revision, attachments included", async (t) => {
+  const url = "http://att4.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", {
+    ...entity("SSR-000033", "ws_entity_base"),
+    revision: 4,
+    attachments: [attachment({ id: "att_note" }), attachment({ id: "att_sol", category: "solution" })],
+    // What revision 3 held: the solution attachment did not exist yet.
+    history: { 3: [attachment({ id: "att_note" })] },
+  }]]));
+
+  const { status, body } = await read(cwd, { server: "entity-base", key: "SSR-000033", revision: "3" });
+
+  assert.equal(status, 200);
+  assert.equal(getArguments.at(-1).revision, 3);
+  assert.deepEqual(body.view, { revision: 3, asOf: null });
+  assert.equal(body.revision, 3);
+  assert.deepEqual(body.attachments.map((row) => row.id), ["att_note"]);
+});
+
+test("an as-of view is normalized and passed through", async (t) => {
+  const url = "http://att5.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", {
+    ...entity("SSR-000033", "ws_entity_base"),
+    attachments: [attachment({ id: "att_note" })],
+  }]]));
+
+  const { status, body } = await read(cwd, { server: "entity-base", key: "SSR-000033", asOf: "2026-11-12T04:16:30Z" });
+
+  assert.equal(status, 200);
+  assert.equal(getArguments.at(-1).asOf, "2026-11-12T04:16:30.000Z");
+  assert.deepEqual(body.view, { revision: null, asOf: "2026-11-12T04:16:30.000Z" });
+});
+
+test("an unusable view is refused rather than answered as the current revision", async (t) => {
+  const url = "http://att6.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const both = await read(cwd, { server: "entity-base", key: "SSR-000033", revision: "2", asOf: "2026-11-12" });
+  assert.equal(both.status, 400);
+
+  const bad = await read(cwd, { server: "entity-base", key: "SSR-000033", revision: "later" });
+  assert.equal(bad.status, 400);
+  // Nothing was read at all: a dropped view would show today's attachments
+  // under a history banner.
+  assert.equal(calls.some((call) => call === `${url} get`), false);
+});
+
+test("a historic view cannot be written through", async (t) => {
+  const url = "http://att7.example/mcp";
+  const cwd = await project(t, { "entity-base": url });
+  entities.set(url, new Map([["SSR-000033", entity("SSR-000033", "ws_entity_base")]]));
+
+  const { status, body } = await write(
+    cwd,
+    { server: "entity-base", key: "SSR-000033", revision: "1" },
+    { fields: { name: "历史视图里改" }, expectedRevision: 1, idempotencyKey: "historic-write-1" },
+  );
+  assert.equal(status, 400);
+  assert.match(body.error, /只读/);
+  assert.equal(calls.some((call) => call.endsWith(" update")), false);
 });
