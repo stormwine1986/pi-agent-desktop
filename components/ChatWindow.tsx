@@ -1011,6 +1011,24 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
       container.scrollTop = container.scrollHeight;
       following = true;
     };
+    /**
+     * Pin, then verify on the next couple of frames.
+     *
+     * Writing `scrollTop` happens before the layout that the new inset causes,
+     * and a narrower column can re-wrap a code block one frame later — measured
+     * on a 25-block code fixture: after shrinking 900×700 → 630×490 the tail sat
+     * 40 px short of the bottom even though it had been pinned. Two frames is
+     * where that reflow settles; it is bounded on purpose, so this cannot fight
+     * the streaming scroll-follow.
+     */
+    const settle = (remaining: number) => {
+      if (typeof requestAnimationFrame !== "function") return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (gapToBottom() > 2) pinToTail();
+        if (remaining > 1 && gapToBottom() > 2) settle(remaining - 1);
+      });
+    };
     const apply = () => {
       // Never trust a collapsed box: `getBoundingClientRect()` is 0 for a
       // subtree that is not laid out yet (and for `display: none`), and writing
@@ -1039,15 +1057,7 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
         if (!region) container.style.paddingBottom = `${next}px`;
         if (atBottom) {
           pinToTail();
-          // The spacer was written before the new scrollHeight settled; one
-          // frame later the tail can sit a few pixels short (table rows, code
-          // blocks, a wrapped last line). Re-assert only if it drifted.
-          if (typeof requestAnimationFrame === "function" && frame === null) {
-            frame = requestAnimationFrame(() => {
-              frame = null;
-              if (gapToBottom() > 2) pinToTail();
-            });
-          }
+          if (frame === null) settle(2);
         }
       }
     };
@@ -1061,10 +1071,25 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
       typeof ResizeObserver === "undefined"
         ? null
         : new ResizeObserver(() => {
-            if (following) pinToTail();
+            if (following) {
+              pinToTail();
+              if (frame === null) settle(2);
+            }
             apply();
           });
     containerObserver?.observe(container);
+    // A narrower column re-wraps its content (code blocks, tables) a frame or two
+    // after the resize; that growth is invisible to the container observer, which
+    // only sees the box. Watching the content is what keeps a following reader
+    // pinned through it. Only a reader who was already at the bottom moves.
+    const content = messageContentRef.current;
+    const contentObserver =
+      typeof ResizeObserver === "undefined" || !content
+        ? null
+        : new ResizeObserver(() => {
+            if (following && gapToBottom() > 2) pinToTail();
+          });
+    if (contentObserver && content) contentObserver.observe(content);
     container.addEventListener("scroll", onScroll, { passive: true });
     apply();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
@@ -1080,6 +1105,7 @@ export function ChatWindow({ session, workspaceKind, searchTarget, onSearchTarge
     return () => {
       observer?.disconnect();
       containerObserver?.disconnect();
+      contentObserver?.disconnect();
       container.removeEventListener("scroll", onScroll);
       mutations?.disconnect();
       if (frame !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);

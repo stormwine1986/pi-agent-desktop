@@ -49,7 +49,11 @@ test("a missing region falls back to scrollport padding instead of returning sil
 test("a shorter window re-pins the tail only for a reader who was at the bottom", () => {
   assert.match(effect, /let following = true;/);
   assert.match(effect, /const onScroll = \(\) => \{\s*\n\s*following = gapToBottom\(\) <= 2;/);
-  assert.match(effect, /new ResizeObserver\(\(\) => \{\s*\n\s*if \(following\) pinToTail\(\);/);
+  assert.match(effect, /new ResizeObserver\(\(\) => \{\s*\n\s*if \(following\) \{\s*\n\s*pinToTail\(\);/);
+  // The content box grows when a narrower column re-wraps; a following reader
+  // is re-pinned through that too.
+  assert.match(effect, /contentObserver\.observe\(content\)/);
+  assert.match(effect, /if \(following && gapToBottom\(\) > 2\) pinToTail\(\);/);
   assert.match(effect, /container\.addEventListener\("scroll", onScroll, \{ passive: true \}\)/);
   assert.match(effect, /container\.removeEventListener\("scroll", onScroll\)/);
 });
