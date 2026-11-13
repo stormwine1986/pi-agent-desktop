@@ -59,6 +59,15 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
   `.pi/events.yaml` subscriptions silently go `paused` (events are consumed by the new
   process and dropped). Set `PI_CODING_AGENT_DIR` to a temp dir before starting one, and
   never delete `owner.json` to take the channel back — two connections would trade it.
+- **A throwaway payload instance must not run the view-watch pump.** The pump reads
+  `.pi/views.yaml` from its cwd and claims real ledger rows (`DEFINED → IN_PROGRESS`),
+  then either starts a session or — by design, there are no retries — parks the row in
+  the `manual` state. A "measurement only" copy of the app therefore steals work from
+  whoever is actually on shift: on 2026-11-13 18:19 an isolated payload pointed at
+  `D:/projects/entity-build-center` claimed `TASK-000215` and left it `BLOCKED` with no
+  work done. Point such an instance's cwd at a directory without `views.yaml`, or copy
+  the config with every `watch.enabled: false`; `PI_WEB_DISABLE_SCHEDULER=1` does not
+  cover the pump.
 - **`next dev` rewrites `AGENTS.md`**: it appends a "This is NOT the Next.js you know" block
   to this file on every start. Preserve the project and user instructions here; review generated
   additions separately and never reset the entire file to discard development output.
