@@ -123,6 +123,14 @@ export type WatchLogEvent =
       code?: string;
     }
   | { type: "limit"; limit: number; source: "default" | "env"; note: string | null }
+  /**
+   * The pump's first round ran — and what it waited for (DEFECT-000104).
+   *
+   * Without this line an operator cannot tell "the pump is late because it waits
+   * for a window" from "the pump is not running": the limit line above prints
+   * before the wait, so a silent gap of a few seconds is otherwise unexplained.
+   */
+  | { type: "start"; view: string; after: "first-screen" | "fallback"; waitedMs: number; via?: string }
   | { type: "error"; view: string; key?: string; message: string };
 
 /**

@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir } from "../../agent-dir";
+import { FIRST_SCREEN_QUIET_MS, whenFirstScreenServed } from "../../first-screen-gate";
 import { acquireLease, isPidAlive } from "../../scheduled-tasks/lease";
 import { readViewsConfig, type ViewDefinition, type ViewWatch } from "../config";
 import { describeGate, sliceDql } from "./core";
@@ -44,6 +45,17 @@ export interface WatchPumpOptions {
   intervalMs?: number;
   /** The running-session map to consult; tests occupy slots with their own. */
   registry?: WatchRegistry;
+  /**
+   * Whether the first round waits for the app's first screen (default) or runs
+   * as soon as the pump starts.
+   *
+   * `immediate` exists for suites that are about one round's outcome, not about
+   * the boot order. The deferral itself is covered by `first-screen.test.mjs`
+   * and the reason it exists is in `lib/first-screen-gate.ts` (DEFECT-000104).
+   */
+  firstScreen?: "wait" | "immediate";
+  /** How long `firstScreen: "wait"` may block on the marker before giving up. */
+  firstScreenTimeoutMs?: number;
 }
 
 interface ViewState {
@@ -142,12 +154,46 @@ export function startWatchPump(options: WatchPumpOptions = {}): () => void {
     }
   };
 
+  // DEFECT-000104 / TASK-000214: the first round must not compete with the
+  // window. `void tick()` here put the pump's catalogue scan (the same scan
+  // `/api/sessions` is about to do) and its first pi-SDK module load in front of
+  // the shell's identity probe and the first screen — measured on the packaged
+  // payload as `event loop blocked for 2763–3044 ms`, with `/api/sessions`
+  // answering inside or right after the block. A watched item that waits one
+  // more second is dispatched one second later; a first screen that freezes is
+  // what the user reports. So: the marker first, then a quiet gap, then the first
+  // round. `firstScreen: "immediate"` exists for the round-level suites.
+  const firstRound = (async () => {
+    if (options.firstScreen === "immediate") {
+      if (!stopped) await tick();
+      return;
+    }
+    const waited = await whenFirstScreenServed(options.firstScreenTimeoutMs);
+    if (stopped) return;
+    await new Promise<void>((resolve) => {
+      const gap = setTimeout(resolve, FIRST_SCREEN_QUIET_MS);
+      gap.unref?.();
+    });
+    if (stopped) return;
+    // The log line is the evidence for the next report: when the first round
+    // ran, and whether it waited for the window or for the fallback.
+    deps.log({
+      type: "start",
+      view: "-",
+      after: waited.reason === "served" ? "first-screen" : "fallback",
+      waitedMs: waited.waitedMs + FIRST_SCREEN_QUIET_MS,
+      ...(waited.source ? { via: waited.source } : {}),
+    });
+    await tick();
+  })();
+
   const timer = setInterval(() => {
-    void tick();
+    // Never let a minute tick overtake the first round: the first round is the
+    // one that must land after the first screen, and it may still be waiting.
+    void firstRound.then(() => (stopped ? undefined : tick()));
   }, intervalMs);
   // Do not hold the event loop open just for the pump.
   timer.unref?.();
-  void tick();
 
   return () => {
     stopped = true;

@@ -19,6 +19,7 @@ import {
   getRunningRpcSessionIds,
 } from "@/lib/session-registry";
 import { startServerPerf } from "@/lib/perf";
+import { markFirstScreenServed } from "@/lib/first-screen-gate";
 import { attachScheduledRelations } from "@/lib/scheduled-tasks/run-index";
 import { ensureChatWorkspace, pruneEmptyChatFolders } from "@/lib/chat-workspace";
 import { allowFileRoot } from "@/lib/file-access";
@@ -70,6 +71,13 @@ export async function GET(req: Request) {
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       chatWorkspaceCwd,
     };
+    // DEFECT-000104 / TASK-000214: this is the first data request of a cold
+    // start, and the desktop shell reveals its window once the first screen has
+    // it. Background loops (the watch pump) wait for this marker before their
+    // first round, so their module loads cannot freeze the window. Marking here
+    // is deliberate: `payload` is built, so everything the user waits for from
+    // this request has already been paid.
+    markFirstScreenServed();
     return perf?.attach(jsonResponse(
       req,
       payload,

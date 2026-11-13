@@ -97,6 +97,22 @@ it asks for `/api/desktop/identity`.
 该 route 的静态图里**不得出现任何运行时的 SDK specifier**（静态或 `import()` 都算），
 且必须通过 worker 模块取数——否则去掉功能也能"满足"第一条。
 
+### 第三种形状：没有请求的可，一个后台循环自己抢了主线程（DEFECT-000104）
+
+前两种都有一条请求可以量。watch 泵的第一轮不是请求：`startWatchPump()` 在 instrumentation
+里就跑，它既能扫全程目录、又能 `await import("../../rpc-manager")`，于是 `event loop blocked for
+2763–3044 ms` 落在 `/api/sessions` 答完的那一刻，前两个数字（TTFB、页首字节）都看不出异常，
+用户看到的是首屏卡住 / `Request timed out after 10000ms`。
+
+结论写在 `lib/views/watch/index.ts` 与 `lib/first-screen-gate.ts` 里：后台循环的**第一轮等首屏**
+（`GET /api/sessions` 写完 body 的信号 + 1.5 s，没人开窗口时 15 s 兜底），并且它路上任何一问
+都不该是 SDK 问题（派发门改成读 SDK-free 的 `lib/session-registry.ts`）。细节与原始日志行见
+[`docs/entity/view-watch.md`](../entity/view-watch.md) 的「首轮不得和首屏抢」。
+
+排查下一个同类时：`PI_FIRST_SCREEN_PROBE=1` 的 `[probe] stall … during -`（`during` 是 `-`）就是
+「没有请求在飞的那段」，也就是后台循环；一个测试用 `PI_WEB_DISABLE_WATCH=1` / `PI_WEB_DISABLE_EVENTS=1`
+逐个关就能归到哪条循环。
+
 ## Route files under the rule
 
 `lib/first-screen-graph.test.mjs` walks exactly these, and fails when this

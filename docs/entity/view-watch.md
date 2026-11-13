@@ -86,6 +86,22 @@ server boot → startWatchPump()
 
 `lib/views/watch/runtime.ts` 的那个 `session-reader` 是有意保留的：它只在 `startWatchSession()`（真派发一条实体）时才被 import，不在启动路径上。
 
+**首轮不得和首屏抢**（DEFECT-000104 / TASK-000214）。TASK-000172 只是把**项目来源**换成了 SDK-free 的模块；泵的第一轮当时仍然**立刻**跑，于是它做两件落在启动窗口里的事：一是再扫一遍会话目录（`/api/sessions` 正要扫同一份），二是走到派发门 `deps.projectBusy` 时 `await import("../../rpc-manager")`，把 pi SDK 的 37 MB 图拉进来。隔离打包产物上量到（`PI_FIRST_SCREEN_PROBE=1`，夹具看板 5 条 watch 视图）：
+
+```
+[probe] #4 GET /api/sessions start +2210ms inflight 1
+[probe] #4 GET /api/sessions done +2561ms dur 351ms status 200 inflight 0
+[probe] stall 2779ms ending +5387ms during -          ← 泵首轮的 SDK 模块加载
+[watch] {"type":"claimed",…}                          ← +5.9s 才开始派发
+```
+
+同一份 payload、同一夹具、只差 `PI_WEB_DISABLE_WATCH=1` 时，首屏之后**没有 >500 ms 的停顿**。所以现在的规则是两条：
+
+1. **第一轮等首屏**。`lib/first-screen-gate.ts` 是那个信号：`GET /api/sessions` 答完之后 `markFirstScreenServed()`，泵再等 `FIRST_SCREEN_QUIET_MS`（1.5 s，让开场会话、模型列表、字体这几个请求先走）才跑第一轮，并在 `[watch] {"type":"start",…}` 里记下等的是谁。**没人开窗口的部署（托盘启动、headless）不会被饿死**：`FIRST_SCREEN_FALLBACK_MS`（15 s）到点就开闸，并记 `after: "fallback"`。分钟级的 tick 永远排在首轮之后（`firstRound.then(...)`）。
+2. **派发门不碰 SDK**。`projectBusy` 改从 SDK-free 的 `lib/session-registry.ts` 取 `hasBusyRpcSessionForCwd`（`rpc-manager` 本来只是再导出它）。这条门每轮对每条视图都问，问的却是一个本地注册表问题——队列为空时根本没有理由加载 agent runtime。
+
+改完仍然会在**真派发**时付一次 SDK 模块加载（`startRpcSession` 不可避免），这是一个 `[watch] {"type":"start"}` 之后、窗口已经在屏上的代价；`startWatchSession()` 外面套了一条串行队列，所以那一次性成本由第一个会话付，后面的会话不再重复。两条规则由 `lib/views/watch/first-screen.test.mjs` 与 `lib/instrumentation-graph.test.mjs` 钉住。
+
 ## 2. 两个项目角色
 
 ```

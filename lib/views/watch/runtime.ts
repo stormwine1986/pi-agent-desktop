@@ -1,5 +1,10 @@
 import { agentDir as resolveAgentDir } from "../../agent-dir";
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../../mcp-call";
+// SDK-free on purpose: this module is reached from the pump's first round, and
+// `lib/rpc-manager` re-exports the same function after loading the whole agent
+// runtime (DEFECT-000104). `lib/session-registry` reads the wrappers rpc-manager
+// owns through a structural view, so the gate costs no module load at all.
+import { hasBusyRpcSessionForCwd } from "../../session-registry";
 import { classifyPromotionFailure } from "./core";
 import { describeWatchRunLimit } from "./limit";
 import type { WatchDeps, WatchResult, WatchRow, WatchSessionHandle, WatchTarget } from "./core";
@@ -141,7 +146,11 @@ export function createLiveDeps(): WatchDeps {
       // The app's own registry, not this pump's map: a resumed or continued human
       // session in the target project closes the gate the same way ours does.
       // Terminal processes never appear here — that is the agreed boundary.
-      const { hasBusyRpcSessionForCwd } = await import("../../rpc-manager");
+      //
+      // Read from the SDK-free registry, never from `rpc-manager`: the gate is
+      // asked on *every* view of *every* project before any dispatch, and pulling
+      // the agent runtime in here charged the first screen a 2.8–3.1 s event-loop
+      // block even when the queue was empty (DEFECT-000104 / TASK-000214).
       return hasBusyRpcSessionForCwd(runCwd);
     },
 
@@ -179,8 +188,43 @@ export function createLiveDeps(): WatchDeps {
   };
 }
 
+/**
+ * One session start at a time, process-wide.
+ *
+ * Creating an `AgentSession` is the most expensive thing this process does: the
+ * pi SDK's module graph, the model runtime, the extension list and the MCP host
+ * all come up on the main thread, and that cost may not be paid twice in
+ * parallel. The pump's own loop visits views one after another, so today's
+ * rounds already serialise — this is the guarantee rather than the observation:
+ * the cap (`PI_WEB_MAX_WATCH_RUNS`) allows several sessions to be alive at once,
+ * and any future caller that dispatches from two places must still find the
+ * shared module load already paid by the first start.
+ *
+ * `serialized` keeps the chain alive after a failure: a view whose session could
+ * not start must not block every later dispatch.
+ */
+let startQueue: Promise<unknown> = Promise.resolve();
+
+function serialized<T>(work: () => Promise<T>): Promise<T> {
+  const run = startQueue.then(work, work);
+  // Keep the chain alive after a failure; the caller still sees its own error.
+  startQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /** Starts a session in the executing project and resolves when its turn ends. */
 async function startWatchSession(
+  runCwd: string,
+  prompt: string,
+  title: string,
+): Promise<WatchResult<WatchSessionHandle>> {
+  return serialized(() => startWatchSessionNow(runCwd, prompt, title));
+}
+
+async function startWatchSessionNow(
   runCwd: string,
   prompt: string,
   title: string,
