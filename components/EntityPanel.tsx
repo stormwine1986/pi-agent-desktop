@@ -3,12 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppSelect } from "./AppSelect";
+import { EntityAttachmentUploads } from "./EntityAttachmentUploads";
 import { StaleDependencyNotice } from "./StaleDependencyNotice";
 
 import { staleDependencies } from "@/lib/entity-dependencies";
 import {
   attachmentGroups,
+  attachmentUploadEntries,
+  attachmentUploadFailure,
+  attachmentUploadPrecheck,
   formatAttachmentSize,
+  type AttachmentUploadEntry,
+  type AttachmentUploadStep,
   type AttachmentCategoryView,
   type EntityAttachment,
 } from "@/lib/entity-attachments";
@@ -100,8 +106,6 @@ interface EntityResponse {
   attachments: EntityAttachment[];
   /** Declared categories, with this reader's write verdict in the entity's state. */
   attachmentCategories: AttachmentCategoryView[];
-  /** The view this read answered at; both null means the current revision. */
-  view: { revision: number | null; asOf: string | null };
 }
 
 /** A transition the base allows from the current state. */
@@ -266,19 +270,25 @@ export function EntityPanel({ target, onOpenEntity }: {
   // One panel, two views of the same entity: its own fields, or its place in
   // the chain. Both are read-only until asked otherwise.
   const [tab, setTab] = useState<"attr" | "attach" | "relations">("attr");
-  /**
-   * The revision / point in time the panel is reading (`SSR-000126` ⑤). `null`
-   * is the current revision. The attachment list and every download follow this
-   * one view — listing an old version while saving today's bytes would be a lie
-   * with a banner on it.
-   */
-  const [view, setView] = useState<{ revision: number | null; asOf: string | null } | null>(null);
-  const [revisionInput, setRevisionInput] = useState("");
-  const [asOfInput, setAsOfInput] = useState("");
-  const [viewError, setViewError] = useState<string | null>(null);
+  // The panel always reads the current revision: the historic view was removed
+  // by `SSR-000126` ⑧ (the download route still honours `revision`/`asOf` for
+  // REST callers, but no control here sends them).
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  /**
+   * The upload in flight, and which half of the two-step channel it is on.
+   * One at a time: the second click is not a second attachment.
+   */
+  const [uploading, setUploading] = useState<{ category: string; step: AttachmentUploadStep } | null>(null);
+  /** A refused upload, stated with `code`/`statusCode`/`retriable` and the step. */
+  const [uploadFailure, setUploadFailure] = useState<{
+    step: "precheck" | AttachmentUploadStep;
+    error: string;
+    code: string;
+    statusCode: number;
+    retriable: boolean;
+  } | null>(null);
   // Linking by key: no search here — keys come from the conversation, get
   // judged first, and only what the base would accept goes on to be written.
   const [linkOpen, setLinkOpen] = useState(false);
@@ -303,12 +313,8 @@ export function EntityPanel({ target, onOpenEntity }: {
     // The environment the link asked for; the route refuses a mismatch instead
     // of opening whatever happens to answer (ENV-RESOLVE 3/4).
     if (target.instanceId) params.set("instanceId", target.instanceId);
-    // A historic view is part of the read: fields and attachments come from the
-    // same revision (`SSR-000126` ⑤).
-    if (view?.revision) params.set("revision", String(view.revision));
-    else if (view?.asOf) params.set("asOf", view.asOf);
     return params;
-  }, [target.cwd, target.server, target.workspace, target.instanceId, target.key, view]);
+  }, [target.cwd, target.server, target.workspace, target.instanceId, target.key]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`/api/entity?${query}`, { cache: "no-store", signal });
@@ -523,43 +529,149 @@ export function EntityPanel({ target, onOpenEntity }: {
   };
 
   /**
-   * Switches the panel to a historic view (`SSR-000126` ⑤).
+   * Uploads one file into one category, through the app's two proxies
+   * (`SSR-000126` ⑤ / AC-5, AC-6).
    *
-   * Reading is the whole point: the view is read-only, so an edit in progress is
-   * abandoned rather than saved against a revision the writer cannot see.
+   * Three rules the reader is owed, in this order:
+   * 1. **Nothing leaves before the declaration is checked**: the category's own
+   *    `contentTypes` / `maxSizeMb` are applied first, and a refusal is a
+   *    sentence, not a failed round trip (AC-4).
+   * 2. **Two steps, named**: the content goes to `/blob`, the binding to
+   *    `/bind`. A failure says which one failed, because "403" at the first is
+   *    "this identity may not store content" and at the second is "this
+   *    category is frozen / your role lacks it".
+   * 3. **The list is re-read, not patched**: the base answers with the new
+   *    revision, and the panel shows the base's own answer — a row assembled in
+   *    the browser could disagree with what is actually bound.
    */
-  const openRevisionView = () => {
-    const text = revisionInput.trim();
-    if (!/^\d+$/.test(text) || Number(text) <= 0) {
-      setViewError("修订号必须是正整数，例如 3");
+  const uploadAttachment = async (entry: AttachmentUploadEntry, file: File) => {
+    if (!data || uploading !== null) return;
+    const category = entry.category;
+
+    setAttachmentError(null);
+    setAttachmentNotice(null);
+    setUploadFailure(null);
+
+    const precheck = attachmentUploadPrecheck({
+      contentTypes: category.contentTypes,
+      maxSizeMb: category.maxSizeMb,
+      fileName: file.name,
+      contentType: file.type,
+      fileSize: file.size,
+    });
+    if (!precheck.ok) {
+      setUploadFailure({
+        step: "precheck",
+        error: precheck.error,
+        code: "client-precheck",
+        statusCode: 0,
+        retriable: false,
+      });
       return;
     }
-    setViewError(null);
-    setAttachmentError(null);
-    setAttachmentNotice(null);
-    setEditing(false);
-    setView({ revision: Number(text), asOf: null });
-  };
 
-  const openAsOfView = () => {
-    const text = asOfInput.trim();
-    const when = Date.parse(text);
-    if (Number.isNaN(when)) {
-      setViewError("时点格式不对，用 2026-11-12 14:30 这样的写法");
-      return;
+    const previousRevision = data.revision;
+    // The digest of what we are about to send: compared with the base's answer, it
+    // is the only proof that the bytes that arrived are the bytes on disk.
+    const localDigest = await sha256Of(file);
+    let step: AttachmentUploadStep = "content";
+    setUploading({ category: category.key, step });
+    try {
+      const blobParams = new URLSearchParams({
+        cwd: target.cwd,
+        server: data.server,
+        category: category.key,
+        fileName: file.name,
+      });
+      // `multipart/form-data`, not raw bytes: the base's blob channel accepts raw
+      // bodies only as `application/octet-stream` (which would store the file as
+      // an opaque blob and then fail the category's own `contentTypes` check at
+      // binding), while a multipart part carries the file's real media type and
+      // its name. The browser sets the boundary; this proxy forwards it as-is.
+      const form = new FormData();
+      form.append("file", file, file.name);
+      form.append("contentType", file.type || "application/octet-stream");
+      const blobResponse = await fetch(`/api/entity/attachment/blob?${blobParams}`, {
+        method: "POST",
+        headers: {
+          // A retry of the same content is the same submission, not a second blob.
+          "idempotency-key": keyFor(`upload:blob:${category.key}:${file.name}:${file.size}`),
+        },
+        body: form,
+      });
+      const blobBody = await blobResponse.json().catch(() => null) as Record<string, unknown> | null;
+      if (!blobResponse.ok) {
+        setUploadFailure(attachmentUploadFailure("content", blobResponse.status, blobBody));
+        return;
+      }
+      const blobId = typeof blobBody?.blobId === "string" ? blobBody.blobId : "";
+      const registeredSha = typeof blobBody?.sha256 === "string" ? blobBody.sha256.toLowerCase() : "";
+      if (!blobId) {
+        setUploadFailure({
+          step: "content",
+          error: "服务端没有返回 blobId，没有继续绑定。",
+          code: "channel",
+          statusCode: 502,
+          retriable: true,
+        });
+        return;
+      }
+      if (localDigest && registeredSha && localDigest !== registeredSha) {
+        setUploadFailure({
+          step: "content",
+          error: `传上去的内容与本地文件不一致（本地 ${localDigest.slice(0, 12)}…，登记 ${registeredSha.slice(0, 12)}…），已中止绑定。`,
+          code: "ATTACHMENT_CONTENT_INTEGRITY_FAILED",
+          statusCode: 502,
+          retriable: true,
+        });
+        return;
+      }
+
+      step = "bind";
+      setUploading({ category: category.key, step });
+      const bindParams = new URLSearchParams({ cwd: target.cwd, server: data.server, key: data.key });
+      const bindResponse = await fetch(`/api/entity/attachment/bind?${bindParams}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": keyFor(`upload:bind:${blobId}:${category.key}`),
+        },
+        body: JSON.stringify({ blobId, category: category.key, fileName: file.name }),
+      });
+      const bindBody = await bindResponse.json().catch(() => null) as
+        | (Record<string, unknown> & { entityRevision?: number; attachment?: { sha256?: string } })
+        | null;
+      if (!bindResponse.ok) {
+        setUploadFailure(attachmentUploadFailure("bind", bindResponse.status, bindBody));
+        return;
+      }
+      const boundSha = typeof bindBody?.attachment?.sha256 === "string"
+        ? bindBody.attachment.sha256.toLowerCase()
+        : registeredSha;
+
+      // Acknowledged: the key is spent, a later upload is a new submission.
+      submission.current = null;
+      // The base's answer is the truth about the list and the revision: re-read
+      // both instead of guessing (AC-5: the row appears, rN moves, 来源 r{N} with it).
+      const refreshed = await load();
+      setData(refreshed);
+      setDraft(draftOf(refreshed));
+      setAttachmentNotice(
+        `已上传 ${file.name}（${formatAttachmentSize(file.size)}，sha256 ${boundSha.slice(0, 12)}…`
+          + `${localDigest && boundSha === localDigest ? "，与本地一致" : ""}）到「${category.label}」；`
+          + `修订 r${previousRevision} → r${refreshed.revision}。`,
+      );
+    } catch (cause) {
+      setUploadFailure({
+        step,
+        error: cause instanceof Error ? cause.message : String(cause),
+        code: "channel",
+        statusCode: 502,
+        retriable: true,
+      });
+    } finally {
+      setUploading(null);
     }
-    setViewError(null);
-    setAttachmentError(null);
-    setAttachmentNotice(null);
-    setEditing(false);
-    setView({ revision: null, asOf: new Date(when).toISOString() });
-  };
-
-  const backToCurrent = () => {
-    setViewError(null);
-    setAttachmentError(null);
-    setAttachmentNotice(null);
-    setView(null);
   };
 
   /**
@@ -582,9 +694,6 @@ export function EntityPanel({ target, onOpenEntity }: {
         attachmentId: attachment.id,
         name: attachment.fileName,
       });
-      // The same view the list was read at: an old row must download old bytes.
-      if (view?.revision) params.set("revision", String(view.revision));
-      else if (view?.asOf) params.set("asOf", view.asOf);
 
       const response = await fetch(`/api/entity/attachment?${params}`, { cache: "no-store" });
       if (!response.ok) {
@@ -858,11 +967,13 @@ export function EntityPanel({ target, onOpenEntity }: {
   const unfilled = visible.filter((field) => data.fields[field.name] === undefined);
   const canEdit = data.writableFields.length > 0;
   const relationCount = (traces?.upstream.length ?? 0) + (traces?.downstream.length ?? 0);
-  // A historic view is read-only for the whole panel, not just the attachment
-  // list: saving through it would carry an old revision into the base's CAS.
-  const historyView = view !== null;
   const attachmentCount = (data.attachments ?? []).length;
   const attachmentViews = attachmentGroups(data.attachments ?? [], data.attachmentCategories ?? []);
+  /** The entries this reader may use, in the type's declaration order (AC-2/AC-3/AC-7). */
+  const uploadEntries = attachmentUploadEntries({
+    categories: data.attachmentCategories ?? [],
+    attachments: data.attachments ?? [],
+  });
   /** Numbers leave the form as numbers; a username list leaves as itself. */
   const coerce = (name: string, raw: FieldDraftValue): unknown => {
     if (Array.isArray(raw)) return userValues(raw);
@@ -887,7 +998,7 @@ export function EntityPanel({ target, onOpenEntity }: {
       >
         <strong style={{ fontSize: "var(--fs-body)", whiteSpace: "nowrap", flexShrink: 0 }}>{data.key}</strong>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6, flexShrink: 0 }}>
-          {!editing && canEdit && !historyView && (
+          {!editing && canEdit && (
             <button type="button" onClick={startEditing} style={buttonStyle} title={`编辑 ${data.key}`}>
               编辑
             </button>
@@ -1016,40 +1127,6 @@ export function EntityPanel({ target, onOpenEntity }: {
           the detail view, and only when there is one (AC-11). */}
       <StaleDependencyNotice items={stale} />
 
-      {/* One open panel, one view. The banner is global so an old revision is
-          never mistaken for the current one on the attributes tab either. */}
-      {historyView && (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            margin: "8px 10px 0",
-            padding: "6px 8px",
-            border: `1px solid ${line}`,
-            borderLeft: `3px solid ${accent}`,
-            borderRadius: 6,
-            background: surface,
-            fontSize: "var(--fs-micro)",
-            color: muted,
-          }}
-        >
-          <span>
-            历史视图：r{data.revision}
-            {view?.asOf ? `（${new Date(view.asOf).toLocaleString()} 的快照）` : ""}
-            ，只读；字段与附件都取当时那一版
-          </span>
-          <button
-            type="button"
-            onClick={backToCurrent}
-            style={{ marginLeft: "auto", ...buttonStyle, padding: "1px 7px", fontSize: "var(--fs-micro)" }}
-          >
-            回到当前
-          </button>
-        </div>
-      )}
-
       {/* Two views of one entity. The relations tab exists because "what is
           this connected to" is a question about the entity, not a separate
           page — and it keeps the fields from being buried under a list. */}
@@ -1156,7 +1233,7 @@ export function EntityPanel({ target, onOpenEntity }: {
 
       {/* Transitions live here, not in the conversation: a reader who is
           looking at the entity is the one who moves it (`FM-SUBMIT` ①). */}
-      {!editing && data.routes.length > 0 && !historyView && (
+      {!editing && data.routes.length > 0 && (
         <div
           style={{
             flexShrink: 0,
@@ -1301,77 +1378,56 @@ export function EntityPanel({ target, onOpenEntity }: {
         )}
         {unfilled.length > 0 && <div>{unfilled.length} 个字段未填写</div>}
         {hidden.size === 0 && unfilled.length === 0 && <div>字段已全部填写</div>}
-        {historyView && <div>历史视图只读，回到当前版本才能修改</div>}
-        {!historyView && !canEdit && <div>当前状态下你无权修改这条实体</div>}
+        {!canEdit && <div>当前状态下你无权修改这条实体</div>}
       </div>
       </>
       )}
       {tab === "attach" && (
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-          {/* The view control lives with the attachments because that is where
-              "当时那一版" changes what you see; the banner above says the whole
-              panel is on it. */}
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              gap: 6,
-              padding: "8px 10px 0",
-              flexShrink: 0,
-              fontSize: "var(--fs-micro)",
-              color: muted,
-            }}
-          >
-            <button
-              type="button"
-              onClick={backToCurrent}
-              disabled={!historyView}
-              title="显示当前版本的附件"
+          {/* Upload entries come from the type's own declaration, one per
+              category, in declaration order (`SSR-000126` AC-2). The panel no
+              longer has a view control: it reads the current revision, always
+              (AC-1 / ⑧). */}
+          <EntityAttachmentUploads
+            entries={uploadEntries}
+            busy={uploading}
+            disabled={downloading !== null}
+            onSelect={(entry, file) => void uploadAttachment(entry, file)}
+          />
+
+          {uploadFailure && (
+            <div
+              role="alert"
+              data-upload-failure={uploadFailure.step}
               style={{
-                ...buttonStyle,
-                padding: "1px 7px",
-                fontSize: "var(--fs-micro)",
-                ...(historyView ? {} : { borderColor: accent, color: accent }),
+                margin: "6px 10px 0",
+                padding: "6px 8px",
+                border: `1px solid ${danger}`,
+                borderRadius: 6,
+                background: "rgba(229,72,77,0.08)",
+                color: danger,
+                fontSize: "var(--fs-caption)",
+                lineHeight: 1.5,
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
               }}
             >
-              当前版本
-            </button>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
-              修订
-              <input
-                value={revisionInput}
-                onChange={(event) => setRevisionInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") openRevisionView();
-                }}
-                placeholder="如 3"
-                aria-label="修订号"
-                inputMode="numeric"
-                style={{ ...inputStyle, width: 56 }}
-              />
-              <button type="button" onClick={openRevisionView} style={{ ...buttonStyle, padding: "1px 7px", fontSize: "var(--fs-micro)" }}>
-                查看
-              </button>
-            </label>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
-              时点
-              <input
-                type="datetime-local"
-                value={asOfInput}
-                onChange={(event) => setAsOfInput(event.target.value)}
-                aria-label="时点"
-                style={{ ...inputStyle, width: 168, padding: "1px 4px" }}
-              />
-              <button type="button" onClick={openAsOfView} style={{ ...buttonStyle, padding: "1px 7px", fontSize: "var(--fs-micro)" }}>
-                查看
-              </button>
-            </label>
-          </div>
-
-          {viewError && (
-            <div role="alert" style={{ margin: "6px 10px 0", color: danger, fontSize: "var(--fs-caption)" }}>
-              {viewError}
+              <div>
+                {uploadFailure.step === "precheck"
+                  ? "已在发送前拦下："
+                  : uploadFailure.step === "content"
+                    ? "传内容失败："
+                    : "绑定失败："}
+              </div>
+              <div style={{ marginTop: 2 }}>{uploadFailure.error}</div>
+              {/* The base's contract, not ours: `code` / `statusCode` /
+                  `retriable` are what makes a failure attributable (AC-6). */}
+              <div style={{ marginTop: 2, fontSize: "var(--fs-micro)", opacity: 0.85 }}>
+                {uploadFailure.code}
+                {uploadFailure.statusCode > 0 ? ` · HTTP ${uploadFailure.statusCode}` : " · 未发出请求"}
+                {" · "}
+                {uploadFailure.retriable ? "可重试" : "需处理后再试"}
+              </div>
             </div>
           )}
           {attachmentError && (
@@ -1402,7 +1458,7 @@ export function EntityPanel({ target, onOpenEntity }: {
           <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "6px 10px 12px" }}>
             {attachmentViews.length === 0 ? (
               <div style={{ color: muted, fontSize: "var(--fs-caption)", padding: "4px 0" }}>
-                暂无附件{historyView ? "（这一版没有附件）" : ""}
+                暂无附件
               </div>
             ) : (
               attachmentViews.map((group) => (
@@ -1521,31 +1577,29 @@ export function EntityPanel({ target, onOpenEntity }: {
             }}
           >
             附件内容走 REST 通道、用这个 server 条目自己的凭证；不经过对话与工具参数。
-            <div>本轮只读：不提供上传/删除入口。</div>
+            <div>上传分两步：先传内容、再绑定；不做删除/解绑与批量上传。</div>
           </div>
         </div>
       )}
       {tab === "relations" && (
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 0", flexShrink: 0 }}>
-            {!historyView && (
-              <button
-                type="button"
-                onClick={openLinkForm}
-                disabled={linkOptions.length === 0}
-                title={linkOptions.length === 0 ? "这个类型没有声明任何关系" : "按 key 挂上游实体"}
-                style={{
-                  ...buttonStyle,
-                  borderColor: accent,
-                  color: accent,
-                  opacity: linkOptions.length === 0 ? 0.5 : 1,
-                }}
-              >
-                {linkOpen ? "收起挂链" : "＋ 挂链"}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={openLinkForm}
+              disabled={linkOptions.length === 0}
+              title={linkOptions.length === 0 ? "这个类型没有声明任何关系" : "按 key 挂上游实体"}
+              style={{
+                ...buttonStyle,
+                borderColor: accent,
+                color: accent,
+                opacity: linkOptions.length === 0 ? 0.5 : 1,
+              }}
+            >
+              {linkOpen ? "收起挂链" : "＋ 挂链"}
+            </button>
             <span style={{ marginLeft: "auto", fontSize: "var(--fs-micro)", color: muted }}>
-              {historyView ? "历史视图下不挂链、不断开（关系不按修订存）" : "只挂上游"}
+              只挂上游
             </span>
           </div>
 
@@ -1796,7 +1850,7 @@ export function EntityPanel({ target, onOpenEntity }: {
                             </span>
                             <span style={{ flexShrink: 0, fontSize: "var(--fs-micro)", color: muted }}>{row.state}</span>
                           </button>
-                          {historyView ? null : row.canUnlink ? (
+                          {row.canUnlink ? (
                             <button
                               type="button"
                               onClick={() => {
