@@ -36,6 +36,7 @@ import {
 import { getGlobalSettingsPath } from "./global-settings-file";
 import { mcpConfigKey, mcpEntryConfigKey } from "./mcp-config-key";
 import { jsonErrorMessage } from "./mcp-json-error";
+import { loadMcpListingInternals } from "./mcp-listing-worker";
 import { maskArgs, maskCommand, maskUrl } from "./mcp-secrets";
 import { mcpOAuthStoreKeys } from "./mcp-sign-out";
 import { readMcpHostInactive, withMcpStatuses } from "./mcp-status";
@@ -566,25 +567,33 @@ export interface McpConfigRead {
   servers: McpServerInfo[];
 }
 
-/** The servers of the global and the project file, each described from the file alone. */
-export function readMcpServerConfigs(options: McpConfigReadOptions): McpConfigRead {
-  const context: DescribeContext = {
-    internals: options.internals,
-    authState: readAuthState(options.agentDir),
-    revealProjectCommands: options.projectUntrusted === true,
-  };
+/** One file of the listing: what was read of it, and its entries, parsed once. */
+interface ConfigSource {
+  info: McpConfigFileInfo;
+  /**
+   * `mcpServers`, parsed once: the worker's checks and the description below
+   * walk the same values, so a verdict can be found from the entry it belongs to.
+   */
+  entries: [name: string, value: unknown][];
+}
+
+/** The global file, then the project's, each read and parsed as `loadMcpConfig()` reads it. */
+function readConfigSources(options: Pick<McpConfigReadOptions, "agentDir" | "project">): ConfigSource[] {
+  const files = [readGlobalFile(options.agentDir)];
+  if (options.project) files.push(readProjectFile(options.project.cwd, options.project.allowedRoots));
+  return files.map(({ info, text }) => ({ info, entries: text === undefined ? [] : parseConfigText(info, text) }));
+}
+
+function describeConfigSources(sources: ConfigSource[], context: DescribeContext): McpConfigRead {
   const files: McpConfigFileInfo[] = [];
   const described: DescribedServer[] = [];
-  const sources = [readGlobalFile(options.agentDir)];
-  if (options.project) sources.push(readProjectFile(options.project.cwd, options.project.allowedRoots));
-  for (const { info, text } of sources) {
+  for (const { info, entries } of sources) {
     files.push(info);
-    if (text === undefined) continue;
-    for (const [name, value] of parseConfigText(info, text)) {
+    for (const [name, value] of entries) {
       described.push(describeServer(name, value, info.scope, info.path, context));
     }
   }
-  if (options.internals) refuseAsLoaderDoes(described);
+  if (context.internals) refuseAsLoaderDoes(described);
   // A project entry the SDK loads replaces the global one of its name once the
   // project is trusted; an invalid one is skipped and leaves the global in place.
   const projectNames = new Set(
@@ -601,6 +610,16 @@ export function readMcpServerConfigs(options: McpConfigReadOptions): McpConfigRe
     if (info.scope === "project" && shadowedNames.has(info.name)) info.replacesGlobal = true;
   }
   return { files, servers: described.map(({ info }) => info) };
+}
+
+/** The servers of the global and the project file, each described from the file alone. */
+export function readMcpServerConfigs(options: McpConfigReadOptions): McpConfigRead {
+  const sources = readConfigSources(options);
+  return describeConfigSources(sources, {
+    internals: options.internals,
+    authState: readAuthState(options.agentDir),
+    revealProjectCommands: options.projectUntrusted === true,
+  });
 }
 
 /** One entry as its file holds it, for a route that connects it; never sent to the browser. */
@@ -667,22 +686,46 @@ export interface ProjectMcpServers {
  * `GET /api/mcp` reads it, from the file only and whether or not the project
  * is trusted. The global file is read too, only to tell which project entries
  * replace a global one of their name.
+ *
+ * The files are read here; the SDK's checks on them — the only expensive part
+ * of this listing — are answered by a worker (`lib/mcp-listing-worker.ts`), so
+ * the dialog's own request never parses the SDK's module graph on the server's
+ * thread. Everything decided from those answers is decided below, unchanged.
  */
 export async function readProjectMcpServers(options: {
   agentDir: string;
   cwd: string;
   allowedRoots: Set<string>;
 }): Promise<ProjectMcpServers> {
-  const internals = await loadPiSdkInternals();
-  const { files, servers } = readMcpServerConfigs({
-    agentDir: options.agentDir,
-    project: { cwd: options.cwd, allowedRoots: options.allowedRoots },
-    internals: internals.ok ? internals : undefined,
-    projectUntrusted: !projectTrustedByDecision(options.cwd, options.agentDir),
+  const sources = readConfigSources({ agentDir: options.agentDir, project: { cwd: options.cwd, allowedRoots: options.allowedRoots } });
+  const internals = await listingInternals(sources);
+  const { files, servers } = describeConfigSources(sources, {
+    internals,
+    authState: readAuthState(options.agentDir),
+    revealProjectCommands: !projectTrustedByDecision(options.cwd, options.agentDir),
   });
   const file = files.find((info) => info.scope === "project");
   if (!file) throw new Error("the project file was not read");
   return { file, servers: servers.filter((server) => server.scope === "project") };
+}
+
+/**
+ * The SDK's checks over the entries just read, from the worker.
+ *
+ * `undefined` means "list them unchecked": either the SDK cannot be located
+ * (the answer this listing has always given then) or there is no entry to
+ * check, so no check is needed. A worker failure is not swallowed: it throws
+ * `McpListingError`, which the route turns into a readable, retriable error
+ * rather than an empty list that would read as "this file declares nothing".
+ */
+async function listingInternals(sources: ConfigSource[]): Promise<McpConfigReadInternals | undefined> {
+  const entries = sources.flatMap(({ entries: fileEntries }) => fileEntries.map(([name, value]) => ({ name, value })));
+  if (entries.length === 0) return undefined;
+  const values = new Set<string>();
+  for (const { value } of entries) {
+    for (const field of resolvedConfigValues(value)) values.add(field.value);
+  }
+  return await loadMcpListingInternals({ entries, values: [...values] });
 }
 
 // ---------------------------------------------------------------------------

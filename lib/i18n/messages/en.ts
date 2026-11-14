@@ -574,6 +574,7 @@ export const enLocale: LocalePlugin = {
     "trust.mcp.loading": "Reading .pi/mcp.json…",
     "trust.mcp.loadFailed": "Could not list this project's MCP servers.",
     "trust.mcp.timedOut": "Listing this project's MCP servers took too long.",
+    "trust.mcp.retry": "Try again",
     "trust.mcp.none": "The file declares no servers.",
     "trust.mcp.unchecked": "Entity Assistant cannot load the SDK's MCP checks, so these entries are listed unchecked.",
     "trust.mcp.cwd": "Working directory: {path}",

@@ -295,6 +295,21 @@ test("a GET answer becomes a listing: the status beside it, or only the listing 
     reason: "cwd-denied",
   });
   assert.deepEqual(projectTrustListingFrom(false, 502, {}), { state: "failed", error: "HTTP 502", reason: undefined });
+  // A listing the route could not build carries its code and retry verdict through.
+  assert.deepEqual(
+    projectTrustListingFrom(true, 200, {
+      ...untrusted,
+      mcpServers: [],
+      mcpError: "the MCP listing worker exited",
+      mcpErrorCode: "mcp-listing-worker-failed",
+      mcpRetriable: true,
+    }),
+    {
+      state: "loaded",
+      listing: { mcpServers: [], mcpError: "the MCP listing worker exited", mcpErrorCode: "mcp-listing-worker-failed", mcpRetriable: true },
+      status: untrusted,
+    },
+  );
 });
 
 test("a listing that failed names why, or gives its diagnostic when there is nothing to translate", () => {
@@ -318,14 +333,57 @@ test("a listing that failed names why, or gives its diagnostic when there is not
 
 test("the dialog fetches the listing when it opens, and gives up after a timeout", () => {
   assert.equal(MCP_LISTING_TIMEOUT_MS, 10_000);
-  const effect = source.slice(source.indexOf("useEffect(() => {"), source.indexOf("}, [cwd]);"));
+  const effect = source.slice(source.indexOf("useEffect(() => {"), source.indexOf("}, [cwd, attempt]);"));
   assert.match(effect, /fetch\(`\/api\/project-trust\?cwd=\$\{encodeURIComponent\(cwd\)\}`, \{ signal: controller\.signal, cache: "no-store" \}\)/);
   assert.match(effect, /window\.setTimeout\(\(\) => \{\s*timedOut = true;\s*controller\.abort\(\);\s*\}, MCP_LISTING_TIMEOUT_MS\)/);
   // A late answer for a closed dialog or an earlier cwd is dropped.
   assert.match(effect, /return \(\) => \{\s*active = false;\s*window\.clearTimeout\(timer\);\s*controller\.abort\(\);\s*\};/);
   assert.match(source, /disabled=\{busy \|\| loading\}/);
   // The fresh status goes to the page, so its restricted-mode banner follows it.
-  assert.match(effect, /if \(next\.state === "loaded" && next\.status\) onStatusRef\.current\?\.\(next\.status\);/);
+  assert.match(effect, /if \(next\.state === "loaded" && next\.status\) onStatusRef\.current\?\.\(next\.status\);/, );
+  // Giving up is a retriable failure with a code, not a dead end (TASK-000259):
+  // the dialog opens into `loading` because the listing is built off-thread, and
+  // nothing about that wait may leave the user without a second try.
+  assert.match(effect, /code: "mcp-listing-timeout", retriable: true/);
+  assert.match(source, /const retry = useCallback\(\(\) => setAttempt\(\(count\) => count \+ 1\), \[\]\);/);
+  assert.match(source, /onRetry=\{retry\}/);
+});
+
+test("a listing failure that can be retried says why, and offers another try", () => {
+  const retries = [];
+  const retry = () => retries.push(1);
+  // The dialog's own timeout: the worker had not answered within the client's budget.
+  const timedOut = render(h(ProjectTrustMcpSection, {
+    listing: { state: "failed", timedOut: true, code: "mcp-listing-timeout", retriable: true },
+    onRetry: retry,
+  }));
+  assert.equal(text(timedOut), "Listing this project's MCP servers took too long. mcp-listing-timeout Try again");
+  assert.match(timedOut, /<button type="button" class="project-trust-button">Try again<\/button>/);
+
+  // The route's own answer: the build failed, `mcpFile` is absent and the code names why.
+  const fromRoute = loaded();
+  fromRoute.listing.mcpError = "the MCP listing worker exited";
+  fromRoute.listing.mcpErrorCode = "mcp-listing-worker-failed";
+  fromRoute.listing.mcpRetriable = true;
+  delete fromRoute.listing.mcpFile;
+  assert.equal(
+    text(render(h(ProjectTrustMcpSection, { listing: fromRoute, onRetry: retry }))),
+    "Could not list this project's MCP servers. the MCP listing worker exited mcp-listing-worker-failed Try again",
+  );
+
+  // A failure nothing can retry keeps its old answer, without a button.
+  const denied = render(h(ProjectTrustMcpSection, {
+    listing: { state: "failed", error: "Access denied", reason: "cwd-denied" },
+    onRetry: retry,
+  }));
+  assert.doesNotMatch(denied, /Try again/);
+  // And without a caller to ask, the section is the dumb view it always was.
+  const fromRouteNoHandler = loaded();
+  fromRouteNoHandler.listing.mcpError = "boom";
+  fromRouteNoHandler.listing.mcpErrorCode = "mcp-listing-timeout";
+  fromRouteNoHandler.listing.mcpRetriable = true;
+  delete fromRouteNoHandler.listing.mcpFile;
+  assert.doesNotMatch(render(h(ProjectTrustMcpSection, { listing: fromRouteNoHandler })), /Try again/);
 });
 
 test("the dialog takes focus when it opens and Escape closes it alone, even above Settings", () => {

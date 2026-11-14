@@ -10,6 +10,7 @@ import type {
 } from "@/lib/api-types";
 import { readProjectMcpServers } from "@/lib/mcp-config-read";
 import { isMcpEntryRefusal, validateMcpProject } from "@/lib/mcp-entry-request";
+import { mcpListingFailureBody } from "@/lib/mcp-listing-worker";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
@@ -45,7 +46,10 @@ async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots
     const { file, servers } = await readProjectMcpServers({ agentDir, cwd, allowedRoots });
     return { mcpFile: file, mcpServers: servers };
   } catch (error) {
-    return { mcpServers: [], mcpError: errorMessage(error) };
+    // A listing whose build failed (the worker that loads the SDK's checks timed
+    // out or died) says so, with a code and whether trying again can work: the
+    // dialog offers another try instead of showing "no servers".
+    return mcpListingFailureBody(error) ?? { mcpServers: [], mcpError: errorMessage(error) };
   }
 }
 
@@ -61,6 +65,13 @@ async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots
 // `import(dist/index.js)`), which blocks the loop for 3.0–4.9 s in the packaged
 // Node (TASK-000213). The dialog fetches the full answer when it opens, so
 // nothing is lost — only deferred to the request that reads it.
+//
+// That request no longer pays it on this thread either: since TASK-000259 the
+// listing's SDK checks are answered by a worker (`lib/mcp-listing-worker.ts`),
+// so the dialog opens into its loading state and fills in when the answer
+// arrives, instead of freezing the loop for seconds. The answer itself —
+// `mcpFile`, `mcpServers`, `mcpError` — is the same; only a listing whose worker
+// failed adds `mcpErrorCode` / `mcpRetriable`.
 export async function GET(req: Request) {
   const params = new URL(req.url).searchParams;
   const result = await validateCwd(params.get("cwd"));

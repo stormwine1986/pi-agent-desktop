@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type {
   McpConfigFieldRef,
@@ -9,6 +9,7 @@ import type {
   McpRefusalReason,
   McpServerInfo,
   ProjectMcpListing,
+  ProjectMcpListingErrorCode,
   ProjectTrustResponse,
   ProjectTrustStatus,
 } from "@/lib/api-types";
@@ -35,7 +36,16 @@ export interface ProjectTrustFailure {
 /** What the dialog knows about the project's `.pi/mcp.json`, and its trust as the same answer read it. */
 export type ProjectTrustMcpListing =
   | { state: "loading" }
-  | { state: "failed"; error?: string; reason?: McpRefusalReason; timedOut?: boolean }
+  | {
+      state: "failed";
+      error?: string;
+      reason?: McpRefusalReason;
+      timedOut?: boolean;
+      /** Why the listing could not be built, when its own build failed (`mcpErrorCode`). */
+      code?: ProjectMcpListingErrorCode;
+      /** Whether another attempt can succeed; the section offers one when it is true. */
+      retriable?: boolean;
+    }
   | {
       state: "loaded";
       listing: ProjectMcpListing;
@@ -74,6 +84,8 @@ export function projectTrustListingFrom(
         mcpServers: data.mcpServers,
         ...(data.mcpFile ? { mcpFile: data.mcpFile } : {}),
         ...(data.mcpError !== undefined ? { mcpError: data.mcpError } : {}),
+        ...(data.mcpErrorCode !== undefined ? { mcpErrorCode: data.mcpErrorCode } : {}),
+        ...(data.mcpRetriable !== undefined ? { mcpRetriable: data.mcpRetriable } : {}),
       }
     : undefined;
   if (ok && !data.error && listing && typeof data.requiresTrust === "boolean") {
@@ -82,7 +94,13 @@ export function projectTrustListingFrom(
   if (data.reason === "trust-unreadable" && listing) {
     return { state: "loaded", listing, statusError: data.error ?? `HTTP ${status}` };
   }
-  return { state: "failed", error: data.error ?? `HTTP ${status}`, reason: data.reason };
+  return {
+    state: "failed",
+    error: data.error ?? `HTTP ${status}`,
+    reason: data.reason,
+    ...(data.mcpErrorCode !== undefined ? { code: data.mcpErrorCode } : {}),
+    ...(data.mcpRetriable !== undefined ? { retriable: data.mcpRetriable } : {}),
+  };
 }
 
 /** Why the dialog no longer offers Trust: the folder's trust changed since the page read it. */
@@ -104,6 +122,12 @@ function settledTrustNotice(status: ProjectTrustStatus | undefined): string | un
  * a folder trusted meanwhile, or no longer needing trust, is no longer offered
  * Trust. It opens from the page's restricted-mode banner and from Settings ›
  * MCP's trust notice, above Settings, so Escape closes it alone.
+ *
+ * Building the listing loads the pi SDK's MCP checks, which was seconds of
+ * frozen UI on the server's thread (TASK-000259). The dialog therefore opens
+ * into `loading` at once and renders the list when the answer arrives; a
+ * failure that is worth retrying (`mcpRetriable`) gets a Try again button
+ * rather than leaving the dialog stuck on a diagnostic.
  */
 export function ProjectTrustDialog({
   cwd,
@@ -122,6 +146,9 @@ export function ProjectTrustDialog({
   onStatus?: (status: ProjectTrustStatus) => void;
 }) {
   const [listing, setListing] = useState<ProjectTrustMcpListing>({ state: "loading" });
+  // Bumped by Try again: the same fetch, with a fresh timeout and signal.
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((count) => count + 1), []);
   // Read through a ref, so a new callback on every page render does not fetch again.
   const onStatusRef = useRef(onStatus);
   useEffect(() => {
@@ -147,7 +174,9 @@ export function ProjectTrustDialog({
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setListing(timedOut ? { state: "failed", timedOut: true } : { state: "failed", error: errorMessage(reason) });
+        setListing(timedOut
+          ? { state: "failed", timedOut: true, code: "mcp-listing-timeout", retriable: true }
+          : { state: "failed", error: errorMessage(reason) });
       })
       .finally(() => window.clearTimeout(timer));
     return () => {
@@ -155,7 +184,7 @@ export function ProjectTrustDialog({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [cwd]);
+  }, [cwd, attempt]);
 
   return (
     <ProjectTrustDialogView
@@ -165,6 +194,7 @@ export function ProjectTrustDialog({
       listing={listing}
       onCancel={onCancel}
       onConfirm={onConfirm}
+      onRetry={retry}
     />
   );
 }
@@ -177,6 +207,7 @@ export function ProjectTrustDialogView({
   listing,
   onCancel,
   onConfirm,
+  onRetry,
 }: {
   cwd: string;
   busy: boolean;
@@ -184,6 +215,8 @@ export function ProjectTrustDialogView({
   listing: ProjectTrustMcpListing;
   onCancel: () => void;
   onConfirm: () => void;
+  /** Asks for the listing again, for a failure that is worth retrying. */
+  onRetry?: () => void;
 }) {
   const { t } = useI18n();
   const loading = listing.state === "loading";
@@ -253,7 +286,7 @@ export function ProjectTrustDialogView({
                 <code className="project-trust-mcp-detail">{revealHiddenCharacters(listing.statusError)}</code>
               </div>
             )}
-            <ProjectTrustMcpSection listing={listing} />
+            <ProjectTrustMcpSection listing={listing} onRetry={onRetry} />
           </div>
         </div>
         {/* Outside the scrolling body, so a long server list cannot hide it. */}
@@ -298,24 +331,37 @@ function ProjectTrustError({ error }: { error: ProjectTrustFailure }) {
 }
 
 /** The trust dialog's list of the project's MCP servers; exported for tests. */
-export function ProjectTrustMcpSection({ listing }: { listing: ProjectTrustMcpListing }) {
+export function ProjectTrustMcpSection({ listing, onRetry }: { listing: ProjectTrustMcpListing; onRetry?: () => void }) {
   const { t } = useI18n();
   if (listing.state === "loading") {
     return <p id={STATUS_ID} role="status" className="project-trust-mcp-status">{t("trust.mcp.loading")}</p>;
   }
   if (listing.state === "failed" || listing.listing.mcpError !== undefined || !listing.listing.mcpFile) {
     let detail: string | undefined;
+    let code: string | undefined;
+    let retriable = false;
     if (listing.state === "failed") {
       // An internal failure has nothing to translate: its diagnostic is the reason.
       detail = listing.reason && listing.reason !== "internal" ? t(`mcp.reason.${listing.reason}`) : listing.error;
+      code = listing.code;
+      retriable = listing.retriable === true;
     } else {
       detail = listing.listing.mcpError;
+      code = listing.listing.mcpErrorCode;
+      retriable = listing.listing.mcpRetriable === true;
     }
     const timedOut = listing.state === "failed" && listing.timedOut;
     return (
       <div className="project-trust-mcp-failed">
         <p className="project-trust-mcp-line is-warning">{t(timedOut ? "trust.mcp.timedOut" : "trust.mcp.loadFailed")}</p>
         {detail && <code className="project-trust-mcp-detail">{revealHiddenCharacters(detail)}</code>}
+        {/* Why the build failed, as the route named it: the message above is the readable half. */}
+        {code && <code className="project-trust-mcp-detail">{code}</code>}
+        {retriable && onRetry && (
+          <button type="button" className="project-trust-button" onClick={onRetry}>
+            {t("trust.mcp.retry")}
+          </button>
+        )}
       </div>
     );
   }

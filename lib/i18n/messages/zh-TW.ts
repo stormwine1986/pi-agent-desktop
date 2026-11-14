@@ -574,6 +574,7 @@ export const zhTWLocale: LocalePlugin = {
     "trust.mcp.loading": "正在讀取 .pi/mcp.json…",
     "trust.mcp.loadFailed": "無法列出此專案的 MCP 伺服器。",
     "trust.mcp.timedOut": "列出此專案的 MCP 伺服器花費太久。",
+    "trust.mcp.retry": "重試",
     "trust.mcp.none": "此檔案未宣告任何伺服器。",
     "trust.mcp.unchecked": "Entity Assistant 無法載入 SDK 的 MCP 檢查，以下項目未經檢查。",
     "trust.mcp.cwd": "工作目錄：{path}",

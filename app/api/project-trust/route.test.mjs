@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -225,6 +225,36 @@ test("a trust store locked by another process still lets the servers be listed",
   assert.equal(status, 200);
   assert.equal(body.trusted, false);
   assert.equal(body.mcpServers.length, 4);
+});
+
+test("an SDK that cannot be located still lists the entries, unchecked and without an error", async (t) => {
+  // The listing has always degraded here (`loadPiSdkInternals()` with `ok: false`):
+  // TASK-000259 moved the checks to a worker, not their absence. `PI_PACKAGE_DIR`
+  // makes the SDK refuse to load at all, on either path.
+  const previous = process.env.PI_PACKAGE_DIR;
+  process.env.PI_PACKAGE_DIR = "D:/not-the-sdk";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_PACKAGE_DIR;
+    else process.env.PI_PACKAGE_DIR = previous;
+  });
+  const { status, body } = await get(cwd);
+  assert.equal(status, 200);
+  assert.equal(body.mcpError, undefined);
+  assert.equal(body.mcpErrorCode, undefined);
+  // Same entries, same order, same masking as the validated answer; only the
+  // validator's own verdicts are missing.
+  assert.deepEqual(body.mcpServers.map((server) => server.name), ["repo", "github", "legacy", "off"]);
+  assert.deepEqual(body.mcpServers.map((server) => server.validated), [false, false, false, false]);
+  assert.equal(body.mcpServers[1].replacesGlobal, true);
+  assert.deepEqual(body.mcpServers[0].commandFields, [{ kind: "env", name: "TOKEN" }]);
+});
+
+test("a listing whose build failed answers with its code and retry verdict, not an empty file", () => {
+  // The worker seam cannot be broken from here without one, so the wiring that
+  // turns `McpListingError` into that answer is pinned where it lives
+  // (`lib/mcp-listing-worker.test.mjs` pins the answer itself).
+  const route = readFileSync(new URL("./route.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  assert.match(route, /return mcpListingFailureBody\(error\) \?\? \{ mcpServers: \[\], mcpError: errorMessage\(error\) \};/);
 });
 
 function post(body, headers = {}) {

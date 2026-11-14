@@ -777,6 +777,13 @@ export interface McpSignInFlowInfo extends McpServerRef {
   joined?: true;
 }
 
+/**
+ * Why a project's MCP listing could not be built at all, when the build itself
+ * failed rather than the file: the worker that loads the SDK's checks timed out
+ * (`GET /api/project-trust`, TASK-000259).
+ */
+export type ProjectMcpListingErrorCode = "mcp-listing-timeout" | "mcp-listing-worker-failed";
+
 /** What a project's `.pi/mcp.json` declares, as `GET /api/project-trust` lists it. */
 export interface ProjectMcpListing {
   /** The project file; absent only when listing failed (`mcpError`). */
@@ -785,6 +792,14 @@ export interface ProjectMcpListing {
   mcpServers: McpServerInfo[];
   /** Listing failed unexpectedly. */
   mcpError?: string;
+  /**
+   * Why the listing could not be built, when the listing's own build failed
+   * (the SDK checks timed out or their worker died). Absent for every other
+   * answer, including a file that cannot be parsed.
+   */
+  mcpErrorCode?: ProjectMcpListingErrorCode;
+  /** Whether asking again can succeed; the dialog offers another try when it is true. */
+  mcpRetriable?: boolean;
 }
 
 /**

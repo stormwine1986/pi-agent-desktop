@@ -452,3 +452,37 @@ export function loadPiSdkInternals(): Promise<PiSdkInternalsResult> {
     reason: errorMessage(error),
   }));
 }
+
+/**
+ * The two SDK files the project's MCP listing checks entries with, and only
+ * those (TASK-000259). `readProjectMcpServers()` loads them in a worker
+ * (`lib/mcp-listing-worker.ts`), so the module parsing that costs 1.7–4.9 s in
+ * the packaged Node happens off the thread that answers requests. They are the
+ * same paths `importPiSdkInternals()` loads and the same `PI_PACKAGE_DIR`
+ * guard, so an SDK upgrade that moves a file breaks both together rather than
+ * one silently: `validateMcpServerConfig()` from `dist/core/mcp-servers.js`,
+ * `isCommandConfigValue()` and `getConfigValueEnvVarNames()` from
+ * `dist/core/resolve-config-value.js`.
+ */
+export type McpListingModuleFiles =
+  | { ok: true; servers: string; configValues: string }
+  | { ok: false; reason: string };
+
+export function mcpListingModuleFiles(
+  environment: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): McpListingModuleFiles {
+  if (environment.PI_PACKAGE_DIR) {
+    return { ok: false, reason: `PI_PACKAGE_DIR is set; MCP support loads only from the ${SDK_PACKAGE} that Entity Assistant runs` };
+  }
+  try {
+    const packageDir = resolvedSdkPackageDir(cwd);
+    return {
+      ok: true,
+      servers: join(packageDir, SDK_MODULES.mcpServers),
+      configValues: join(packageDir, SDK_MODULES.configValues),
+    };
+  } catch (error) {
+    return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };
+  }
+}
