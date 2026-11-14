@@ -115,6 +115,31 @@ test("an untrusted project's MCP servers are listed from the file, and nothing r
   assert.deepEqual((await readdir(agentDir)).sort(), ["mcp.json"]);
 });
 
+test("`servers=0` answers the status alone, without touching the project's mcp.json", async (t) => {
+  // The first screen asks this way (components/AppShell.tsx): it uses nothing but the
+  // status, and building the listing loads the pi SDK's module graph on the request
+  // (TASK-000213). Point the project file at something unreadable: a listing would
+  // have to report it, so its absence proves the file was never read.
+  await writeFile(projectPath, '{ "mcpServers": ');
+  t.after(async () => {
+    await writeFile(projectPath, projectConfig);
+  });
+
+  const response = await GET(
+    new Request(`http://localhost/api/project-trust?cwd=${encodeURIComponent(cwd)}&servers=0`, {
+      headers: { host: "localhost" },
+    }),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.requiresTrust, true, "the trust status is still the real one");
+  assert.equal(body.trusted, false);
+  assert.equal(body.decision, null);
+  assert.equal(body.mcpFile, undefined);
+  assert.equal(body.mcpServers, undefined);
+  assert.equal(body.mcpError, undefined);
+});
+
 test("the listing follows the file and its trust as they are now", async (t) => {
   const store = new ProjectTrustStore(agentDir);
   t.after(async () => {

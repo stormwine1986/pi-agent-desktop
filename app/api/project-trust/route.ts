@@ -5,6 +5,7 @@ import type {
   McpRefusalReason,
   ProjectMcpListing,
   ProjectTrustResponse,
+  ProjectTrustStatus,
   ProjectTrustUnreadableResponse,
 } from "@/lib/api-types";
 import { readProjectMcpServers } from "@/lib/mcp-config-read";
@@ -53,20 +54,34 @@ async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots
 // would connect before anyone trusts the folder (ADR 0006). The listing reads
 // the files only, like GET /api/mcp: no server is spawned, no value resolved,
 // no `!command` run, and env and header values never leave the server.
+//
+// `?servers=0` answers the status alone, and the first screen asks that way:
+// the shell uses nothing but the status, while building the listing loads the
+// pi SDK's module graph (`readProjectMcpServers()` → `loadPiSdkInternals()` →
+// `import(dist/index.js)`), which blocks the loop for 3.0–4.9 s in the packaged
+// Node (TASK-000213). The dialog fetches the full answer when it opens, so
+// nothing is lost — only deferred to the request that reads it.
 export async function GET(req: Request) {
-  const result = await validateCwd(new URL(req.url).searchParams.get("cwd"));
+  const params = new URL(req.url).searchParams;
+  const result = await validateCwd(params.get("cwd"));
   if ("response" in result) return result.response;
   const agentDir = resolveAgentDir();
   // Listed whatever the trust store says: the listing does not depend on it,
   // and a dialog left without one would offer Trust with nothing listed.
-  const listing = await listProjectMcpServers(agentDir, result.cwd, result.allowedRoots);
+  const statusOnly = params.get("servers") === "0";
+  const listing = statusOnly ? {} : await listProjectMcpServers(agentDir, result.cwd, result.allowedRoots);
   try {
-    return NextResponse.json({ ...getProjectTrustStatus(result.cwd, agentDir), ...listing } satisfies ProjectTrustResponse);
+    return NextResponse.json({
+      ...getProjectTrustStatus(result.cwd, agentDir),
+      ...listing,
+    } satisfies ProjectTrustResponse | ProjectTrustStatus);
   } catch (error) {
     // trust.json unparsable, or locked by another process (the pi CLI) past the
     // store's short wait; trusting would fail the same way right now.
     return NextResponse.json(
-      { error: errorMessage(error), reason: "trust-unreadable", ...listing } satisfies ProjectTrustUnreadableResponse,
+      { error: errorMessage(error), reason: "trust-unreadable", ...listing } satisfies
+        | ProjectTrustUnreadableResponse
+        | { error: string; reason: "trust-unreadable" },
       { status: 500 },
     );
   }

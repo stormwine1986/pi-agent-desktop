@@ -2023,7 +2023,10 @@ export function AppShell() {
     const controller = new AbortController();
     // The answer also lists the project's MCP servers (`mcpFile`, `mcpServers`), unused here: the
     // trust dialog fetches the listing again when it opens, since the file can change in between.
-    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
+    // `servers=0` says so out loud: building that listing loads the pi SDK's module graph on this
+    // request, which freezes the loop for 3.0-4.9 s in the packaged server — on the first screen,
+    // i.e. the window in which the entity panel is opened (TASK-000213).
+    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}&servers=0`, {
       signal: controller.signal,
     })
       .then(async (response) => {

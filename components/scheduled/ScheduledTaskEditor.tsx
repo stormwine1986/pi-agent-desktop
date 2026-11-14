@@ -191,8 +191,10 @@ function useUntrustedProject(cwd: string): boolean {
   useEffect(() => {
     if (!cwd.trim()) return;
     let cancelled = false;
+    // `servers=0`: this only reads the verdict; building the MCP listing here would load the pi
+    // SDK's module graph on the first open (TASK-000213).
     const timer = setTimeout(() => {
-      fetch(`/api/project-trust?cwd=${encodeURIComponent(cwd.trim())}`, { cache: "no-store" })
+      fetch(`/api/project-trust?cwd=${encodeURIComponent(cwd.trim())}&servers=0`, { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .then((status: { requiresTrust?: boolean; trusted?: boolean } | null) => {
           if (!cancelled) setUntrusted(Boolean(status?.requiresTrust && !status.trusted));
