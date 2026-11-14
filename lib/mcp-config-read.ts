@@ -34,16 +34,16 @@ import {
   readProjectCodemodeOverride,
 } from "./codemode-settings";
 import { getGlobalSettingsPath } from "./global-settings-file";
-import { mcpConfigKey, mcpEntryConfigKey } from "./mcp-config-key";
+import { mcpConfigKey, mcpEntryConfigKey, truncateConfigValue } from "./mcp-config-key";
 import { jsonErrorMessage } from "./mcp-json-error";
-import { loadMcpListingInternals } from "./mcp-listing-worker";
+import { loadMcpListingAnswer, loadMcpListingInternals, McpListingError, type McpListingWork } from "./mcp-listing-worker";
 import { maskArgs, maskCommand, maskUrl } from "./mcp-secrets";
 import { mcpOAuthStoreKeys } from "./mcp-sign-out";
 import { readMcpHostInactive, withMcpStatuses } from "./mcp-status";
 import { findWebPasswordField, resolvedConfigValues, WEB_PASSWORD_VARIABLE } from "./mcp-transport";
 import { samePath } from "./paths";
 import { hasParentDirectorySegment, isPathWithinRoots, resolveRealRoots } from "./path-security";
-import { loadPiSdkInternals, type PiSdkInternals } from "./pi-sdk-internals";
+import { sdkInternalsProbeReason, sdkInternalsProbeRequest, type PiSdkInternals, type SdkInternalsProbe, type SdkInternalsProbeAnswer } from "./pi-sdk-internals";
 import { freshFolderTrustBreadth, getProjectTrustStatus, hasTrustRelevantEntries } from "./project-trust";
 
 // What Settings › MCP and the trust dialog list (ADR 0006): the entries of the
@@ -581,7 +581,15 @@ interface ConfigSource {
 function readConfigSources(options: Pick<McpConfigReadOptions, "agentDir" | "project">): ConfigSource[] {
   const files = [readGlobalFile(options.agentDir)];
   if (options.project) files.push(readProjectFile(options.project.cwd, options.project.allowedRoots));
-  return files.map(({ info, text }) => ({ info, entries: text === undefined ? [] : parseConfigText(info, text) }));
+  return files.map(({ info, text }) => ({
+    info,
+    // Truncated where the entry leaves this thread: the listing describes the
+    // same copy the worker checks (`truncateConfigValue()`, TASK-000277), and a
+    // pathologically deep entry is a 5,000-level fixture rather than a 500.
+    entries: text === undefined
+      ? []
+      : parseConfigText(info, text).map(([name, value]) => [name, truncateConfigValue(value)] as [string, unknown]),
+  }));
 }
 
 function describeConfigSources(sources: ConfigSource[], context: DescribeContext): McpConfigRead {
@@ -719,22 +727,39 @@ export async function readProjectMcpServers(options: {
  * rather than an empty list that would read as "this file declares nothing".
  */
 async function listingInternals(sources: ConfigSource[]): Promise<McpConfigReadInternals | undefined> {
+  const work = listingWork(sources);
+  if (work.entries.length === 0) return undefined;
+  return await loadMcpListingInternals(work);
+}
+
+/**
+ * The entries both files declare, and every value they resolve: everything the
+ * worker's checks are asked about (`McpListingWork`). Cheap — the files were
+ * parsed once by `readConfigSources()`.
+ */
+function listingWork(sources: ConfigSource[]): McpListingWork {
   const entries = sources.flatMap(({ entries: fileEntries }) => fileEntries.map(([name, value]) => ({ name, value })));
-  if (entries.length === 0) return undefined;
   const values = new Set<string>();
   for (const { value } of entries) {
     for (const field of resolvedConfigValues(value)) values.add(field.value);
   }
-  return await loadMcpListingInternals({ entries, values: [...values] });
+  return { entries, values: [...values] };
 }
 
 // ---------------------------------------------------------------------------
 // GET /api/mcp
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the SDK's MCP internals load, as availability reads it: `ok`, or the
+ * reason they do not. The full `PiSdkInternals` is not needed here — only the
+ * verdict (TASK-000277 moved that verdict to the listing worker).
+ */
+type SdkInternalsVerdict = { ok: true } | { ok: false; reason: string };
+
 function mcpAvailability(
   environment: NodeJS.ProcessEnv,
-  internals: Awaited<ReturnType<typeof loadPiSdkInternals>>,
+  internals: SdkInternalsVerdict,
   mcpSwitch: BuiltinExtensionSwitch | undefined,
 ): McpAvailability {
   if (isMcpDisabledByOperator(environment)) {
@@ -827,10 +852,25 @@ export interface McpOverviewOptions {
  * another extension's, and the project's trust, read fresh. A project that is
  * not trusted is listed too, with the command each entry would run, which is
  * the point: it can be checked before anyone trusts it.
+ *
+ * The files are read here; the two things that need the pi SDK — its three
+ * checks over these entries, and whether its MCP internals load at all — are
+ * asked of the listing worker in one round trip (`overviewChecks()`), so this
+ * request never parses the SDK's module graph on the server's thread. That was
+ * 1.8–4.9 s of frozen settings on the first open (TASK-000277); the panel's
+ * "Loading" state is what covers the wait now. Everything decided from the
+ * worker's facts is decided below, unchanged.
  */
 export async function readMcpOverview(options: McpOverviewOptions): Promise<McpResponse> {
   const { agentDir, project, environment = process.env } = options;
-  const internals = await loadPiSdkInternals();
+  // Started before the trust and settings reads below: the worker has to parse
+  // the SDK either way, and nothing here waits on it until the servers are listed.
+  const sources = readConfigSources({ agentDir, project });
+  const checks = overviewChecks(sources, environment);
+  // Its own handler, so a worker that fails while the reads below are still
+  // running is not an unhandled rejection (Node's default would throw and take
+  // the server down); the `await checks` below is what reports it.
+  checks.catch(() => undefined);
   let projectInfo: McpProjectInfo | undefined;
   if (project) {
     projectInfo = { cwd: project.cwd };
@@ -867,17 +907,18 @@ export async function readMcpOverview(options: McpOverviewOptions): Promise<McpR
     // A settings file that cannot be read leaves the built-ins as the session would find them: on.
     console.warn(`[pi-web] cannot read the extensions settings for Settings › MCP: ${errorMessage(error)}`);
   }
+  const { internals, availability } = await checks;
   const { files, servers } = readMcpServerConfigs({
     agentDir,
     project,
-    internals: internals.ok ? internals : undefined,
+    internals,
     // The panel's rule for a project's servers being read (`trust.decision === true`).
     projectUntrusted: projectInfo?.trust?.decision !== true,
   });
   // A file whose servers are all listed: statuses of names it no longer defines can go.
   const listedFiles = files.filter((file) => !file.problems.some((item) => item.reason !== "auto-enable-codemode-invalid"));
   return {
-    mcp: mcpAvailability(environment, internals, switches?.mcp),
+    mcp: mcpAvailability(environment, availability, switches?.mcp),
     codemode: await codemodeInfo(agentDir, switches?.codemode, project && projectSettingsLoad ? project.cwd : undefined),
     files,
     servers: withMcpStatuses(servers, listedFiles),
@@ -887,4 +928,35 @@ export async function readMcpOverview(options: McpOverviewOptions): Promise<McpR
     ...(projectInfo ? { project: projectInfo } : {}),
     ...withHostInactive(project?.cwd),
   };
+}
+
+/**
+ * The two SDK answers Settings › MCP needs, from one worker round trip: the
+ * three checks its listing is described with, and whether the SDK's internals
+ * load at all (TASK-000277).
+ *
+ * Both come from the same worker message because the worker has to parse SDK
+ * files either way, and its module registry is where the probe's imports are
+ * already loaded. An SDK that cannot be located is not an error: the entries
+ * are listed unchecked and availability says why, exactly as before.
+ */
+async function overviewChecks(
+  sources: ConfigSource[],
+  environment: NodeJS.ProcessEnv,
+): Promise<{ internals: McpConfigReadInternals | undefined; availability: SdkInternalsVerdict }> {
+  const request = sdkInternalsProbeRequest(environment);
+  // The same two failures `loadPiSdkInternals()` answered before the SDK was
+  // parsed, worded by the same function: nothing to ask the worker about.
+  if (!request.ok) return { internals: undefined, availability: { ok: false, reason: request.reason } };
+  const answer = await loadMcpListingAnswer({ ...listingWork(sources), probe: request.probe });
+  if (answer.probe === undefined) {
+    // Asked for and not answered: a failure of this build, never "the SDK loads".
+    throw new McpListingError("mcp-listing-worker-failed", "the MCP listing worker answered without the SDK's internals");
+  }
+  return { internals: answer.internals, availability: probeVerdict(answer.probe, request.probe) };
+}
+
+/** The probe's facts as availability reads them: `ok`, or the sentence `importPiSdkInternals()` gives. */
+function probeVerdict(answer: SdkInternalsProbeAnswer, probe: SdkInternalsProbe): SdkInternalsVerdict {
+  return answer.ok ? { ok: true } : { ok: false, reason: sdkInternalsProbeReason(answer, probe) };
 }

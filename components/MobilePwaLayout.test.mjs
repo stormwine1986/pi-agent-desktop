@@ -118,7 +118,10 @@ test("keeps Settings › MCP usable in the 190px phone sidebar", () => {
   assert.match(cssRule(settingsCssSource, ".config-add-source-input.is-multiline"), /resize: vertical;[\s\S]*?overflow: auto;/);
   // Every .mcp-* rule targets a class the panel (its Sign-in row, its add pane) renders, and every
   // class it renders has a rule, so a rename cannot leave a phone rule silently dead.
-  const styled = new Set([...settingsCssSource.matchAll(/\.(mcp-[a-z-]+)/g)].map((match) => match[1]));
+  // Both stylesheets count: upstream's classes in settings.css, the fork's (a
+  // listing that failed, with its code and retry) in native-theme.css.
+  const styled = new Set([...`${settingsCssSource}
+${nativeThemeSource}`.matchAll(/\.(mcp-[a-z-]+)/g)].map((match) => match[1]));
   const rendered = new Set([...`${mcpConfigSource}\n${mcpSignInSource}\n${mcpAddSource}`.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`\})/g)]
     .flatMap((match) => (match[1] ?? match[2]).split(/\s+/))
     .filter((name) => name.startsWith("mcp-")));

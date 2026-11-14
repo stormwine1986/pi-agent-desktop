@@ -680,6 +680,15 @@ export interface McpErrorResponse {
    * nothing added. `reason` is the write's.
    */
   trustKept?: true;
+  /**
+   * Why an internal step could not finish, when the route's own build named it:
+   * `GET /api/mcp` answers it when the listing's worker failed or timed out
+   * (TASK-000277). Absent elsewhere — a file that cannot be parsed is a
+   * `files[].problems[]` entry, not this.
+   */
+  code?: ProjectMcpListingErrorCode;
+  /** Whether asking again can succeed; the panel offers a retry when it is true. */
+  retriable?: boolean;
 }
 
 /** What `POST /api/mcp` can do to a server of either file (ADR 0006: Add, a switch, Remove, Undo, and Sign out). */

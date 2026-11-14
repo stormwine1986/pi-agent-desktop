@@ -646,6 +646,7 @@ export const zhCNLocale: LocalePlugin = {
     "mcp.reason.folder-not-fresh": "此文件夹已经变了：它现在有信任决定，或有需要信任的资源，因此 Entity Assistant 没有信任它，也没有添加任何内容。",
     "mcp.reason.trust-too-broad": "信任此文件夹也会信任其中的各个文件夹，因此 Entity Assistant 不会自行这样做。",
     "mcp.loadFailed": "无法读取 MCP 设置。",
+    "mcp.loadRetry": "重试",
     "mcp.loadTimedOut": "Entity Assistant 没有及时响应。请点“刷新”重试。",
     "mcp.projectNotListed": "未列出此项目的服务器：{reason}",
     "mcp.serverCount": "已开启 {enabled}/{total} 个服务器",

@@ -10392,3 +10392,14 @@ html.dark .artifacts-thumb[data-tone="data"] { --tone: #4fc1d6; }
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 16%, transparent);
 }
+
+/* Settings › MCP's failed listing (TASK-000277): the code the route named and
+   the retry it says can work, under the diagnostic, inside the sidebar's own
+   error message. */
+.mcp-config-load-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}

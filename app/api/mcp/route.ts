@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getAgentDir, type McpExposure } from "@earendil-works/pi-coding-agent";
+import { agentDir } from "@/lib/agent-dir";
+import type { McpExposure } from "@earendil-works/pi-coding-agent";
 import type {
   McpActionItemResult,
   McpActionResponse,
@@ -36,6 +37,7 @@ import {
   type McpEntryRefusal,
 } from "@/lib/mcp-entry-request";
 import { MCP_EXPOSURES, isMcpExposure, suggestFreeName } from "@/lib/mcp-import";
+import { mcpListingFailure } from "@/lib/mcp-listing-worker";
 import { mcpOAuthUrl, signOutMcpServer } from "@/lib/mcp-sign-in";
 import { forgetMcpEntryStatuses } from "@/lib/mcp-status";
 import { findWebPasswordField } from "@/lib/mcp-transport";
@@ -117,9 +119,14 @@ export async function GET(req: Request) {
   }
 
   try {
-    return NextResponse.json((await readMcpOverview({ agentDir: getAgentDir(), project })) satisfies McpResponse);
+    return NextResponse.json((await readMcpOverview({ agentDir: agentDir(), project })) satisfies McpResponse);
   } catch (error) {
-    return refusal(500, "internal", errorMessage(error));
+    // The listing is built off this thread (TASK-000277), so its own build can
+    // fail: the worker died or did not answer. That is named and worth retrying
+    // (`code`/`retriable`), which is what makes the panel offer another try —
+    // and it is never shown as a file that declares no servers.
+    const failure = mcpListingFailure(error);
+    return refusal(500, "internal", errorMessage(error), failure ? { code: failure.code, retriable: failure.retriable } : {});
   }
 }
 
@@ -566,7 +573,7 @@ export async function POST(req: Request) {
 
   const internals = await mcpWritable();
   if (internals instanceof Refusal) return internals.response();
-  const agentDir = getAgentDir();
+  const agentDirPath = agentDir();
 
   try {
     switch (body.action) {
@@ -577,16 +584,16 @@ export async function POST(req: Request) {
         const scope = readScope(body.scope);
         const name = readName(body.name);
         if (!scope || name === undefined) return refusal(400, "invalid-request", "scope must be \"global\" or \"project\", and name a server name");
-        if (body.action === "remove") return await removeServer(agentDir, project, { scope, name });
-        if (body.action === "sign-out") return await signOutServer(agentDir, project, internals, { scope, name });
-        return await switchServer(agentDir, project, internals, { scope, name }, body.action === "enable");
+        if (body.action === "remove") return await removeServer(agentDirPath, project, { scope, name });
+        if (body.action === "sign-out") return await signOutServer(agentDirPath, project, internals, { scope, name });
+        return await switchServer(agentDirPath, project, internals, { scope, name }, body.action === "enable");
       }
       case "set-enabled": {
         const servers = readServerList(body.servers);
         if (typeof body.enabled !== "boolean" || !servers) {
           return refusal(400, "invalid-request", `enabled must be a boolean, and servers a list of 1 to ${MAX_BULK_SERVERS} { scope, name }`);
         }
-        return await switchServers(agentDir, project, internals, servers, body.enabled);
+        return await switchServers(agentDirPath, project, internals, servers, body.enabled);
       }
       case "set-exposure": {
         const scope = readScope(body.scope);
@@ -594,16 +601,16 @@ export async function POST(req: Request) {
         if (!scope || name === undefined || !isMcpExposure(body.exposure)) {
           return refusal(400, "invalid-request", `scope must be "global" or "project", name a server name, and exposure one of ${MCP_EXPOSURES.join(", ")}`);
         }
-        return await setServerExposure(agentDir, project, { scope, name }, body.exposure);
+        return await setServerExposure(agentDirPath, project, { scope, name }, body.exposure);
       }
       case "undo": {
         if (typeof body.token !== "string" || body.token.length === 0 || body.token.length > 100) {
           return refusal(400, "invalid-request", "token must be the token a remove answered with");
         }
-        return await undoRemoval(agentDir, project, body.token);
+        return await undoRemoval(agentDirPath, project, body.token);
       }
       case "add":
-        return await addServer(agentDir, project, internals, body);
+        return await addServer(agentDirPath, project, internals, body);
       default:
         return refusal(400, "invalid-request", "action must be add, enable, disable, remove, set-enabled, set-exposure, undo or sign-out");
     }

@@ -23,6 +23,7 @@ import type {
   McpSessionStatus,
   McpTestResponse,
   McpTestResult,
+  ProjectMcpListingErrorCode,
   ProjectTrustStatus,
 } from "@/lib/api-types";
 import type { McpImportFieldValue, McpImportNote } from "@/lib/mcp-import";
@@ -738,6 +739,14 @@ export interface McpLoadFailure {
   reason?: McpRefusalReason;
   /** No answer within `MCP_OVERVIEW_TIMEOUT_MS`; the request was aborted. */
   timedOut?: boolean;
+  /**
+   * Why an internal step could not finish, when the route named it (the MCP
+   * listing's worker, TASK-000277), or `mcp-listing-timeout` for a load that
+   * ran past the panel's deadline. Absent for every other failure.
+   */
+  code?: ProjectMcpListingErrorCode;
+  /** Whether asking again can succeed; the panel offers a retry when true. */
+  retriable?: boolean;
 }
 
 /**
@@ -781,6 +790,8 @@ export function refusalFailure(data: unknown, status: number): McpActionFailure 
     ...(typeof breadth?.kind === "string" && typeof breadth.path === "string" ? { breadth: breadth as FreshFolderTrustBreadth } : {}),
     ...(typeof trust?.requiresTrust === "boolean" && typeof trust.trusted === "boolean" ? { trust: trust as ProjectTrustStatus } : {}),
     ...(refusal.trustKept === true ? { trustKept: true } : {}),
+    ...(typeof refusal.code === "string" ? { code: refusal.code as ProjectMcpListingErrorCode } : {}),
+    ...(typeof refusal.retriable === "boolean" ? { retriable: refusal.retriable } : {}),
   };
 }
 
@@ -874,7 +885,12 @@ export async function loadMcpOverview(
 ): Promise<McpLoadResult> {
   return withinDeadline<McpLoadResult>(
     (deadlineSignal) => loadWithin(cwd, fetchImpl, deadlineSignal),
-    () => ({ ok: false, error: { error: `GET /api/mcp did not answer within ${timeoutMs} ms`, timedOut: true } }),
+    () => ({
+      ok: false,
+      // Named and retriable as the route would have answered it: the wait ran out
+      // while the listing's worker was still parsing the SDK (TASK-000277).
+      error: { error: `GET /api/mcp did not answer within ${timeoutMs} ms`, timedOut: true, code: "mcp-listing-timeout", retriable: true },
+    }),
     timeoutMs,
     signal,
   );

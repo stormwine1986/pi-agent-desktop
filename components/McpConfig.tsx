@@ -1045,6 +1045,19 @@ export function McpConfigView({
             ) : load.state === "failed" ? (
               <div role="alert" className="config-sidebar-message is-error">
                 {t("mcp.loadFailed")} {failureText(load.error, t)}
+                {/* Named and retriable as the route answered it (TASK-000277): the
+                    worker that builds the listing died or ran out of time, which is
+                    not an empty file, so the panel says so and offers another try. */}
+                {(load.error.code || load.error.retriable) && (
+                  <div className="mcp-config-load-retry">
+                    {load.error.code && <code className="mcp-config-chip">{load.error.code}</code>}
+                    {load.error.retriable && (
+                      <ConfigButton variant="ghost" size="small" onClick={onRefresh} disabled={refreshing}>
+                        {t("mcp.loadRetry")}
+                      </ConfigButton>
+                    )}
+                  </div>
+                )}
               </div>
             ) : data && context ? (
               <>

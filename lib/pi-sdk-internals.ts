@@ -38,8 +38,19 @@ const SDK_MODULES = {
   configValues: "dist/core/resolve-config-value.js",
 } as const;
 
-type SdkModuleName = keyof typeof SDK_MODULES | "mcpClient";
-type MemberKind = "class" | "function";
+/**
+ * The two files behind the built-in extension switches: the package manager
+ * that applies the `extensions` patterns and the settings manager it reads
+ * them through (`sdkSwitchModuleFiles()`, TASK-000277). Deliberately not in
+ * `SDK_MODULES`: `importPiSdkInternals()` imports every entry there.
+ */
+const SWITCH_MODULES = {
+  packageManager: "dist/core/package-manager.js",
+  settingsManager: "dist/core/settings-manager.js",
+} as const;
+
+export type SdkModuleName = keyof typeof SDK_MODULES | "mcpClient";
+export type MemberKind = "class" | "function";
 
 const MEMBERS = {
   McpServerConnection: { module: "mcpRuntime", kind: "class" },
@@ -254,6 +265,11 @@ function isClass(value: unknown): boolean {
   return typeof value === "function" && /^class[\s{]/.test(Function.prototype.toString.call(value));
 }
 
+/** The PI_PACKAGE_DIR refusal, worded once: every reader of the SDK answers it identically. */
+function piPackageDirRefusal(): string {
+  return `PI_PACKAGE_DIR is set; MCP support loads only from the ${SDK_PACKAGE} that Entity Assistant runs`;
+}
+
 async function importFile(path: string): Promise<Record<string, unknown>> {
   // Loaded at runtime from the SDK's own files, never bundled: a bundled copy
   // would be a second module instance with its own classes.
@@ -373,7 +389,7 @@ export async function importPiSdkInternals(options: {
   // PI_PACKAGE_DIR moves getPackageDir() away from the SDK this process
   // loaded, so file URLs would load a second copy.
   if (environment.PI_PACKAGE_DIR) {
-    return { ok: false, reason: `PI_PACKAGE_DIR is set; MCP support loads only from the ${SDK_PACKAGE} that Entity Assistant runs` };
+    return { ok: false, reason: piPackageDirRefusal() };
   }
 
   // Imported here, not with the module (TASK-000113): the first screen reaches
@@ -468,12 +484,43 @@ export type McpListingModuleFiles =
   | { ok: true; servers: string; configValues: string }
   | { ok: false; reason: string };
 
+/**
+ * The two SDK files that decide the built-in extension switches, by absolute
+ * path (TASK-000277). `readBuiltinExtensionSwitches()` (`lib/builtin-extensions.ts`)
+ * needs `DefaultPackageManager` and `SettingsManager` — the whole package root
+ * for two classes, which is 1.5–2.9 s of module parsing on the request thread.
+ * The listing worker imports these two files instead (143 KB together) and
+ * answers the switches, so Settings › MCP never parses the graph; every other
+ * caller already has it loaded.
+ */
+export type SdkSwitchModuleFiles =
+  | { ok: true; packageManager: string; settingsManager: string }
+  | { ok: false; reason: string };
+
+/** Where the switches' two SDK classes live, or why they cannot be found. */
+export function sdkSwitchModuleFiles(
+  environment: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): SdkSwitchModuleFiles {
+  if (environment.PI_PACKAGE_DIR) return { ok: false, reason: piPackageDirRefusal() };
+  try {
+    const packageDir = resolvedSdkPackageDir(cwd);
+    return {
+      ok: true,
+      packageManager: join(packageDir, SWITCH_MODULES.packageManager),
+      settingsManager: join(packageDir, SWITCH_MODULES.settingsManager),
+    };
+  } catch (error) {
+    return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };
+  }
+}
+
 export function mcpListingModuleFiles(
   environment: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): McpListingModuleFiles {
   if (environment.PI_PACKAGE_DIR) {
-    return { ok: false, reason: `PI_PACKAGE_DIR is set; MCP support loads only from the ${SDK_PACKAGE} that Entity Assistant runs` };
+    return { ok: false, reason: piPackageDirRefusal() };
   }
   try {
     const packageDir = resolvedSdkPackageDir(cwd);
@@ -484,5 +531,137 @@ export function mcpListingModuleFiles(
     };
   } catch (error) {
     return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };
+  }
+}
+
+/**
+ * What the listing worker needs to answer Settings › MCP's availability
+ * question (TASK-000277): the files `importPiSdkInternals()` loads, and the
+ * checks it makes on them, as data. Nothing here decides anything — the worker
+ * imports the files, tries the checks in this order, and reports what it saw
+ * (`SdkInternalsProbeAnswer`); the verdict's wording is built on this thread by
+ * `sdkInternalsProbeReason()`, so the sentences live in one place.
+ *
+ * Everything below is computed here, cheaply (two package lookups, no module
+ * parsed): an SDK that cannot be located or whose pi-mcp copy cannot be
+ * resolved is already a final `internals-unavailable` reason, exactly as
+ * `importPiSdkInternals()` gives it.
+ */
+export interface SdkInternalsProbe {
+  /** Real path of the SDK package, as `getPackageDir()` must agree with. */
+  packageDir: string;
+  sdkEntry: string;
+  /** In the order `importPiSdkInternals()` loads them: `SDK_MODULES`, then pi-mcp's `mcpClient` last. */
+  modules: { name: string; path: string }[];
+  /** The members `PiSdkInternals` reads, by the module that must export them and how. */
+  members: { name: string; module: SdkModuleName; kind: MemberKind }[];
+  /**
+   * Why pi-mcp's own entry cannot be resolved, when it cannot: `modules` then
+   * has no `mcpClient`, and the worker reports this at the point
+   * `importPiSdkInternals()` resolves it — after the SDK root and before the
+   * modules, so a broken install keeps the reason it always gave.
+   */
+  mcpClientError?: string;
+}
+
+export type SdkInternalsProbeRequest = { ok: true; probe: SdkInternalsProbe } | { ok: false; reason: string };
+
+/** The probe's data for the SDK pi-web runs, or the reason there is none. */
+export function sdkInternalsProbeRequest(
+  environment: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): SdkInternalsProbeRequest {
+  if (environment.PI_PACKAGE_DIR) return { ok: false, reason: piPackageDirRefusal() };
+  let packageDir: string;
+  try {
+    packageDir = resolvedSdkPackageDir(cwd);
+  } catch (error) {
+    return { ok: false, reason: `cannot locate ${SDK_PACKAGE}: ${errorMessage(error)}` };
+  }
+  let mcpClient: string | undefined;
+  let mcpClientError: string | undefined;
+  try {
+    mcpClient = resolveMcpClientEntry(packageDir);
+  } catch (error) {
+    mcpClientError = errorMessage(error);
+  }
+  const modules: { name: SdkModuleName; path: string }[] = (
+    Object.keys(SDK_MODULES) as Exclude<SdkModuleName, "mcpClient">[]
+  ).map((name) => ({ name, path: join(packageDir, SDK_MODULES[name]) }));
+  if (mcpClient !== undefined) modules.push({ name: "mcpClient", path: mcpClient });
+  return {
+    ok: true,
+    probe: {
+      packageDir,
+      sdkEntry: join(packageDir, SDK_ENTRY),
+      modules,
+      members: (Object.keys(MEMBERS) as (keyof typeof MEMBERS)[]).map((name) => ({
+        name,
+        module: MEMBERS[name].module,
+        kind: MEMBERS[name].kind,
+      })),
+      ...(mcpClientError === undefined ? {} : { mcpClientError }),
+    },
+  };
+}
+
+/**
+ * What the worker saw, in the order `importPiSdkInternals()` checks it. A step
+ * stands for one of its refusals; the sentence is built by
+ * `sdkInternalsProbeReason()`.
+ */
+export type SdkInternalsProbeAnswer =
+  | { ok: true }
+  | {
+      ok: false;
+      step:
+        | "entry-load"
+        | "entry-exports"
+        | "locate"
+        | "package-dir"
+        | "mcp-client"
+        | "module-load"
+        | "second-copy"
+        | "member"
+        | "transport-mismatch"
+        | "transport-error";
+      /** The file the step is about, for the steps that name one. */
+      path?: string;
+      name?: string;
+      /** The module whose export the `member` step is about, named as `importPiSdkInternals()` names it. */
+      module?: SdkModuleName;
+      kind?: string;
+      /** `getPackageDir()`'s answer that does not match `packageDir`. */
+      loadedDir?: string;
+      message?: string;
+    };
+
+/** The refusal `importPiSdkInternals()` gives for the same fact, worded here once. */
+export function sdkInternalsProbeReason(answer: Exclude<SdkInternalsProbeAnswer, { ok: true }>, probe: SdkInternalsProbe): string {
+  switch (answer.step) {
+    case "entry-load":
+      return `cannot load ${probe.sdkEntry}: ${answer.message ?? "unknown error"}`;
+    case "entry-exports":
+      return `${probe.sdkEntry} does not export createMcpExtension and getPackageDir`;
+    case "locate":
+      return `cannot locate ${SDK_PACKAGE}: ${answer.message ?? "unknown error"}`;
+    case "package-dir":
+      return `${SDK_PACKAGE} at ${answer.loadedDir ?? "unknown"} is not the package Entity Assistant resolves (${probe.packageDir})`;
+    case "mcp-client":
+      return `${MCP_PACKAGE}: ${answer.message ?? "it cannot be resolved"}`;
+    case "module-load":
+      return `cannot load ${answer.path ?? "the SDK's MCP module"}: ${answer.message ?? "unknown error"}`;
+    case "second-copy":
+      return `${SDK_MODULES.mcpExtension} loaded as a second copy of ${SDK_PACKAGE}`;
+    case "member": {
+      // Named as `importPiSdkInternals()` names it: the relative file inside the SDK, or the package.
+      const memberModule = answer.module ?? "mcpServers";
+      const path = memberModule === "mcpClient" ? MCP_PACKAGE : SDK_MODULES[memberModule];
+      return `${path} does not export ${answer.name ?? "a member"} as a ${answer.kind ?? "member"}`;
+    }
+    case "transport-mismatch":
+      return `${MCP_PACKAGE} resolved to another copy than ${SDK_MODULES.mcpRuntime} uses`;
+    case "transport-error":
+      return `${SDK_MODULES.mcpRuntime}: ${answer.message ?? "unknown error"}`;
   }
 }

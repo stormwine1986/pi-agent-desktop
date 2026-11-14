@@ -7,6 +7,8 @@ import {
   readGlobalSettings,
   updateGlobalSettings,
 } from "./global-settings-file";
+import { loadCodemodeMerges, type CodemodeMergeCase } from "./mcp-listing-worker";
+import { sdkSwitchModuleFiles } from "./pi-sdk-internals";
 import { resolveDefaultToolEntries } from "./powershell-settings";
 import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file";
 
@@ -95,33 +97,6 @@ const GLOBAL_SETTINGS_FOR: Record<CodemodePreference, string | undefined> = {
 };
 
 /**
- * Global and project settings texts merged by pi's own SettingsManager, as a
- * trusted project's session merges them.
- *
- * The SDK is imported at the call, not with the module (TASK-000113): this file
- * is reachable from the first screen's project-trust request, and one static
- * symbol from `@earendil-works/*` loads the whole 37 MB graph there. The merge
- * still has to be pi's, not a second implementation of its rules, so it is
- * awaited here instead of copied. The callback form above cannot: Settings
- * Manager builds its tool list synchronously.
- */
-async function mergedSettings(globalText: string | undefined, projectText: string) {
-  const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
-  const texts = { global: globalText, project: projectText };
-  const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
-    withLock: (scope, fn) => {
-      fn(texts[scope]);
-    },
-  };
-  return SettingsManager.fromStorage(storage, { projectTrusted: true });
-}
-
-/** Whether a session starts with `codemode` active, merged and resolved by pi's own SettingsManager. */
-async function startsWithCodemode(globalText: string | undefined, projectText: string): Promise<boolean> {
-  return (await mergedSettings(globalText, projectText)).getDefaultTools()?.includes(CODEMODE) === true;
-}
-
-/**
  * The Code mode a project's settings text gives its sessions when the global
  * choice no longer matters there, undefined when the global choice still
  * decides. A project `defaultTools` list with a plain tool name replaces the
@@ -130,12 +105,27 @@ async function startsWithCodemode(globalText: string | undefined, projectText: s
  * resolves both global choices with the project's text, so its rules apply
  * exactly, malformed values included; the two agreeing is what overriding
  * means. A text that does not parse reads as empty, as pi reads it.
+ *
+ * The merge is pi's own `SettingsManager`, run on the listing worker
+ * (`loadCodemodeDefaults()`, TASK-000277): importing the package root for it was
+ * seconds on the thread that answers Settings › MCP for a trusted project,
+ * which is the read that reaches this. What the merged `defaultTools` list
+ * *means* stays here.
  */
 export async function projectCodemodePreference(projectText: string | undefined): Promise<CodemodePreference | undefined> {
   if (projectText === undefined) return undefined;
-  const automatic = await startsWithCodemode(GLOBAL_SETTINGS_FOR.automatic, projectText);
-  if (automatic !== await startsWithCodemode(GLOBAL_SETTINGS_FOR.always, projectText)) return undefined;
-  return automatic ? "always" : "automatic";
+  const files = sdkSwitchModuleFiles();
+  if (!files.ok) throw new Error(files.reason);
+  const [automatic, always] = await mergeCodemode(
+    [GLOBAL_SETTINGS_FOR.automatic, GLOBAL_SETTINGS_FOR.always].map((globalText) => ({
+      ...(globalText === undefined ? {} : { global: globalText }),
+      project: projectText,
+    })),
+    files.settingsManager,
+  );
+  const startsWith = automatic.defaultTools?.includes(CODEMODE) === true;
+  if (startsWith !== (always.defaultTools?.includes(CODEMODE) === true)) return undefined;
+  return startsWith ? "always" : "automatic";
 }
 
 export function projectSettingsPath(cwd: string): string {
@@ -233,11 +223,24 @@ async function writeCodemodeValue<T>(
   });
 }
 
-/** The merged `codemode[key]` a trusted project's session reads, with `globalValue` in the global settings. */
-async function mergedCodemodeValue(key: CodemodeKey, globalValue: unknown, projectText: string): Promise<unknown> {
-  const globalText = JSON.stringify({ codemode: { [key]: globalValue } });
-  const merged = await mergedSettings(globalText, projectText);
-  return codemodeValueOf({ codemode: merged.getSettings().codemode }, key);
+/** The merges a read asks for, with the file they need located once per call. */
+async function mergeCodemode(cases: CodemodeMergeCase[], settingsManager: string) {
+  return await loadCodemodeMerges({ cases, modules: { settingsManager } });
+}
+
+/** The merged `codemode[key]` a trusted project's session reads, per global value, from one round trip. */
+async function mergedCodemodeValues(
+  key: CodemodeKey,
+  globalValues: readonly unknown[],
+  projectText: string,
+): Promise<unknown[]> {
+  const files = sdkSwitchModuleFiles();
+  if (!files.ok) throw new Error(files.reason);
+  const merges = await mergeCodemode(
+    globalValues.map((value) => ({ global: JSON.stringify({ codemode: { [key]: value } }), project: projectText })),
+    files.settingsManager,
+  );
+  return merges.map((merged) => codemodeValueOf({ codemode: merged.codemode }, key));
 }
 
 /**
@@ -255,8 +258,8 @@ async function projectCodemodeValue(
   projectText: string | undefined,
 ): Promise<{ raw: unknown } | undefined> {
   if (projectText === undefined) return undefined;
-  const first = await mergedCodemodeValue(key, globalValues[0], projectText);
-  if (JSON.stringify(first) !== JSON.stringify(await mergedCodemodeValue(key, globalValues[1], projectText))) return undefined;
+  const [first, second] = await mergedCodemodeValues(key, globalValues, projectText);
+  if (JSON.stringify(first) !== JSON.stringify(second)) return undefined;
   return { raw: first };
 }
 

@@ -429,6 +429,23 @@ test("loading, a failed load and an empty listing each say so", () => {
     text(view({ load: { state: "failed", error: { error: "GET /api/mcp did not answer within 15000 ms", timedOut: true } } })),
     /Could not read the MCP settings\. Entity Assistant did not answer in time\. Press Refresh to try again\./,
   );
+  // A listing the route could not build (TASK-000277: its worker died or ran out
+  // of time) says which failure it was and offers the retry that can work — and
+  // never reads as a file that declares no servers.
+  const coded = decode(view({
+    load: { state: "failed", error: { error: "the MCP listing worker failed: boom", reason: "internal", code: "mcp-listing-worker-failed", retriable: true } },
+  }));
+  assert.match(coded, /Could not read the MCP settings\. the MCP listing worker failed: boom/);
+  assert.match(coded, /<code class="mcp-config-chip">mcp-listing-worker-failed<\/code>/);
+  assert.match(coded, /class="mcp-config-load-retry"><code class="mcp-config-chip">[\s\S]*?<button type="button" class="config-button config-button-ghost config-button-small">Try again<\/button>/);
+  assert.doesNotMatch(text(view({ load: { state: "failed", error: { error: "boom", reason: "internal", code: "mcp-listing-timeout", retriable: true } } })), /No servers/);
+  // Only a failure that says another try can work offers one; the code still shows.
+  const codedNoRetry = decode(view({
+    load: { state: "failed", error: { error: "boom", reason: "internal", code: "mcp-listing-worker-failed", retriable: false } },
+  }));
+  assert.match(codedNoRetry, /<code class="mcp-config-chip">mcp-listing-worker-failed<\/code>/);
+  assert.doesNotMatch(codedNoRetry, /Try again<\/button>/);
+
   const empty = text(view({ load: { state: "loaded", data: overview() } }));
   assert.match(empty, /No MCP servers yet\. Servers in ~\/\.pi\/agent\/mcp\.json and in a project's \.pi\/mcp\.json appear here\./);
   assert.match(empty, /global No servers/);

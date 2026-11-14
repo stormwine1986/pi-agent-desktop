@@ -646,6 +646,7 @@ export const enLocale: LocalePlugin = {
     "mcp.reason.folder-not-fresh": "The folder changed since: it has a trust decision now, or resources that need one, so Entity Assistant did not trust it and added nothing.",
     "mcp.reason.trust-too-broad": "Trusting this folder would trust the folders inside it too, so Entity Assistant does not do it by itself.",
     "mcp.loadFailed": "Could not read the MCP settings.",
+    "mcp.loadRetry": "Try again",
     "mcp.loadTimedOut": "Entity Assistant did not answer in time. Press Refresh to try again.",
     "mcp.projectNotListed": "This project's servers are not listed: {reason}",
     "mcp.serverCount": "{enabled} of {total} servers turned on",

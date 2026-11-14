@@ -24,18 +24,73 @@ export const MCP_CONFIG_KEY_MAX_DEPTH = 64;
 const TOO_DEEP = "<too deep>";
 
 /**
+ * The same marker as a value: a `Map`, which no JSON an entry can hold is, and
+ * which structured clone carries across a worker boundary undamaged. See
+ * `truncateConfigValue()`.
+ */
+const TOO_DEEP_VALUE = new Map<unknown, unknown>();
+
+/**
  * JSON with sorted keys, so an entry compares equal however its file orders it.
  * Total: past `MCP_CONFIG_KEY_MAX_DEPTH` levels an array or object prints as a
  * fixed marker instead of being followed. The result only has to be the same
  * for the same value, so two entries that differ only that deep compare equal.
  */
 export function canonicalJson(value: unknown, depth = 0): string {
+  // `truncateConfigValue()`'s marker: prints what the untruncated value prints
+  // at that depth, so a truncated entry hashes to the entry's own key.
+  if (value === TOO_DEEP_VALUE) return TOO_DEEP;
   if (Array.isArray(value) || isRecord(value)) {
     if (depth >= MCP_CONFIG_KEY_MAX_DEPTH) return TOO_DEEP;
     if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item, depth + 1)).join(",")}]`;
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * A copy of a parsed entry whose arrays and objects stop at
+ * `MCP_CONFIG_KEY_MAX_DEPTH`, where `canonicalJson()` stops following them too.
+ * Iterative, and the copy is what may cross a thread boundary: structured clone
+ * recurses once per level, and an untrusted repository's `.pi/mcp.json` can nest
+ * thousands deep — TASK-000277 hit that with `lib/mcp-host.test.mjs`'s
+ * 5,000-level fixture, where the worker request itself overflowed the stack.
+ * Nothing the listing shows lives that deep: an entry is described by its known
+ * fields, and the marker prints as what the untruncated value prints there, so
+ * `configKey` is the key the same entry has without the truncation. One
+ * consequence to know, confined to entries deeper than the cap: the SDK's
+ * validator is shown the marker where its input was, so a known field nested
+ * that deep is judged as an object that is not one, not as its real shape.
+ */
+export function truncateConfigValue(value: unknown, maxDepth: number = MCP_CONFIG_KEY_MAX_DEPTH): unknown {
+  if (!Array.isArray(value) && !isRecord(value)) return value;
+  const root: unknown[] | Record<string, unknown> = Array.isArray(value) ? [] : {};
+  const pending: { source: unknown[] | Record<string, unknown>; target: unknown[] | Record<string, unknown>; depth: number }[] = [
+    { source: value, target: root, depth: 0 },
+  ];
+  while (pending.length > 0) {
+    const { source, target, depth } = pending.pop() as (typeof pending)[number];
+    const pairs: [string | number, unknown][] = Array.isArray(source)
+      ? source.map((item, index) => [index, item] as [number, unknown])
+      : Object.entries(source);
+    for (const [key, item] of pairs) {
+      const set = (assigned: unknown) => {
+        (target as Record<string | number, unknown>)[key] = assigned;
+      };
+      if (!Array.isArray(item) && !isRecord(item)) {
+        set(item);
+        continue;
+      }
+      if (depth + 1 >= maxDepth) {
+        set(TOO_DEEP_VALUE);
+        continue;
+      }
+      const next: unknown[] | Record<string, unknown> = Array.isArray(item) ? [] : {};
+      set(next);
+      pending.push({ source: item, target: next, depth: depth + 1 });
+    }
+  }
+  return root;
 }
 
 // One key per server process: hot reload re-evaluates this module, globalThis keeps it.

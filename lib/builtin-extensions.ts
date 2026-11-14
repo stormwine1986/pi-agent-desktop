@@ -10,6 +10,8 @@ import type {
 import { CONFIG_DIR_NAME } from "./agent-dir";
 import { McpHost, type McpHostOptions } from "./mcp-host";
 import { createPiWebMcpTransportFactory } from "./mcp-transport";
+import { loadBuiltinSwitches, type BuiltinSwitchResolution, type BuiltinSwitchSet } from "./mcp-listing-worker";
+import { sdkSwitchModuleFiles } from "./pi-sdk-internals";
 import { loadPiSdkInternals, type PiSdkInternals, type PiSdkInternalsResult } from "./pi-sdk-internals";
 import { mayReadProjectConfigNow } from "./project-trust";
 import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file";
@@ -271,34 +273,17 @@ function readSettingsExtensions(path: string, maxBytes?: number): string[] | und
 
 type SettingsScope = "global" | "project";
 
-async function resolveBuiltinSwitches(
-  options: { agentDir: string; cwd: string; projectTrusted: boolean },
-  lists: Partial<Record<SettingsScope, string[]>>,
+/** One resolution's answers, as the switches are shown: the scope that turned a built-in off. */
+function switchesFrom(
+  answer: BuiltinSwitchResolution,
   paths: Record<SettingsScope, string>,
-): Promise<Record<BuiltinExtensionName, BuiltinExtensionSwitch>> {
-  const { agentDir, cwd, projectTrusted } = options;
-  const { DefaultPackageManager, SettingsManager } = await loadSdk();
-  const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
-    withLock: (scope, fn) => {
-      const extensions = lists[scope];
-      fn(extensions ? JSON.stringify({ extensions }) : undefined);
-    },
-  };
-  const packageManager = new DefaultPackageManager({
-    cwd,
-    agentDir,
-    settingsManager: SettingsManager.fromStorage(storage, { projectTrusted }),
-    builtinExtensions: [...BUILTIN_EXTENSION_NAMES],
-  });
-  // Nothing is missing without packages; skip rather than install if that ever changes.
-  const resolved = await packageManager.resolve(async () => "skip");
+): Record<BuiltinExtensionName, BuiltinExtensionSwitch> {
   const switches = {} as Record<BuiltinExtensionName, BuiltinExtensionSwitch>;
   for (const name of BUILTIN_EXTENSION_NAMES) {
-    const resource = resolved.extensions.find((extension) => extension.path === `builtin:${name}`);
-    const enabled = resource?.enabled ?? true;
-    switches[name] = enabled
-      ? { enabled }
-      : { enabled, settingsPath: resource?.metadata.scope === "project" ? paths.project : paths.global };
+    const resolved = answer[name];
+    // A built-in the manager did not report is on: it keeps its entry even when it cannot run.
+    const enabled = resolved?.enabled !== false;
+    switches[name] = enabled ? { enabled } : { enabled, settingsPath: resolved?.scope === "project" ? paths.project : paths.global };
   }
   return switches;
 }
@@ -314,6 +299,14 @@ async function resolveBuiltinSwitches(
  * prompt and theme folders it auto-discovers, which only reads them. When a
  * trusted project has a list of its own, the global list is resolved a second
  * time on its own for each switch's `global` answer.
+ *
+ * The two files are read here; the resolution itself runs on the listing
+ * worker (`loadBuiltinSwitches()`, TASK-000277), because the SDK's
+ * `DefaultPackageManager` was the last thing Settings › MCP parsed on the
+ * request thread — 1.5–2.9 s of module loading for two classes. This is the
+ * read's only caller, so the round trip costs nothing else, and a worker
+ * failure is not a switch: it throws, and the settings read keeps the
+ * built-ins on with a warning, as it does for an unreadable file.
  */
 export async function readBuiltinExtensionSwitches(options: {
   agentDir: string;
@@ -331,9 +324,21 @@ export async function readBuiltinExtensionSwitches(options: {
   const global = readSettingsExtensions(paths.global);
   // The project file is the repository's, read by a GET: capped, and never a FIFO.
   const project = projectTrusted ? readSettingsExtensions(paths.project, PROJECT_SETTINGS_MAX_BYTES) : undefined;
-  const switches = await resolveBuiltinSwitches({ agentDir, cwd, projectTrusted }, { global, project }, paths);
-  if (project === undefined) return switches;
-  const globalSwitches = await resolveBuiltinSwitches({ agentDir, cwd, projectTrusted: false }, { global }, paths);
+  const files = sdkSwitchModuleFiles();
+  if (!files.ok) throw new Error(files.reason);
+  const sets: BuiltinSwitchSet[] = [{ ...(global === undefined ? {} : { global }), ...(project === undefined ? {} : { project }) }];
+  // The second resolution is the global list alone: what a global switch has to be weighed against.
+  if (project !== undefined) sets.push(global === undefined ? {} : { global });
+  const resolved = await loadBuiltinSwitches({
+    agentDir,
+    cwd,
+    builtins: [...BUILTIN_EXTENSION_NAMES],
+    sets,
+    modules: { packageManager: files.packageManager, settingsManager: files.settingsManager },
+  });
+  const switches = switchesFrom(resolved[0], paths);
+  if (resolved[1] === undefined) return switches;
+  const globalSwitches = switchesFrom(resolved[1], paths);
   for (const name of BUILTIN_EXTENSION_NAMES) switches[name].global = globalSwitches[name];
   return switches;
 }
