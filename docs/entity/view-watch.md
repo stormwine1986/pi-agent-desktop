@@ -222,6 +222,11 @@ fields = { 每个 requiredField: render(fill[该字段], {key,type,view,reason,f
 **为什么泵可以写这几个字段，而不算「写业务」**：字段名和是否必填都来自元数据，内容来自配置模板；
 泵不知道「这次为什么失败」以外的任何业务事实。业务结论（结论、方案、完成态）仍然只由执行项目写。
 
+**同一个类型在不同部署上可以不一样，别照抄例子。** 2026-11-16 实测：`ws_entity_base` 的 `TASK` 在
+`IN_PROGRESS → BLOCKED` 与 `IN_PROGRESS → FINISHED` 上 `requiredFields` 都是**空**（只有 `BLOCKED → FINISHED`
+要 `remarks`），而 `manhu` 系列的 `TASK` 这三条路由都要求 `remarks`。所以“要不要填、填哪个字段”只能现场查
+`get_metadata`：拿一个部署的模型去配另一个部署的视图，要么 7a 关拦下（要填的没配模板），要么配了却永远不发（路由本来不要）。
+
 ### 4.4 两个超时
 
 | 超时 | 起算点 | 用途 |
@@ -394,6 +399,6 @@ watch **不认识任何实体类型、关系或业务字段**，但它**认识�
 | 删掉 `claim.back` / `maxFailures` | 判据分不出「没干」与「干了没记账」，重试学不到新东西（`SSR-000090`） |
 | 派发改为按视图排序 | 客户端固定 `modified_at asc` 时，`orderBy: [priority, modified_at]` 这类意图无法表达——视图能排序就该按它派（`TASK-000457`） |
 | `order` 单独出现改为报错 | 静默忽略让「没有 orderBy 的 order」看起来生效了，其实没排序（`TASK-000460`） |
-| 转待人工带 `watch.fill` | `TASK` 的 `IN_PROGRESS → BLOCKED` 要求 `remarks`，不填就推不进去，条目卡在认领态且无声（`TASK-000461`） |
+| 转待人工带 `watch.fill` | 当时 `TASK` 的 `IN_PROGRESS → BLOCKED` 要求 `remarks`（`manhu` 系列现在仍然如此），不填就推不进去，条目卡在认领态且无声（`TASK-000461`） |
 
 需要设计推演原文时看需求条目（`SSR-000089` / `SSR-000090` / `SSR-000066`），本文只保留能照着实现的结论。
