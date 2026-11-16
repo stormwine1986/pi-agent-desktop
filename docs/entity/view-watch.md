@@ -392,7 +392,7 @@ watch **不认识任何实体类型、关系或业务字段**，但它**认识�
 | 从「缺陷专用」拉回「任意实体」 | 视图查什么就观察什么；机制不该认识 `Defect` 或 `solution` |
 | 删掉 `transition: { to, fields }` 业务回写 | 泵不猜「该写哪个字段」，那是业务 |
 | 删掉 `claim.back` / `maxFailures` | 判据分不出「没干」与「干了没记账」，重试学不到新东西（`SSR-000090`） |
-| 派发改为按视图排序 | 「最老优先」把优先级之类的东西挡在门外；视图能排序就该按它派（`TASK-000457`） |
+| 派发改为按视图排序 | 客户端固定 `modified_at asc` 时，`orderBy: [priority, modified_at]` 这类意图无法表达——视图能排序就该按它派（`TASK-000457`） |
 | `order` 单独出现改为报错 | 静默忽略让「没有 orderBy 的 order」看起来生效了，其实没排序（`TASK-000460`） |
 | 转待人工带 `watch.fill` | `TASK` 的 `IN_PROGRESS → BLOCKED` 要求 `remarks`，不填就推不进去，条目卡在认领态且无声（`TASK-000461`） |
 
