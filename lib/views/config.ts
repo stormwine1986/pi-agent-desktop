@@ -342,13 +342,26 @@ function asOrder(value: unknown): ViewOrder | null {
 }
 
 /**
+ * An explicit `order` (one value or a list) is a direction for keys, so it only
+ * means something next to `orderBy`.
+ *
+ * Written alone it used to reach the query builder, which sends `order` only
+ * when `orderBy` is set — the table then showed an unsorted list while the
+ * author believed the sort was configured. `list` already refuses the shape, so
+ * the panel refuses it too instead of dropping it silently (product decision A,
+ * TASK-000460). One sentence for both shapes: which shape was written is not
+ * the mistake.
+ */
+const ORDER_NEEDS_ORDER_BY = "order 需要同时写 orderBy（只写 order 会被忽略，等于没排序）";
+
+/**
  * `order:` — one direction for all keys, or one per key.
  *
  * A direction list is only meaningful against a key list of the same length;
  * a single value next to a key list keeps its meaning ("all of them",
- * `SSR-000066` rev20). A direction list with no `orderBy` is refused: it
- * describes keys that do not exist, and silently ignoring it is how a user ends
- * up believing the sort is configured.
+ * `SSR-000066` rev20). Either shape with no `orderBy` is refused: it describes
+ * keys that do not exist, and silently ignoring it is how a user ends up
+ * believing the sort is configured.
  */
 function parseOrder(
   raw: unknown,
@@ -360,7 +373,12 @@ function parseOrder(
 
   if (!Array.isArray(raw)) {
     const direction = asOrder(raw);
-    if (direction) return direction;
+    if (direction) {
+      // A parse failure in `orderBy` already said what to fix; pointing at
+      // `order` too would name the wrong field.
+      if (orderByOk && orderBy === null) problems.push(ORDER_NEEDS_ORDER_BY);
+      return direction;
+    }
     problems.push(`order 只能是 asc 或 desc（写的是 "${String(raw)}"）`);
     return "desc";
   }
@@ -389,7 +407,9 @@ function parseOrder(
   // top of it would point at the wrong field.
   if (!orderByOk) return "desc";
   if (keyCount === 0) {
-    problems.push("order 写成了数组但没有 orderBy：排序方向必须跟着排序键");
+    // Same sentence as the single-value case above: the mistake is "no
+    // `orderBy`", not "a list instead of a value".
+    problems.push(ORDER_NEEDS_ORDER_BY);
     return "desc";
   }
   if (directions.length !== keyCount) {

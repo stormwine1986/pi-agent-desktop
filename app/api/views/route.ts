@@ -237,6 +237,11 @@ async function runView(agentDir: string, cwd: string, view: ViewDefinition, offs
     args.orderBy = view.orderBy;
     args.order = view.order;
   }
+  // `order` never travels alone: a view that writes it without `orderBy` is
+  // refused by `readViewsConfig` (`ORDER_NEEDS_ORDER_BY`), so `entry.view` is
+  // null and this function is never reached for it — the panel gets the reason
+  // and no query is sent. `list` refuses the same shape, which is why the panel
+  // must not paper over it by silently sorting nothing (TASK-000460).
 
   const result = await callMcpTool(target.target, "list", args);
   if (!result.ok) return { ...empty, error: withQuery(result.error) };

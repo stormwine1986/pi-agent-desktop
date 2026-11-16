@@ -293,3 +293,37 @@ test("AC-5: mismatched key and direction counts are refused before any query", a
   assert.match(view.error, /order 有 1 个方向，orderBy 有 2 个键（长度不齐/);
   assert.equal(listCalls().length, before, "nothing to sort by, nothing to ask");
 });
+
+/**
+ * `order` without `orderBy` (TASK-000460, product decision A): the panel used to
+ * drop the direction and show an unsorted table with no error, while `list`
+ * refuses the same shape — the configuration mistake was only visible in the
+ * one place that did not explain it. Both shapes are now configuration errors,
+ * and the row is answered without a query, exactly like a bad `orderBy`.
+ */
+const orderOnly = (orderValue) => `views:
+  - title: 只写了方向
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+    order: ${orderValue}
+`;
+
+test("a single order without orderBy is an error and sends no query", async () => {
+  const before = listCalls().length;
+  const [view] = await evaluate(orderOnly("desc"));
+
+  assert.match(view.error, /order 需要同时写 orderBy/);
+  assert.equal(view.rows.length, 0);
+  assert.equal(listCalls().length, before, "a misconfigured sort must never pay for a query");
+});
+
+test("an order list without orderBy is the same error, same message", async () => {
+  const before = listCalls().length;
+  const [view] = await evaluate(orderOnly("[desc, asc]"));
+
+  assert.match(view.error, /order 需要同时写 orderBy/);
+  assert.equal(view.rows.length, 0);
+  assert.equal(listCalls().length, before, "a misconfigured sort must never pay for a query");
+});
