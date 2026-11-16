@@ -1,106 +1,64 @@
 # 视图观察：把视图里的实体派给本地项目自动执行（view-watch）
 
-> **已归档，不再是最新口径。** 现行契约见 `SR-000032` 与 `SSR-000089`（VW-WATCH）/ `SSR-000090`（VW-CLAIM）/
-> `SSR-000066`（VW-CFG）。本文保留的是**推理过程**，不是可照着配的说明书。
+> **分工**：本文讲**机制**——泵每一轮怎么决定、往实体写什么、什么时候判定、失败了往哪去。
+> **怎么配**（`views.yaml` 每个键、每条报错文案、交付前自检清单）在
+> [工作台视图的配置指南.md](工作台视图的配置指南.md) 第 10 节「派发：`watch`」，两边互相链接，不各写一份。
 >
-> 一句话：**给一条视图配上 `watch`，视图里还有待处理的实体，就把最老的那条派给指定项目开一个会话去做；同一个项目同时最多一个会话在跑——只算泵自己起的会话，人工续跑的会话不算（见 §10）**。
->
-> **2026-11-09 更正**：最后半句已作废。现行口径是「应用内任何运行中的会话都挡住派发（人工恢复 / 续跑同样计入），另有待人工闸门」，见 `SSR-000089` ④⑦ 与 `TASK-000014`；本文的 §10 与 §5 仍是旧推理，不要照着实现。
+> **契约**：`SR-000032` / `SSR-000089`（VW-WATCH）、`SSR-000090`（VW-CLAIM）、`SSR-000066`（VW-CFG）。
+> 本文是实现口径，与代码同步维护：`lib/views/watch/{index,pump,core,runtime,limit}.ts`、`lib/views/fill.ts`、
+> `lib/views/order-by.ts`、`lib/views/config.ts`。
 
-## 与现状的冲突（2026-11-08）
+**一句话**：给一条视图配上 `watch`，视图里还有待处理的实体，就按**这条视图自己的排序**取第一条认领给
+`watch.project` 开一个会话；**一轮最多派一条**，判定发生在**会话结束那一刻**，没做完的直接进「待人工」，不重试。
 
-照下文配置会直接报错或行为不同，先看这张表：
+## 0. 现状口径（2026-11-16）
 
-| 本文写的 | 现状 |
-| --- | --- |
-| `claim.back`：失败归还到待处理态，下一轮再试 | **已移除**。失败直接进 `claim.manual`，不重试 |
-| `maxFailures`：连续失败上限 | **已移除**。没有重试也就没有上限；写了会报错 |
-| 「状态：设计已定，未实现」 | 已实现，并跑过真回合 |
-| 泵只写「认领 / 归还」两个迁移 | 泵只写「认领 / 待人工」两个迁移 |
+三个已落地的行为，旧稿里没有或写反了：
 
-原因见 `SSR-000090` 的【为何不重试】：泵的判据只有“会话结束时它是否还是认领态”，分不出“活没干”与“干了没记账”，重跑只会得到同样的结果。
-
-## 修订（2026-11-08）
-
-五处更正，前三处把「缺陷专用」拉回「任意实体」，后两处纠正泵的生死条件与占用方式：
-
-| 原设计 | 现在 | 原因 |
+| 行为 | 现在的实现 | 落地单 |
 | --- | --- | --- |
-| watch 的是缺陷；配置写 `promoteTo: FIXED`、回写 `solution` 字段 | watch **任意实体**；业务字段**完全归执行项目** | 视图查什么就该观察什么；怎么记账是执行项目自己的事，机制不该认识 `Defect`，也不该认识 `solution` |
-| 按缺陷解析 `affects` → 子系统 → `routes` 派到不同仓库 | **一条视图 → 一个本地项目**（`watch.project` 单值） | 要派给 N 个执行项目，就写 N 条视图。路由不再逐条判断 |
-| 泵按模板回写 `transition: { to, fields }` | **删掉**。执行项目自己写业务字段（MCP 已预配） | 泵不猜“该写哪个字段”——那是业务，不是调度 |
-| 泵挂在待办面板的轮询上：面板收起、切到别的 tab、窗口不可见都会停 | **服务端循环**：应用不退出就派发 | 守护最该工作的时刻，恰好是人不盯着它的时候 |
-| 派发前不动实体，靠本地 run 日志去重 | **认领**：派发前把状态推进到配置的认领状态（`claim.to`），失败时归还 | 占用是实体上的**共享事实**，跨机器成立；本地日志只在这台机器上有效 |
+| **派发顺序** | 待派集合按**视图自己的 `orderBy` / `order`** 向底座取，**第一条**被认领；视图没写 `orderBy` 才回退 `modified_at` 升序 | `TASK-000457`（`a535b47c`）、`SSR-000089` rev33 |
+| **只写 `order`** | 配置**报错**「order 需要同时写 orderBy」，不发查询，不再静默忽略 | `TASK-000460`（`e99c41bc`） |
+| **转待人工写字段** | 自动进 `claim.manual` 时，按「目标路由 `requiredFields` × `watch.fill` 模板」生成 `fields`；认领本身永远不带 `fields` | `TASK-000461`（`47e85cba`） |
 
-连带删除：`affects` 解析、`routes` 映射、路由缓存、`ambiguous` / `no-route` 两个状态、**`transition` 与业务字段回写**、**以及「面板轮询是唯一触发源」这个前提**（`/api/views?watch=1` 不再必需）。
+旧稿里**从未实现、已从文档删除**的东西：`claim.back` 归还重试、`maxFailures` 连续失败上限、
+`~/.pi/agent/watch/runs.jsonl` 运行记录、失败后自动 `git` 回滚、`watch.order` 配置键。
+写 `claim.back` / `maxFailures` 现在会直接报错（不是忽略）；`watch.order` 不在模型里，写了也不生效（派发顺序只看视图级 `orderBy` / `order`）；
+泵没有运行记录文件，只有 `[watch]` 日志行（§7）。
 
-> 泵写实体这件事在 2026-11-08 反复过一次，界线定在这里：**泵只写「认领 / 归还」这一个状态迁移**（外加该状态自身的必填常量字段），**不写任何业务结论**。前一次删掉的是后者。
+## 1. 形态：服务端循环
 
-## 0. 已定的取舍
-
-| 问题 | 决定 |
-| --- | --- |
-| **watch 什么** | **任意实体**。`watch` 挂在视图上，视图 DQL 查什么就观察什么，配置里不出现实体类型名 |
-| **派给谁** | **一条视图 → 一个本地项目**（`watch.project`，单值）。多个模块 = 多条视图 |
-| 「新的」怎么判定 | 不判新。视图就是待处理队列，有就处理 |
-| 一个任务处理几条 | 一条。会话与日志里带 key |
-| 「活动会话」 | 指**正在跑**。结束即释放，允许下一个 |
-| **守护什么时候跑** | **应用不退出就派发**。服务端循环，与面板是否打开、切到哪个 tab、窗口是否可见全无关 |
-| **标签**存哪 | `处理中` / `需要人工` / `重试 2/3` 这类**执行状态**不写进 entity，只在本地 run 日志，面板渲染时叠加 |
-| **占用**存哪 | 认领状态写进 entity。占用必须是共享事实——本地日志别的机器看不见，也防不住别人重复派 |
-| 任务边界 | 由 prompt 文件决定（改代码 / 写文档 / 只做分析），机制不预设 |
-| **怎么防重复派发** | **认领**：派发前把实体推进到配置的认领状态（`claim.to`）；写成功才算派出，后到者拿 `CONCURRENT_WRITE_CONFLICT` |
-| **完成怎么判** | 会话结束时实体**还是不是认领状态**；仍是 → 没做完。在**会话结束那一刻**判，不靠轮询 |
-| **谁写实体** | 泵只写**认领 / 归还**；业务字段（结论、方案、说明）一律由执行项目写 |
-| 工作区脏了 | 只回滚本次会话碰过的路径；判断不了就停手标「需要人工」 |
-
-## 1. 形态：服务端循环，遍历「可见项目」
-
-泵是**服务端的一个循环**，挂在与 `startScheduler()` 同一个位置（`instrumentation-node.ts`）：
+泵挂在与 `startScheduler()` 同一个位置（`instrumentation-node.ts` 的 `startWatchPump()`）：
 
 ```
 server boot → startWatchPump()
   每 60s 一 tick：
-    for project of 可见项目                 ← 与侧栏同一个来源：有会话的 cwd
-      for view of readViews(project) 里带 watch 的视图
-        if 到期 → pump(project, view)       ← 单飞；取最老一条 → 派到 watch.project
+    if 进程租约不是自己 → return            # 文件租约，见 §9
+    for project of 可见项目                   # 与侧栏同源：有会话的 cwd
+      for view of readViews(project) 里 watch.enabled 的视图
+        if 该视图未在跑 且 距上轮 ≥ intervalSec
+          validate（60s 一次）→ pump(project, view)
 ```
 
-**为什么不是「面板开着才泵」**（2026-11-08 更正）。实测过三种「开着但没在用」，面板驱动全都会停：
+**泵不依赖任何渲染层状态**：右面板收起、切到别的 tab、窗口最小化、窗口收进托盘，都不影响派发
+（打包版的服务器在窗口隐藏后仍在跑）。只有进程退出才停——这是设计边界，不是缺口。
 
-| 情况 | 代码事实 |
-| --- | --- |
-| 右面板收起 | `AppShell.tsx:3258` `{rightPanelOpen && (` — 整块卸载 |
-| 面板开着，切到文件/实体 tab | `AppShell.tsx:3406` 只挂载 active viewer |
-| 窗口被遮住或最小化 | `ViewsPanel.tsx:187` 的 `visibilityState === "visible"` 判断 |
+`PI_WEB_DISABLE_WATCH=1` 可整块关掉。
 
-而守护最该工作的时刻，恰好是人不盯着它的时候。
+**首轮不得和首屏抢**（DEFECT-000100 / TASK-000172 / DEFECT-000104 / TASK-000214）。这一 tick 落在桌面壳
+等待的启动窗口里，所以两条规则钉死了它：
 
-「跟项目走」仍然成立，但含义改为：**应用不退出就派发**。打包版的服务器在窗口收进托盘后仍在跑（`instrumentation-node.ts:10` 的既有注释；Tauri 侧 `src-tauri/src/lib.rs` 用 `window.hide()` 隐藏窗口，不退出进程），所以切 tab、切到别的 app、最小化都不影响；只有进程退出才停。
+1. **第一轮等首屏**：`GET /api/sessions` 答完之后 `markFirstScreenServed()`（`lib/first-screen-gate.ts`），
+   再等 1.5 s 静默（`FIRST_SCREEN_QUIET_MS`）才跑第一轮；没人开窗口的部署（托盘启动、headless）由
+   15 s 兜底（`FIRST_SCREEN_FALLBACK_MS`）。分钟级 tick 永远排在首轮之后（`firstRound.then(...)`）。
+   首轮写一行 `[watch] {"type":"start","after":"first-screen|fallback",…}`，那是「泵为什么晚了」的证据。
+2. **首轮与派发门不碰 SDK**：可见项目来自 SDK-free 的 `lib/session-list.ts`，
+   「项目忙不忙」来自 `lib/session-registry.ts`。曾经用 `session-reader` / `rpc-manager`：一句 `await import()`
+   把 pi SDK 的 ESM 图同步拉进来，隔离打包产物上量到 `event loop blocked for 3415 ms`、首个 204 被推到
+   3788 ms；TASK-000172 只换了项目来源之后仍有 2779 ms 的停顿（`deps.projectBusy` 那一句）。
+   真派发时付一次 SDK 加载是不可避免的，`startWatchSession()` 外面套了串行队列，那成本只由第一个会话付。
 
-**不需要新清单**：侧栏那个「Workspaces (6)」本身就是项目列表，服务端用同一份数据（`getRecentProjects()`，`lib/project-groups.ts:12`，跳过 `workspaceKind === "chat"`）算即可。
-
-代价（接受）：从未在应用里出现过的项目（一条会话都没有）不会被派发——它本来也看不见。
-
-**首 tick 不得加载 pi SDK**（DEFECT-000100 / TASK-000172）。`startWatchPump()` 立刻跑一次 `tick()`，这一 tick 落在桌面壳等待的启动窗口里（`listening → serving`），所以它取「可见项目」只能用 SDK-free 的 `lib/session-list.ts`（`listAllSessions` 在那里，`lib/session-reader.ts` 只是再导出）。曾经用 `session-reader`：那一句 `await import()` 让首 tick 同步加载 pi SDK 的 37 MB ESM 图，隔离构建上量到 `event loop blocked for 3415 ms`、首个 204 被推到 3788 ms。`lib/instrumentation-graph.test.mjs` 现在钉住这条规则（`lib/views/watch/index.ts` 的惰性 import 不得到达 `@earendil-works/*`，也不得出现 `../../session-reader` / `../../rpc-manager`）。
-
-`lib/views/watch/runtime.ts` 的那个 `session-reader` 是有意保留的：它只在 `startWatchSession()`（真派发一条实体）时才被 import，不在启动路径上。
-
-**首轮不得和首屏抢**（DEFECT-000104 / TASK-000214）。TASK-000172 只是把**项目来源**换成了 SDK-free 的模块；泵的第一轮当时仍然**立刻**跑，于是它做两件落在启动窗口里的事：一是再扫一遍会话目录（`/api/sessions` 正要扫同一份），二是走到派发门 `deps.projectBusy` 时 `await import("../../rpc-manager")`，把 pi SDK 的 37 MB 图拉进来。隔离打包产物上量到（`PI_FIRST_SCREEN_PROBE=1`，夹具看板 5 条 watch 视图）：
-
-```
-[probe] #4 GET /api/sessions start +2210ms inflight 1
-[probe] #4 GET /api/sessions done +2561ms dur 351ms status 200 inflight 0
-[probe] stall 2779ms ending +5387ms during -          ← 泵首轮的 SDK 模块加载
-[watch] {"type":"claimed",…}                          ← +5.9s 才开始派发
-```
-
-同一份 payload、同一夹具、只差 `PI_WEB_DISABLE_WATCH=1` 时，首屏之后**没有 >500 ms 的停顿**。所以现在的规则是两条：
-
-1. **第一轮等首屏**。`lib/first-screen-gate.ts` 是那个信号：`GET /api/sessions` 答完之后 `markFirstScreenServed()`，泵再等 `FIRST_SCREEN_QUIET_MS`（1.5 s，让开场会话、模型列表、字体这几个请求先走）才跑第一轮，并在 `[watch] {"type":"start",…}` 里记下等的是谁。**没人开窗口的部署（托盘启动、headless）不会被饿死**：`FIRST_SCREEN_FALLBACK_MS`（15 s）到点就开闸，并记 `after: "fallback"`。分钟级的 tick 永远排在首轮之后（`firstRound.then(...)`）。
-2. **派发门不碰 SDK**。`projectBusy` 改从 SDK-free 的 `lib/session-registry.ts` 取 `hasBusyRpcSessionForCwd`（`rpc-manager` 本来只是再导出它）。这条门每轮对每条视图都问，问的却是一个本地注册表问题——队列为空时根本没有理由加载 agent runtime。
-
-改完仍然会在**真派发**时付一次 SDK 模块加载（`startRpcSession` 不可避免），这是一个 `[watch] {"type":"start"}` 之后、窗口已经在屏上的代价；`startWatchSession()` 外面套了一条串行队列，所以那一次性成本由第一个会话付，后面的会话不再重复。两条规则由 `lib/views/watch/first-screen.test.mjs` 与 `lib/instrumentation-graph.test.mjs` 钉住。
+两条规则由 `lib/views/watch/first-screen.test.mjs` 与 `lib/instrumentation-graph.test.mjs` 钉住。
 
 ## 2. 两个项目角色
 
@@ -109,368 +67,333 @@ board-ws       看板与调度配置在这（views.yaml，以及它需要的 ent
 run-ws         会话在这里执行（watch.project 指向它）：读实体、干活、写回都在这里
 ```
 
-两者可以是同一个项目（`project: .`），也可以不同。**一条视图只指向一个 `run-ws`**，这是本设计的硬边界。`run-ws` 的 MCP / skills / 权限由它自己配好，不归本设计管——泵只需要知道“这个目录能干活”。
+两者可以是同一个项目（`project: .`）。**一条视图只指向一个 run-ws**，这是硬边界：要派给 N 个执行项目就写 N 条视图，
+机制里没有路由解析，也不认识业务字段。
 
-## 3. 配置
+## 3. 一轮的判定顺序
 
-```yaml
-# board-ws/.pi/views.yaml
-views:
-  - title: 待修缺陷（滤芯模块）
-    server: entity-base
-    workspace: ws_manhu
-    # 模块切分在视图的 DQL 里表达，不在 watch 里（见 §3.1）
-    dql: "type = 'Defect' and state = 'CONFIRMED' and affects = 'ssys_…'"
-    watch:
-      enabled: true
-      project: ../module-a-ws        # 单值；相对路径按 views.yaml 所在项目解析
-      prompt: .pi/prompts/watch.md   # 任务说明模板，占位符见 §8
-      intervalSec: 90
-      maxAttempts: 3
-      cooldownMin: 30
-      claim:
-        to: IN_PROGRESS              # 派发前推进到这里（状态名由底座状态机决定）
-        back: CONFIRMED              # 失败时退回；不写 = 退回派发前的状态
-
-  - title: 待补规格的 SSR          # 同一条看板，另一条视图，另一个项目
-    server: entity-base
-    workspace: ws_manhu
-    dql: "type = 'SSR' and state = 'DRAFT'"
-    watch:
-      enabled: true
-      project: ../spec-ws
-      prompt: .pi/prompts/spec.md
-      claim:
-        to: IN_PROGRESS
-```
-
-**状态名不写死在代码里**：认领状态是底座状态机的一部分，不同实体类型、不同客户模型可以叫不同名字（`IN_PROGRESS` / `ASSIGNED` / `处理中`）。`claim.to` 由配视图的人填，泵只做两件事：往这个状态推一次、失败时退回。
-
-配置里**没有**「成功后写什么字段」。缺陷修完推到 `FIXED` 还是 `INVALID`、`solution` 怎么写，是 `module-a-ws` 自己（它的 prompt、它的 MCP、它的权限）决定的事；SSR 补完要不要进 `DEFINED`，是 `spec-ws` 的事。泵只负责**认领**与**归还**，中间全是执行项目的。
-
-一条视图要想让认领真的生效，它的 DQL 必须**排除认领状态**——否则推进了它还在视图里，认领变成假动作。这一条由 §5 的自检兜住。
-
-### 3.1 模块归属不归 watch 管
-
-「只有滤芯模块的缺陷才派给 module-a」这件事，由**视图的 DQL** 表达：
+`lib/views/watch/pump.ts` 的 `pumpView()`，一次调用处理**一条视图**：
 
 ```
-type = 'Defect' and state = 'CONFIRMED' and affects = 'ssys_54e1f9bb…'
+pumpView(view):
+  # ① 先扫过期认领（在闸门之前，闸门关了照样清理）
+  claimed = list(slice(from→to), modified_at asc, limit 100)
+  for row of claimed: 若 now - row.modifiedAt ≥ timeoutMin → park(manual, reason=timeout)
+
+  # ② 本项目已被泵自己占着？
+  if registry[watch.project] → busy(own?)          # 本视图自己的，不是「被挡住」
+
+  # ③ 两道闸门（关了就整条视图本轮不派，一条也不认领）
+  if 应用侧该项目有运行中会话        → skipped(session)
+  if count(slice(from→manual)) > 0  → skipped(manual, N)
+
+  # ④ 全局上限
+  if registry.size >= 生效上限        → skipped(queue, N)
+
+  # ⑤ 取待派集合：视图自己的排序，取第一条
+  pending = list(view.dql, view.orderBy ?? modified_at, view.orderBy ? view.order : asc,
+                 limit = min(view.pageSize, 100))
+
+  # ⑥ 逐条试认领，成功一条就派出、结束本轮
+  for row of pending:
+     claim = promotion(key, to: claim.to, expectedRevision: row.revision)   # ← 不带 fields
+     冲突(CONCURRENT_WRITE_CONFLICT)   → 记 conflict，试下一条
+     业务拒绝(STATE_GUARD_*)           → 记 skipped(policy)，试下一条
+     其它失败                          → 本轮记 error，不起会话
+     成功 → dispatch(row)：起会话、占项目、写日志 claimed、后台 judge()
 ```
 
-三个已核实的事实（2026-11-08 实测）：
+细节值得单独说清：
 
-- DQL 支持关系等值谓词 `<关系> = '<ID>'`，**按实体 id 匹配，不是 key**（`manhu-dql-query/references/dql-syntax.md`；本环境跑过 `type='Defect' and violates='<假 id>'` 不报错、返回 0 条）；
-- `Defect.affects → SSYS` 在类型图里**已存在**（`targetEntityTypes: ["SSYS"]`，目标状态限 `DEFINED`）；
-- 所以「一个模块一条视图」在今天就能写，不需要新字段。
+- **过期清扫在最前面**是刻意的：一条停太久的认领不是「等待」，是卡住，下一轮派发不能跟这个判断抢。
+  这次查询固定用 `modified_at asc`（不跟视图排序），因为它是一个超时扫视、不是队列；逐行按 `modifiedAt` 自己判。
+- **判定不在 tick 里**：tick 只派发。会话跑十分钟、期间 tick 六次，不会写六次 `failed`（§4.2）。
+- **单飞 + 间隔**：同一视图 `inFlight` 时不重入；`intervalSec` 的判定带 1 s 容差
+  （`intervalSec * 1000 - 1000`），否则与 60 s tick 同周期的视图会被隔轮跳过。
+- **校验缓存 60 s**：`validate()` 每分钟重跑一次，改完 `views.yaml` 最多等一个周期就生效。
 
-代价说清楚：**写视图的人要拿到子系统的实体 id**（不是 `SSYS-000003` 这种 key）。这比按 key 难用，但换来的是 watch 里没有任何实体专属逻辑。若客户不接受，正确的解法是让 DQL 支持按 key，或者给 Defect 加字段——**不是**在 watch 里加一套按缺陷的路由。
+### 3.1 派发顺序 = 视图自己的排序
 
-## 4. 泵与执行项目的分工
+**视图怎么排，就怎么派**（`SSR-000089` rev33，`TASK-000457`）。泵把 `orderBy` / `order` **原样**交给 `list`，
+不本地排序，底座返回的第一行就是它要认领的那一行：
 
-| 谁 | 做什么 | 为什么 |
+| 视图配置 | 泵实际发的排序 |
+| --- | --- |
+| `orderBy: modified_at` + `order: asc` | `modified_at asc`（最老先做） |
+| `orderBy: modified_at` + `order: desc` | `modified_at desc`（**最新先做**） |
+| `orderBy: [priority, modified_at]` + `order: [desc, asc]` | 多键原样下发，按顺序生效 |
+| 没写 `orderBy` | `modified_at asc`（历史行为，逐字节保持） |
+
+最后一行是唯一保留的默认：视图的 `order` 默认值是 `desc`，那是**表格的默认**，不是派发的回退值；
+没写 `orderBy` 时泵用自己的 `asc`。
+
+被并发认领或被状态机守卫拒绝时**顺延到下一条候选**，顺序不变（`pump.test.mjs` 的 AC-2 / AC-3 三例）。
+扫描上限 `min(pageSize, 100)`：一轮只看第一页，够用且不会因为一条视图把整库拉下来。
+
+### 3.2 闸门与上限
+
+三道闸，**全部关整条视图，不是关某一行**（andon 语义，`SSR-000089` ④⑦）：
+
+| 闸门 | 判定源 | 面板文案 |
 | --- | --- | --- |
-| **泵**（board-ws 上下文） | 判定该不该派、**认领**（推到 `claim.to`）、拼 prompt、起会话、**归还**（失败时退回）、记账 | 它只需要知道“队列里有一条、项目空闲、我认得回来”，不需要知道这条实体的业务规则 |
-| **执行项目**（run-ws） | 读实体与关联、干活、**写业务结论并把状态推进到完成态** | 它的 MCP 与 skills 已预配；`solution` 怎么写、推到 FIXED 还是 INVALID，是它的事 |
+| 执行项目有运行中会话 | 应用侧会话运行态（运行列表 + 每个会话的 `cwd`），**不是**泵的私有索引 | 「项目有运行中会话」 |
+| 有 N 条停在 `claim.manual` | 把 DQL 里那句 `state = '<from>'` 换成 `'<manual>'` 再查一次总数 | 「有 N 条待人工」 |
+| 全局并发上限 | 泵自己起的、当前在跑的会话数（`registry.size`） | 「排队中：正在执行的任务已达上限（N 个）」 |
 
-这条分工的意义是**划清责任边界**，不是省事：泵拿到的只有视图行（`key` / `state` / 字段），它无法判断“这个缺陷该推到 FIXED 还是 INVALID”——那要看修没修成、有没有判重。让泵写业务，只能写模板，而模板猜不中业务。
+- 第二道闸是**按视图**的：一条卡住挡全部。这是有意的——一条走不下去了，人应该先看它，而不是往上堆新活。
+- 第三道闸是**进程级**的：`PI_WEB_MAX_WATCH_RUNS`（缺省 2，取值 1~8 夹取，越界/非法在启动日志里写明），
+  它防的是「六七个项目同时开工」把机器压满，**不承诺吞吐，也不承诺排队时长**。不写进 `views.yaml`：
+  那是按项目的文件，写进去会被复制到每个项目、漂成第二份真相。
+- 闸门只影响**派发时机**：关闭期间不认领、不丢条目，打开后下一轮从同一位置继续。
+- **「被挡住」不会被「没活干」冲掉**：`skipped` 记的是最近一次有活却没派出去的原因，只有成功派发一次
+  或被新原因替换才清；`idle` 是另一个字段（`lib/views/watch/index.ts` 的 `applyOutcome`）。
+  所以「被挡住过」和「本来就没活」在面板上不是同一张脸。
 
-但**占用**不一样：占用不需要判断业务，只需要一句“这条我拿走了”，而且必须写进共享事实里才有意义（本地日志只在你这台机器上）。所以：
+## 4. 认领、判定与转待人工
 
-- 泵写实体，但只写两件事：派发前 `→ claim.to`，失败时退回 `claim.back`；
-- 认领用 `expectedRevision`，撞冲突说明别人抢先 —— 直接放弃，见 §7；
-- 执行项目写业务失败怎么办，它自己决定（重试、标注、放弃），泵看不到细节；
-- 泵的完成判据是：**会话结束时实体还在不在认领状态**。
-
-## 5. 配置校验（启动即校验，不静默降级）
-
-| 检查 | 不通过时 |
-| --- | --- |
-| `watch` 挂在有 `server` / `workspace` / `dql` 的完整视图上 | 禁用并说明 |
-| `project` 非空、存在、是目录 | 禁用并说明 |
-| `prompt` 文件存在且非空 | 禁用并说明 |
-| `intervalSec` / `maxAttempts` / `cooldownMin` 是合法正整数 | 禁用并说明 |
-| `claim.to` 在该类型的 `lifecycle.validStates` 里 | 禁用并说明可选值 |
-| `claim.to` 是当前状态可走的一条路由（`lifecycle.routes`） | 禁用并说明，列出该状态可去的目标 |
-| `claim.to` 的必填字段能用 `claim.fields` 补齐，或本来就无必填 | 禁用并说明缺哪个字段 |
-| `claim.back`（若写了）是从 `claim.to` 可走的返回路由 | 禁用并说明 |
-| **视图的 DQL 排除了 `claim.to`**（派发一次、回读确认它已不在结果里） | 禁用并说明：否则认领是假动作 |
-
-校验只读两样东西：视图配置本身，和该类型的 `get_metadata`。**不读业务字段、不判断该写到哪个状态**——那些是执行项目的。
-
-最后一条是唯一需要真的试探一次的校验：拿一条候选行、推一次认领、再看它是否离开视图；不通过就直接禁掉（而不是等到运行时每条都认领失败）。
-
-## 6. 本地状态：`~/.pi/agent/watch/runs.jsonl`
-
-一行一次尝试，追加写，不覆盖。
-
-```jsonc
-{
-  "watchId": "entity-base/ws_manhu/待修缺陷（滤芯模块）/DEF-000123",
-  "key": "DEF-000123",
-  "workspace": "ws_manhu",
-  "panelCwd": "D:/projects/board-ws",     // 视图在哪
-  "runCwd": "D:/projects/module-a-ws",    // 会话在哪跑
-  "sessionId": "…",
-  "attempt": 2,
-  "stateBefore": "CONFIRMED",          // 认领前的状态：归还时退回这里（claim.back 未配置时）
-  "claimedAt": "2026-11-07T01:30:00.000Z",
-  "startedAt": "2026-11-07T01:30:02.000Z",
-  "endedAt": null,
-  "status": "running",
-  "entityModifiedAt": "2026-11-07T01:12:03.000Z",  // 派发时实体的最后修改
-  "headBefore": "3f2a1c9",        // runCwd 不是 git 仓库时为 null
-  "dirtyBefore": [],
-  "summary": null,                // 只为展示：回答里 DONE: 之后那句话，泵不据此做任何判断
-  "error": null
-}
-```
-
-`status`：`running` / `done` / `blocked` / `failed` / `timeout` / `conflict` / `claim-failed`。
-
-| 只在认领这一步出现的两个状态 | 含义 |
-| --- | --- |
-| `conflict` | 认领时撞 `CONCURRENT_WRITE_CONFLICT`：别人（另一台机器 / 另一个人）抢先拿走了。**不计 attempt**、不派会话、下一轮自然不会再命中 |
-| `claim-failed` | 认领写失败（无权限、必填没补齐）。**不计 attempt**，面板标「无法认领」并显示服务端原文——这是配置/权限问题，重试没用 |
-
-`claimedAt` 与 `startedAt` 分开：认领成功到会话真的开始之间有几百毫秒，`conflict`/`claim-failed` 只有前者。
-
-派生规则（不额外落盘）：
-
-| 需要知道 | 算法 |
-| --- | --- |
-| 是否正在跑 | 该 key 最后一条 `running` 且 `sessionId` ∈ `getRunningRpcSessionIds()` |
-| 试了几次 | 该 `watchId` 下 `status ∈ {running, done, blocked, failed, timeout}` 的记录数（`attempt` 取最大；`conflict` / `claim-failed` 不算） |
-| 需要人工 | `status ∈ {blocked, timeout, claim-failed}`，或记录数 ≥ `maxAttempts` |
-| 冷却中 | 最后一条 `endedAt` 距今 < `cooldownMin` |
-| 崩溃残留 | `running` 但进程启动晚于 `startedAt` → 归档 `timeout`；同时按 §9.2 决定要不要接管 |
-
-清空方式对使用者自然：删掉对应行 = 重置那条实体的自动化状态。
-
-## 7. 一轮的判定顺序
+### 4.1 认领是唯一一次「先写成功再起会话」
 
 ```
-tick():                                   # 服务端定时器，默认每 60s。只派发，不判定
-  if 进程租约不是自己                      → return     # dev server 与桌面端各跑一遍
-  for project of 可见项目:
-    for view of readViews(project) 里 watch.enabled 的视图:
-      pump(project, view)
-
-pump(project, view):
-  if 该 view 的泵正在跑                   → return     # 单飞（同一 tick 内重复进来）
-  if 上一轮距今 < intervalSec             → return
-  if 全局 watch 会话数 >= 生效的并发上限                    → return     # 排队，面板显示「排队中…」
-  if view.watch.project 有 running 会话    → return     # 同一个仓库不并发（只算泵起的会话）
-  rows = runView(project, view)                      # modified_at 升序，最老优先
-  for row of rows:
-     st = derive(row.key)
-     if st.running                                              → skip   # 还在跑：只跳过，不判定（§9）
-     if st.blocked / st.cooldown / st.attempts >= max            → skip
-     if st 最近一条是 done 且 row.modifiedAt <= 该条的时间戳      → skip   # 见下
-     if (server, workspace, key) 已有一条 running（任何视图）     → skip
-     # 认领：写成功才算派出，写失败/被抢就换下一条
-     claim = promotion(row.key, { to: claim.to, fields: claim.fields, expectedRevision: row.revision })
-     if claim 冲突(CONCURRENT_WRITE_CONFLICT) → 记 conflict；continue     # 别人拿走了
-     if claim 失败                           → 记 claim-failed；continue # 权限/必填
-     写 run 日志 running（stateBefore = row.state, claimedAt = now）
-     return dispatch(row, view.watch.project)                           # 判定发生在会话结束时
+promotion(key, { to: claim.to, expectedRevision: row.revision })    # 注意：没有 fields
 ```
 
-**认领排在最前面**，不是「派完再改状态」：先写成功再起会话，中间没有窗口——否则两台机器会同时起会话、最后只有一个能写。写在前，第二台直接拿冲突退场。
+**认领永远不带 `fields`**：那一刻还没有执行会话，泵没有任何内容可填（`TASK-000461` 的边界）。
+认领写成功才算派出——先把状态推进到 `claim.to`，再起会话，中间没有窗口；第二台机器（或第二条视图）
+在同一个实体上只会拿到 `CONCURRENT_WRITE_CONFLICT`。占用必须是**实体上的共享事实**，
+本地日志别的机器看不见，也防不住别人重复派。
 
-`conflict` 与 `claim-failed` 都不计入 attempt：前者是别人在干（不是失败），后者是配置/权限问题（重试无用，改配置才行）。
+所以「认领路由本身要求必填字段」对泵来说是**配置/模型错配**，在校验阶段就被拒（§5 第 7 关），
+而不是到运行期把条目卡在认领态里。
 
-多个可见项目之间**互不阻塞**：一个项目在跑，不影响另一个项目派发。全局并发上限是**进程级的闸**（环境变量 `PI_WEB_MAX_WATCH_RUNS`，缺省 2，取值 1~8 夹取，越界/非法值在启动日志里写明）：它防的是「六七个项目同时开工」把机器压满，**不承诺吞吐，也不承诺排队时长**；被它挡下的视图在面板上显示「排队中：正在执行的任务已达上限（N 个）」（N = 生效值）。它不写进 `views.yaml`：那是按项目的文件，写进去会被复制到每个项目、随 yaml 漂移成第二份真相。
+### 4.2 判定：会话结束那一刻
 
-**`done` 不是永久跳过。** 完成之后实体仍可能命中视图（比如推进到 `FIXED` 而视图条件是「未解决」），或者别人又改过它。规则是：**只有实体的 `modifiedAt` 比那次 `done` 更晚，才重新派发**——否则同一份内容会被反复派，白烧 token。
+```
+dispatch(row):
+  session = startSession(runCwd, prompt, title)
+  registry[runCwd] = { key, view }            # 占住项目
+  log {type: "claimed", …}
+  judge()                                      # 后台，不等
 
-**路由失败这个概念已经没有了**：派发目标在配置里，运行期只有「项目不可用」（校验阶段就拦掉）与「项目正忙」（等下一轮）。
+judge():
+  timer = timeoutMin 到点 → park(manual, reason=timeout)   # 不杀会话、不释放项目锁
+  await session.done                            # 回合真的结束
+  clearTimeout(timer); registry.clear(runCwd)
+  if 已经记过 timeout: return                    # 不覆盖，不重复判
+  重读实体：state 还是 claim.to 吗？
+      不是 → log done，什么也不写              # 执行项目已经接手
+      是   → park(manual, reason=failed)        # 没做完，直接待人工
+```
+
+判据是**「还在不在认领态」**，不是「还在不在视图里」：认领那一刻它就已经离开视图了。
+完成与否看实体状态，**不看会话的自我汇报**——会话说 `DONE:` 但状态没动，就是没做完。
+
+**没有第二次尝试**（`SSR-000090`【为何不重试】）。泵的判据分不出「活没干」与「干了没记账」，
+重跑只会得到同样的结果，而决定下一步是人的事。于是 `claim.back`、`maxFailures`、冷却时间这套全都不存在了：
+失败第一次就进 `claim.manual`，从那里要回队列只能由人推回 `claim.from`。
+
+会话标题带序号：`视图名 · KEY`，同一实体再次被派发（只可能是人把它推回了队列）显示 `（第 N 次）`，
+N 从 `list_revisions` 的历次状态里数 `countClaims(history, claim.to)`——没有自己的计数器可以漂。
+
+### 4.3 自动转待人工时写哪些字段（`requiredFields` × `watch.fill`）
+
+泵替执行方做的那一次推进（`claim.to → claim.manual`）如果被模型要求必填字段
+（例如 `TASK` 的 `IN_PROGRESS → BLOCKED` 要求 `remarks`），内容只能来自配视图的人：
+
+```
+get_metadata(type).lifecycle.routes[] 里 from = claim.to, to = claim.manual
+  → requiredFields                        # 要写哪些字段，泵不认识这些名字
+watch.fill                                # 字段名 → 模板，供上一步的字段名取值
+fields = { 每个 requiredField: render(fill[该字段], {key,type,view,reason,from,to}) }
+```
+
+三条规则，全在 `lib/views/fill.ts`：
+
+1. **只走交集**。`requiredFields` 没要求的字段，`fill` 配了也不发（配置删掉一个要求，模板自然停止生效，
+   而不是变成一次意外写入）；`requiredFields` 要求的字段 `fill` 没配 → 拒绝推这次（`parkFields` 返回错误），
+   条目**停在认领态**并记一条 `error`，不会发一次半填的写。
+2. **路由不要必填就不带 `fields`**，`promote()` 的第四个参数直接不传——与引入 `fill` 之前逐字节一致。
+3. **元数据读不到时按「没有必填」处理**（fail open）。真的要求字段时底座会拒绝这次写，面板上是错误带服务端原文，
+   不会静默成功。
+
+`reason` 只有两个值：`timeout`（超过 `timeoutMin`）和 `failed`（会话结束仍停在认领态）。
+`from` / `to` 就是 `claim.to` / `claim.manual`。占位符全表与错误文案看
+[配置指南的 `watch.fill` 一节](工作台视图的配置指南.md#自动转待人工时写哪些字段watchfill)。
+
+**为什么泵可以写这几个字段，而不算「写业务」**：字段名和是否必填都来自元数据，内容来自配置模板；
+泵不知道「这次为什么失败」以外的任何业务事实。业务结论（结论、方案、完成态）仍然只由执行项目写。
+
+### 4.4 两个超时
+
+| 超时 | 起算点 | 用途 |
+| --- | --- | --- |
+| `expireClaimed`（每轮开头） | 实体的 `modifiedAt` | 上次进程留下的、或别处留下的认领，超过 `timeoutMin` 就转待人工 |
+| `judge` 的定时器 | 本次派发的时刻 | 会话超过 `timeoutMin` 还没结束 → 转待人工（先 `get`，仍是认领态才写） |
+
+两者都**不杀会话、不释放项目锁**（工作树还被它占着）。会话后来真的结束了，`timedOut` 短路让结论不被覆盖。
+
+## 5. 校验：启动即校验，不静默降级
+
+`validate()`（`lib/views/watch/index.ts`）只看两样东西：视图配置本身，和该类型的 `get_metadata`。
+**不读业务字段、不判断该写到哪个状态**。一条视图过不了下面七关就**完全不派发**：
+面板在该视图行标红点，正文写「派发未生效：<缺什么>」，每条拒绝都带视图名。
+
+| # | 检查 | 不通过时点名 |
+| --- | --- | --- |
+| 1 | `watch.project` 是目录 | 执行项目路径 |
+| 2 | `watch.prompt` 存在、可读 | 模板文件路径 |
+| 3 | 模板**非空**且正文含 `{{key}}` | 文件路径 + 缺的是 `{{key}}` |
+| 4 | DQL 能被切出认领态：**恰好一个** `state = '<值>'` 且等于 `claim.from` | 0 个 / 多个 / 值不一致 |
+| 5 | `claim.from` / `to` / `manual` 都在 `lifecycle.validStates` 里 | 哪个字段、可用值 |
+| 6 | 状态机里有 `from → to` 和 `to → manual` 两条路由 | 缺哪条路由 |
+| 7a | `to → manual` 路由的**必填字段都有 `watch.fill` 模板** | 缺哪几个字段 |
+| 7b | 认领路由 `from → to` **不声明必填字段**（`fill` 不作用于认领） | 该路由要求的字段 |
+
+几处容易踩空的地方：
+
+- **第 4 关的错误是兜底不是提示**：`state in (...)`、`state != ...`、两个 `state =` 都切不出认领态，
+  一律拒绝，泵不猜。这条也挡住了「认领是假动作」——DQL 里的 `state` 值必须与 `claim.from` 一致。
+- **`claim.manual` 不能等于 `from`**，否则转过去的条目立刻被重新派发；这是单独的拒绝（在第 5 关之前）。
+- **第 5～7 关需要 `get_metadata`**：DQL 里没写 `type = '...'` 时这三关跳过（其余照查）；
+  元数据读不到时视图**禁用**并显示服务端原文，而不是当它通过（`readStates`）。
+- **7a 的失败不可能靠重试救**：条目一旦被认领却推不进 `manual`，就永远停在认领态、不在视图里、
+  没有任何痕迹。所以校验期就拦下，运行期 `parkFields` 还有第二道（防有人在泵运行时改文件）。
+- **7b 为什么是错**：认领那一刻没有执行会话，`fill` 不覆盖认领，泵无从填值——这是模型/配置错配，
+  得人去改路由或换一条认领路由。
+
+### 5.1 视图级的两道检查（与派发无关，但决定派发发什么）
+
+这两条是**所有视图**的规则，不是 watch 专属；它们决定泵能不能拿到一个可用的排序：
+
+| 检查 | 在哪 | 不通过时 |
+| --- | --- | --- |
+| `order` 必须与 `orderBy` 成对 | 解析 `views.yaml`（`lib/views/config.ts`，`ORDER_NEEDS_ORDER_BY`） | 该视图报错「order 需要同时写 orderBy（只写 order 会被忽略，等于没排序）」，**不发查询**。单值与数组同一句 |
+| `orderBy` 的键在该类型上存在 | 求值时（`app/api/views/route.ts` → `lib/views/order-by.ts` 的 `checkOrderBy`） | 视图正文报错并**点名是第几个键**（多键时不能只说「有一个键错了」），`list` 不发；元数据读不到时**弃权**，交给 `list` 判 |
+
+`order` 数组的长度必须等于 `orderBy` 的键数；单值作用于全部键；空数组、非字符串键在解析期就拒。
+键名比较忽略 `_` / `-` 与大小写（`modified_at` / `modifiedAt` / `modified-at` 同一个字段）。
+
+## 6. 与执行项目的分工
+
+| 谁 | 写什么 | 为什么 |
+| --- | --- | --- |
+| **泵** | 只写两个状态迁移：认领（`from → to`，不带字段）、转待人工（`to → manual`，带 §4.3 算出的字段） | 它只需要知道「这条我拿走了」「这条我推不动了」，不需要知道这条实体的业务规则 |
+| **执行项目** | 读实体与关联、干活、写业务结论、推进到完成态 | 它的 prompt / MCP / 权限自己配好；泵不认识 `solution`、也不认识「该推 FINISHED 还是 INVALID」 |
+
+这条边界不是省事，是**划清责任**：泵拿到的只有视图行，它没有能力判断「这个缺陷该推到 FIXED 还是 INVALID」。
+让它写业务只能写模板，而模板猜不中业务。
+
+代价说清楚：**「业务写失败了」在泵看来和「没干活」是同一种情况**——都表现为实体还停在认领态。
+诊断看会话，不看泵；执行项目若想让原因在面板上可见，唯一通道是 `BLOCKED: <原因>` 或自己写进实体。
+
+## 7. 日志与可观察
+
+**没有运行记录文件。** 泵每次动作打一行 `console.log("[watch]", …)`（`runtime.ts` 的 `log`），
+`dev` 的终端 / `journalctl` / `server.log` 可以直接读：
+
+| `type` | 何时 | 关键字段 |
+| --- | --- | --- |
+| `limit` | 启动时立刻 | 生效的全局上限、来源（默认 / 环境变量）、是否被夹取 |
+| `start` | 首轮真正开跑 | `after: first-screen \| fallback`、`waitedMs` |
+| `claimed` | 认领成功、会话已起 | `view` / `key` / `runCwd` / `sessionId` |
+| `done` | 会话结束且实体已离开认领态 | `state` |
+| `manual` | 转待人工成功 | `reason: timeout \| failed` |
+| `conflict` | 认领撞并发写 | `key` |
+| `skipped` | 被闸门 / 上限挡住，或被状态机守卫拒绝 | `reason: session \| manual \| queue \| policy`、`count` / `limit` / `message` |
+| `error` | 真失败（网络 / 鉴权 / 非策略 4xx / 写不进 manual） | `message` 原文 |
+
+状态机的业务拒绝（`STATE_GUARD_UNSATISFIED` / `STATE_GUARD_BUDGET_EXCEEDED` / `STATE_GUARD_CYCLE`）
+是 `skipped(policy)`，**不是 error**：那是「这条还没轮到」，不是「工具坏了」。白名单在
+`SKIPPABLE_PROMOTION_CODES`，别的 4xx（如 `ENTITY_VALIDATION_FAILED`）仍然是 error。
 
 ## 8. 会话内的契约
 
-`.pi/prompts/watch.md`，占位符由泵填入（视图行本来就带完整 `fields`，不必让会话再读一次）：
+`.pi/prompts/watch.md` 由泵渲染后作为派发正文（`renderPrompt`），占位符与「模板要什么才给什么」的规则
+见[配置指南的「prompt 占位符」一节](工作台视图的配置指南.md#prompt-占位符)。机制这一侧只有三条：
 
-```
-你在处理 {{key}}（{{type}}，{{workspace}}），当前状态 {{state}}。
+- 模板是**用户文本**：只替换模板里出现的占位符，没写的既不补空行也不加标题；未知占位符原样保留（拼错能看见）。
+- **缺 `{{key}}` 即配置非法**（第 3 关）：会话标题里有 key，但模型看不到自己的标题。
+- `DONE:` / `BLOCKED:` 是**给人看的**，泵不读它们；完成与否只看实体状态。
 
-【字段】{{fields}}          ← 该行全部字段，含描述
-【关联】{{tracesSummary}}   ← 若取得到，列出上游/下游各一条摘要
-
-执行目录：{{runCwd}}
-
-怎么做、做完要不要改实体，按本项目的约定来（这里只负责把它叫起来）。
-
-回答最后留一行：
-   DONE: <一句话说明做了什么>
-做不了就只写一行：BLOCKED: <原因>
-```
-
-`DONE:` 与 `BLOCKED:` 是**给人和日志用的**，不是状态机：`DONE` 不参与任何判断（完成与否看实体状态，不看它怎么说），`BLOCKED` 是唯一会被泵读取的信号——它把“再试也没用”与“再试可能成功”区分开。
-
-**业务字段归执行项目**（2026-11-08 定）：`solution` 怎么写、推进到 `FIXED` 还是 `INVALID`，都是那个项目的 prompt 与权限范围决定的。泵拿到的只有一个视图行，它没有能力判断“该写什么”。**泵只写认领与归还**——见 §4。
-
-## 9. 判定时机：会话结束那一刻，不是下一次轮询
-
-**问题：下一 tick 时任务还在跑，判失败么？——不判。**
-
-轮询只做一件事：**扫视派发**。判定发生在**会话结束的回调里**，与 tick 无关：
-
-```
-dispatch(row, project):                   # 认领已在 §7 完成，此时状态已是 claim.to
-  写 run 日志 status=running（stateBefore = 认领前的状态）
-  session = startRpcSession(...)          ← 同一进程内：泵与会话都在服务端
-  await sendPrompt(session, prompt)
-  await session.waitForIdle()             ← 回合真的结束（内部是 agent_end）
-  endedAt = now()
-  重读该实体：state 还是 claim.to 吗？
-      不是 → done      （它去了 FIXED / INVALID / 别的，工作项目已接手）
-      是   → failed    （没做完）
-```
-
-**判据是「还在不在认领状态」，不是「还在不在视图里」。** 认领那一刻它就已经离开视图了，所以旧判据永远不成立——这是采纳认领方案时必须一起改的地方。新判据还有个好处：不依赖视图的 DQL 是否排除认领状态。
-
-为什么不能挂在 tick 上判：
-
-| 把判定放进去会怎样 | 后果 |
-| --- | --- |
-| 会话跑 10 分钟，期间 tick 了 6 次 | 每次都要判一次，前 5 次必然误判失败 |
-| 判定时点取决于 tick 对齐 | `endedAt` 记的是“下一次 tick 的时间”，不是真的结束时间 |
-| 会话在两次 tick 之间起、又落 | 可能漏判，也可能把同一次尝试判两遍 |
-
-`waitForIdle` 是现成的（`rpc-manager.ts:2314`，包的是 `agent.waitForIdle()`）；`agent_end` 也已有既有订阅用法（`lib/mcp-host.ts:564`）。泵与会话在同一个进程里，**不需要靠轮询去猜它跑完没有**。
-
-因此 `running` 这条记录的作用只有两个：占住「这个项目在忙」与「这个 key 正在处理」，**它不参与结果判定**。
-
-### 9.1 结果
-
-| 会话结束时 | 判定 | 处理 |
-| --- | --- | --- |
-| 实体**已不是 `claim.to`** | `done` | 什么也不做。它去了 `FIXED` / `INVALID` / 别的状态——工作项目已经接手 |
-| 回答含 `BLOCKED:` | `blocked` | **停在认领状态**（不归还），标「需要人工」。原因已经由会话说明，再试是浪费 |
-| 实体**仍是 `claim.to`** | `failed` | 计一次失败，**归还**（退回 `claim.back` 或 `stateBefore`），冷却后重新入队，直到 `maxAttempts` |
-| 已达 `maxAttempts` 的失败 | `failed` | **不归还**，停在认领状态，标「需要人工」。归还就会立刻被重新派发，变成无限循环 |
-| 跑了超过 `MAX_RUN_MIN`（常量，M1 取 60 分钟）仍未结束 | `timeout` | 面板标「超时，需人工」；**不杀会话、不释放项目锁**（工作树还被它占着），状态保持认领。它真结束后再判一次，结论覆盖 `timeout` |
-
-`timeout` 不是终局判定，而是**让人能看见**：一个卡住的会话否则会永远显示「处理中」。
-
-### 9.2 归还、接管与卡死
-
-**归还**只做一件事：把状态从 `claim.to` 退回 `claim.back`（未配置则退回 `stateBefore`），带 `expectedRevision`。它**不写任何业务字段**，也不清理别人做的业务改动。
-
-```
-归还条件：failed 且 attempt < maxAttempts
-归还失败（冲突/无权限）→ 只记日志，不影响后续；实体停在认领状态，面板标「需要人工」
-```
-
-**进程崩溃后的接管**：重启时若某条 `running` 记录的实体**仍是 `claim.to`**，且该 key 没有活跃会话：
-
-| 情况 | 处理 |
-| --- | --- |
-| 本地有这条 key 的记录，且 `attempt < maxAttempts` | 可以接管：归还后重新入队（比什么都不做安全——它确实是泵自己留下的） |
-| `attempt >= maxAttempts` | 停在认领状态，标「需要人工」 |
-| 本地没有记录，但实体停在 `claim.to` | **不接管**。可能是别的机器派的，动了会打架——留给人工 |
-
-最后一行是这条机制的固有代价：**认领状态卡住是共享可见的，但只有派它的那台机器认得回来**。跨机器卡死只能靠人。这是有意的取舍——自动抢别人的认领，比留一条待人工更危险。
-
-判据仍是：**看实体状态，不看会话怎么说**。会话说“已修复”但状态没动，就是没完成——这比相信自我汇报可靠。
-
-**回滚（只回滚自己碰过的）**：
-
-```
-touched = git status --porcelain(失败后) - dirtyBefore(派发前)
-对 touched 里每个路径：checkout -- <path>；新增文件 clean -f -- <path>
-```
-
-不用 `git reset --hard`：它会连人的未提交改动一起抹掉。判断不了（HEAD 被移动 = 有人在提交）→ 停手标「需要人工」，不动工作区；`runCwd` 不是 git 仓库则整段跳过。
-
-## 10. 并发三层
+## 9. 并发三层
 
 | 层 | 手段 | 防的是 |
 | --- | --- | --- |
-| 进程 | `~/.pi/agent/watch/owner.lock`（沿用 `scheduled-tasks/lease.ts` 写法） | 开发服务器与桌面端各跑一遍 |
-| **执行项目** | `runningByProject: Map<runCwd, watchId>` + running 判定 | 同一个工作树被两个会话同时改 |
-| **实体** | **认领**（`expectedRevision` 抢状态）+ 本地 `running` 记录 | 同一实体被两条视图派一次、被**两台机器**各派一次 |
+| 进程 | `~/.pi/agent/watch/` 下的文件租约（沿用 `scheduled-tasks/lease.ts`） | dev server 与桌面端各派一遍 |
+| 执行项目 | `WatchRegistry`（进程内 `Map<runCwd, {key, view}>`，不落盘）+ 应用侧会话运行态 | 同一个工作树被两个会话同时改 |
+| 实体 | **认领**（`expectedRevision` 抢状态） | 同一实体被两条视图派一次、被**两台机器**各派一次 |
 
-前两层是本地的，第三层不是：认领借用底座的乐观锁，所以**跨机器也成立**——这是本地日志永远做不到的。两条视图命中同一实体时，第二条会在认领处拿到 `CONFLICT` 而不是拿到同一份工作。
+前两层是本地的，第三层不是：认领借底座的乐观锁，跨机器也成立。串行键是**执行项目目录**——会被并发破坏的是
+工作树，不是实体空间。`WatchRegistry` 只记得泵自己起的会话，重启就忘（会话也随进程死了，这是正确的）。
 
-串行键是**执行项目目录**，不再按 entity 工作区——路由下移到视图之后，会被并发破坏的是工作树，而不是实体空间。两条视图指向同一个项目时仍然串行。
+## 10. 界面上看得见什么
 
-**这一层只认得泵自己起的会话**（`WatchRegistry.byProject` 在进程内、不落盘，见 `lib/views/watch/pump.ts` 与 `SSR-000090` 的取舍）。人工恢复 / 续跑的会话不进这张表，所以同一个工作树仍可能被「人手工续的那个会话 + 泵刚派的会话」同时用；泵不杀会话、不检查工作区、不协调，冲突由执行项目自己承担。要暂停派发只有 `enabled: false`（见 §11），派发期间不要手工续会话——人工纪律写在 `docs/entity/工作台视图的配置指南.md` 第 10 节「派发与并发」。
+判据只有一份：`/api/views` 返回的 `watch` 对象（`null` / `disabled` / `skipped` / `error` / `inFlight`），
+面板不另存「是否配了派发」。四种点（`lib/views/watch-indicator.ts`，`SSR-000089` AC-11）：
 
-## 11. 界面上看得见什么
+| 点 | 含义 |
+| --- | --- |
+| 绿 | 配好了、本轮没有待派（到达间隔就接手） |
+| 黄 | 有活却没派出去：被闸门 / 全局上限挡住，或条目被状态机守卫拒绝，悬浮说明给原因 |
+| 没有 | 这条视图不派发（没配 `watch`，或 `enabled: false`） |
+| 红 | `enabled: false`（配置里关闭了派发）、七关没过、或上一轮真出错；悬浮说明指出缺什么 |
 
-- **会话**：标题带 key（`DEF-000123`），侧栏标「自动」；
-- **派发状态点**（`SSR-000089` AC-11，`lib/views/watch-indicator.ts`）：视图列表每行一个点，四种状态各有各的样子——**绿**＝配好了、本轮没有待派（到达间隔就接手）；**黄**＝本轮被闸门挡住，悬浮说明给原因（「项目有运行中会话」/「有 N 条待人工」）；**没有点**＝这条视图不派发（只读）；**红**＝禁用或配置非法，悬浮说明指出缺什么。判据只有一份：`/api/views` 返回的 `watch` 对象（`null` / `skipped` / `disabled`），面板不另存“是否配了 watch”。文案里不出现 `watch` / `claim` / `intervalSec` 这类配置字段名——那是给写配置的人看的；
-- **待办面板行尾角标**：`处理中` / `需要人工` / `重试 2/3` / `无法认领`；
-- **实体状态本身就是最醒目的标记**：被认领的行已经不在待办视图里了，谁打开追溯图都能看到它在 `IN_PROGRESS`——这台机器上的面板只是补充说明，不是唯一线索；
-- **暂停**：M1 靠配置里 `enabled: false`（下一 tick 生效，不杀运行中的会话），面板上呈现为红点 + 「配置里关闭了派发」。面板上的开关放 M2——它的状态要落在服务端读得到的地方，而 `enabled` 已经在文件里了；为此再引入一个本地暂停文件，是重复的一份真相。
-- 这些标记只在本地叠加，**不写进 entity**（写进 entity 的只有认领状态本身）。
+文案里不出现 `watch` / `claim` / `intervalSec` 这类配置字段名（`plainReason` 会翻译成「待人工状态」「执行项目」
+这类人话）；那是给写配置的人看的。泵自己的标记（`处理中` / `需要人工`）只在本地叠加，**不写进实体**——
+写进实体的只有状态迁移本身，与它带来的那几个必填字段。
 
-## 12. 依赖与前置
+## 11. 依赖与前置
 
 | 依赖 | 没有它时 |
 | --- | --- |
-| 视图能跑（`/api/views?apply=1` 已实现） | —— 本设计完全建立在这条之上 |
-| **该类型的状态机里有可用的认领状态**（`claim.to`） | 配置校验直接禁用。**这是模型侧的事**：认领状态叫什么、从哪条路由进、能不能退回，全由底座的状态机定义 |
-| `watch.project` 指向的项目已配好 MCP / skills | 会话读不到需要的信息、也改不了实体 → 状态停在认领态 → 计失败直到「需要人工」 |
-| 执行项目有该实体的写权限 | 同上。**泵不检查权限**——它不知道要写什么，也就无从检查 |
-| （仅当客户要按模块切分视图）`affects` 数据真的挂了 | 该视图返回空，泵无事可做；**机制本身不受影响** |
+| 视图能跑（`/api/views?apply=1`） | 本设计完全建立在这条之上 |
+| 该类型有可用的认领状态与 `from → to` 路由 | 校验第 5～6 关禁用 |
+| 该类型有 `to → manual` 路由 | 同上；没有「推不动」的落点，机制不成立 |
+| `claim.to → claim.manual` 的必填字段都在 `watch.fill` 里 | 第 7a 关禁用 |
+| `run-ws` 已配好 MCP / skills / 写权限 | 会话读不到信息或写不进实体 → 停在认领态 → 转待人工 |
 
-watch 机制**不认识任何实体类型、任何关系、任何业务字段**，但它**认识状态机**——因为认领就是一次状态迁移。这是它唯一需要读懂模型的地方，也是它唯一的模型侧前置。
+watch **不认识任何实体类型、关系或业务字段**，但它**认识状态机**——因为认领就是一次状态迁移，
+转待人工还要按目标路由的必填字段写值。这是它唯一需要读懂模型的地方。
 
-**这是边界，不是缺陷**（2026-11-08 已确认接受）：**“业务写失败了”在泵看来和“没干活”是同一种情况**——都表现为实体还停在认领状态。因为怎么写、写没写成，本来就是执行项目的事。
+## 12. 明确不做
 
-推论：
+- **不做重试**：失败第一次就进 `claim.manual`（`claim.back`、`maxFailures`、冷却期都已移除，写了会报错）。
+- **不做业务字段回写**：不写 `solution`、不代为推进完成态；唯一例外是 §4.3 那次「转待人工」的必填字段。
+- **不做自动回滚**：失败不碰工作区、不撤销执行项目的未提交改动（`git` 相关的一整套在实现里不存在）。
+- **不做跨机器接管**：认领卡住时只有派它的那台机器认得回来；本地没有记录就**不接管**，留给人工。
+- **不做全局「守护项目清单」**：项目列表复用侧栏同源的会话项目列表。
+- **不做同一项目内并行**（固定一个会话）。
+- **不做按实体的路由解析**：一条视图 → 一个执行项目，多模块 = 多条视图。
+- **不做基于文本的「猜归属」**：宁可视图返回空，也不把活派错项目。
+- **不做应用退出后的守护**（系统服务 / 开机自启）。
+- **不做面板上的暂停开关**：`watch.enabled: false` 是唯一开关（下一轮生效，不杀运行中的会话）。
 
-- 诊断看会话，不看泵的状态；泵的「需要人工」只说明“试够了，人来看”。
-- 执行项目若想让失败原因在面板上可见，唯一的通道是 `BLOCKED: <原因>`（或自己把原因写进实体）。**泵不会去猜**。
+## 13. 测试钉住的行为
 
-## 13. 明确不做
+| 用例 | 断言 | 文件 |
+| --- | --- | --- |
+| 没写 `orderBy` | 发出去的就是 `modified_at asc`，逐字节等于引入派发顺序之前 | `pump.test.mjs` AC-2 |
+| 多键视图 | `orderBy` / `order` 数组原样下发，认领的是第 0 行；第 0 行冲突则顺延到第 1 行、顺序不变 | `pump.test.mjs` AC-3 |
+| 认领 | 起会话之前状态已是 `claim.to`；**认领不带 `fields`**，即使配了 `fill` | `pump.test.mjs` |
+| 转待人工 | `fill` 在 expire / judge failed / judge timeout 三个入口都能到达，`reason` 分别为 `timeout` / `failed` / `timeout` | `pump.test.mjs` |
+| 交集 | 路由不要必填 → 一个字段都不发；必填没被 `fill` 覆盖 → 拒绝推、不发半填的写 | `pump.test.mjs`、`fill.test.mjs` |
+| 校验第 7 关 | 7a 缺模板点名字段与视图；7b 认领路由声明必填被拒 | `validate.test.mjs` |
+| `order` / `orderBy` | 只写 `order` 报「order 需要同时写 orderBy」；数组长度不符、空数组、非字符串都被拒 | `config.test.mjs` |
+| 第二键非法 | 多键时错误点名「orderBy 第 N 个键」；元数据读不到则弃权 | `order-by.test.mjs` |
+| 闸门 | 项目有会话 / 有 N 条待人工 / 全局上限，各自一句文案，且都不认领 | `pump.test.mjs` |
+| 不重试 | 会话结束仍是认领态 → 直接 `manual`，没有第二次尝试 | `pump.test.mjs` |
+| 首轮 | 等首屏后开闸、兜底 15 s、分钟级 tick 不超车 | `first-screen.test.mjs` |
 
-- 不做按实体的路由解析（已删；要多个执行项目就写多条视图）；
-- **不做业务字段回写**（不写 `solution`、不代为推进到完成态）：那是执行项目的事。泵只写认领 / 归还这一个迁移；
-- 不做跨机器接管：认领状态卡住时，只有派它的那台机器认得回来，别的机器不抢（见 §9.2）；
-- 不做全局「守护项目清单」这个独立配置：项目列表复用侧栏同源的会话项目列表，不另存一份；
-- 不做同一项目内的并行（固定一个会话）；
-- 不规定提交与推送的行为：提交到哪个分支、要不要 push，由执行项目的 prompt 决定；泵只在失败后清理**它碰出来的**未提交改动；
-- 不做自动撤回已提交的 commit（那是人的决定）；
-- 不做基于名称/描述等文本的「猜归属」（宁可视图返回空，也不把活派错项目）；
-- 不做应用退出后的守护（系统服务 / 开机自启）：进程没了就停，这是设计的边界，不是缺口。
+（`list` / `promotion` / `get_metadata` / `startSession` 全是依赖注入替身：测试不碰真端点、真仓库。）
 
-## 14. 测试计划
+## 14. 变更史（为什么是现在这样）
 
-| 用例 | 断言 |
+| 变化 | 原因 |
 | --- | --- |
-| **右面板收起 / 切到文件 tab / 窗口 `hidden`** | **仍然派发**（泵不依赖任何渲染层状态），且 `document.visibilityState` 为 `hidden` 时也照跑 |
-| 应用里可见 3 个项目、其中 2 个配了 watch | 两个都派；第 3 个（没有 watch 配置）不产生任何请求 |
-| 一个项目在跑 | 另一个项目照常派（互不阻塞）；总数到全局并发上限（缺省 2）后都等下轮，面板显示「排队中」 |
-| 该实体有 running 会话 | 不派发，不写日志 |
-| **派发前先认领** | 起会话之前状态已经是 `claim.to`；认领失败时**一个会话都没起** |
-| **两台机器同时 tick 同一条** | 只有一台认领成功；另一台记 `conflict`、不起会话、不计 attempt |
-| 认领撞 `CONCURRENT_WRITE_CONFLICT` | 同上；下一轮该实体已不在视图里，不会再被尝试 |
-| 认领写失败（无权限） | 记 `claim-failed`，面板标「无法认领」并显示服务端原文；不计 attempt |
-| 视图没排除 `claim.to` | 配置校验阶段禁用并给原因（**不发一次假认领**） |
-| 会话结束、状态仍是 `claim.to` | 那一刻记 `failed`，**归还**到 `claim.back`，下一轮重新命中视图 |
-| 会话结束、状态已变成别的 | 记 `done`，不再碰状态 |
-| 失败到 `maxAttempts` | 记 `failed`，**不归还**（停在认领态），面板标「需要人工」 |
-| `BLOCKED` | 记 `blocked`，**不归还**，标「需要人工」 |
-| 会话跑 10 分钟、期间 tick 5 次 | 5 次都不判定：不写 `failed`、不重派、`endedAt` 只写一次 |
-| 会话跑 90 分钟仍未结束 | 记 `timeout`、面板可见；不杀会话、项目锁不释放、状态保持认领 |
-| 进程在会话中途被杀，重启 | 本地有记录且 `attempt < max` → 归还后重新入队；`attempt >= max` → 停手标人工 |
-| 重启后看到别人派的认领（本地无记录） | **不接管**，不改状态 |
-| 最老优先 | 三条待处理，派 `modified_at` 最早那条 |
-| 非 git 项目 | 不写 `headBefore`、不回滚，其余流程正常 |
-| 两条视图指向同一项目 | 一条在跑时另一条不派 |
-| 会话说 `DONE:` 但状态没动 | 记 `failed`（**看状态，不看自我汇报**） |
-| 回滚 | `dirtyBefore` 的文件失败后保持原样；只回滚 `touched` |
+| 从「缺陷专用」拉回「任意实体」 | 视图查什么就观察什么；机制不该认识 `Defect` 或 `solution` |
+| 删掉 `transition: { to, fields }` 业务回写 | 泵不猜「该写哪个字段」，那是业务 |
+| 删掉 `claim.back` / `maxFailures` | 判据分不出「没干」与「干了没记账」，重试学不到新东西（`SSR-000090`） |
+| 派发改为按视图排序 | 「最老优先」把优先级之类的东西挡在门外；视图能排序就该按它派（`TASK-000457`） |
+| `order` 单独出现改为报错 | 静默忽略让「没有 orderBy 的 order」看起来生效了，其实没排序（`TASK-000460`） |
+| 转待人工带 `watch.fill` | `TASK` 的 `IN_PROGRESS → BLOCKED` 要求 `remarks`，不填就推不进去，条目卡在认领态且无声（`TASK-000461`） |
 
-（`runView`、`startRpcSession`、`promotion`、`git` 全部依赖注入替身：测试不碰真端点、真仓库。）
-
-## 15. 分期
-
-**M1**：服务端泵循环（`startWatchPump()`，遍历可见项目）+ 视图级 `watch`（`project` / `prompt` / `intervalSec` / `maxAttempts` / `cooldownMin`）+ **认领与归还** + run 日志 + 单飞与项目锁 + 角标。
-不做自动回滚（失败就停手标人工）、不做通知、不做暂停开关（用 `enabled: false`）、不做业务字段回写。
-
-**M2**：路径级回滚、失败分类细化、通知、跨轮统计、`watch.order`（默认最老优先）、面板暂停开关。
-
-> 唯一的开工前置在模型侧：**目标类型要有可用的认领状态**（Defect 目前没有，只有 `PROPOSED / CONFIRMED / FIXED / RESOLVED / REGRESSION_FAILED / INVALID`）。这条不解决，`claim` 校验就通不过，功能无法启用——但代码可以先写好，等状态到位即可接。
+需要设计推演原文时看需求条目（`SSR-000089` / `SSR-000090` / `SSR-000066`），本文只保留能照着实现的结论。
