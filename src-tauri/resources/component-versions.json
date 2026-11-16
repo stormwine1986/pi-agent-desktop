@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "appVersion": "0.10.0",
+  "appVersion": "0.11.0",
   "components": [
     {
       "id": "pi-agent-desktop",
       "repository": "stormwine1986/pi-agent-desktop",
-      "version": "0.10.0"
+      "version": "0.11.0"
     },
     {
       "id": "pi",
@@ -19,12 +19,12 @@
     }
   ],
   "build": {
-    "gitCommit": "258ca19ee52b680789226ae18a8640271d4b7061",
-    "gitCommitShort": "258ca19",
+    "gitCommit": "86eb54505dea6290faba132bc04353a4f0e26f1f",
+    "gitCommitShort": "86eb545",
     "gitBranch": "main",
     "gitDirty": false,
-    "builtAt": "2026-11-14T12:40:17+08:00",
+    "builtAt": "2026-11-16T19:26:47+08:00",
     "node": "v22.22.2",
-    "buildId": "iNIr6qbzU0c7L0ijZLcP0"
+    "buildId": "zoj_3VA5iSRF2bKefDgbe"
   }
 }
