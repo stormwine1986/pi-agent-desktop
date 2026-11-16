@@ -110,6 +110,11 @@ export async function pumpView(
 
   // Aging first: an item that has been claimed far too long is not "waiting",
   // it is stuck, and the next dispatch must not race with that judgement.
+  //
+  // This one query keeps `modified_at` / `asc` whatever the view sorts by: it is
+  // a timeout sweep over the claimed set, not a queue, and `expireClaimed`
+  // decides row by row from `modifiedAt` — the order it reads them in changes
+  // nothing but which of the 100 it looks at first.
   const claimed = await deps.list(target, sliceOrThrow(view.dql, claim.from, claim.to), {
     limit: SCAN_LIMIT,
     orderBy: "modified_at",
@@ -146,8 +151,13 @@ export async function pumpView(
 
   const pending = await deps.list(target, view.dql, {
     limit: Math.min(view.pageSize, SCAN_LIMIT),
-    orderBy: "modified_at",
-    order: "asc",
+    // The view's own order decides which row is first (SSR-000089 rev33): the
+    // first row the base returns is the one that gets claimed. A view that
+    // configures no `orderBy` keeps the pump's historical query byte for byte —
+    // `modified_at` / `asc`, oldest first — because a view's `order` default
+    // (`desc`) is the table's default, not this fallback's.
+    orderBy: view.orderBy ?? "modified_at",
+    order: view.orderBy ? view.order : "asc",
   });
   if (!pending.ok) return { status: "error", error: pending.error };
 

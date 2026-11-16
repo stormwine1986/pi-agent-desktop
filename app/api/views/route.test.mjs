@@ -231,3 +231,65 @@ ${watched("待人工挡着", "PARKED")}`);
   assert.equal(view.watch.disabled, null, "a gated view is not a broken view");
   assert.match(view.watch.skipped, /有 1 条待人工/, "the count comes from the same slice the pump uses");
 });
+
+/**
+ * Multi-key sorting (SSR-000066 rev20): the very same `list` call, with the key
+ * list passed through as written — and a bad key refused before the call, with
+ * the failing key named (AC-5).
+ */
+const listCalls = () => calls.filter((call) => call.name === "list");
+
+test("a multi-key orderBy is sent verbatim, keys and directions", async () => {
+  const before = listCalls().length;
+  const [view] = await evaluate(`views:
+  - title: 多键排序
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+    orderBy: [owner, modified_at]
+    order: [desc, asc]
+`);
+
+  assert.equal(view.error, null);
+  assert.equal(view.rows.length, 1);
+  const sent = listCalls().slice(before);
+  assert.equal(sent.length, 1, "one view, one query");
+  assert.deepEqual(sent[0].args.orderBy, ["owner", "modified_at"]);
+  assert.deepEqual(sent[0].args.order, ["desc", "asc"]);
+});
+
+test("AC-5: an unknown second key is refused by name, and that view sends no query", async () => {
+  const before = listCalls().length;
+  const [view] = await evaluate(`views:
+  - title: 第二个键写错了
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+    orderBy: [owner, modifed_at]
+    order: [desc, asc]
+`);
+
+  assert.equal(view.rows.length, 0);
+  assert.match(view.error, /orderBy 第 2 个键指向的字段不存在：「modifed_at」/);
+  assert.match(view.error, /DQL：/, "the failing query still travels with the reason");
+  assert.equal(listCalls().length, before, "a bad sort key must never pay for a query");
+});
+
+test("AC-5: mismatched key and direction counts are refused before any query", async () => {
+  const before = listCalls().length;
+  const [view] = await evaluate(`views:
+  - title: 长度不齐
+    server: stub
+    workspace: ws_test
+    dql: "type = 'ALPHA' and state = 'DONE'"
+    columns: [key]
+    orderBy: [owner, modified_at]
+    order: [desc]
+`);
+
+  assert.equal(view.rows.length, 0);
+  assert.match(view.error, /order 有 1 个方向，orderBy 有 2 个键（长度不齐/);
+  assert.equal(listCalls().length, before, "nothing to sort by, nothing to ask");
+});

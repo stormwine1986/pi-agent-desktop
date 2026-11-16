@@ -25,6 +25,19 @@ import { load as loadYaml } from "js-yaml";
  */
 export type ViewOrder = "asc" | "desc";
 
+/**
+ * Sort keys: one field, or an ordered list of them (`SSR-000066` rev20,
+ * `SSR-000055` multi-key). The list is handed to `list` verbatim — the panel
+ * never sorts, so an array here is a query argument, not a local operation.
+ */
+export type ViewOrderBy = string | string[];
+
+/**
+ * Sort direction: one value for every key, or one per key (same length as
+ * `orderBy`). A single value next to a key list applies to all of them.
+ */
+export type ViewOrderValue = ViewOrder | ViewOrder[];
+
 export interface ViewDefinition {
   title: string;
   /** MCP server name from `mcp.json`. */
@@ -33,8 +46,8 @@ export interface ViewDefinition {
   workspace: string;
   dql: string;
   columns: string[];
-  orderBy: string | null;
-  order: ViewOrder;
+  orderBy: ViewOrderBy | null;
+  order: ViewOrderValue;
   pageSize: number;
   /** Whether a background re-evaluation may announce new entries for this view. */
   notify: boolean;
@@ -157,15 +170,8 @@ function parseView(raw: unknown, index: number, projectDir: string): ViewEntry {
     : [];
   if (columns.length === 0) problems.push("columns 必须是非空数组");
 
-  const orderBy = asText(raw.orderBy) || null;
-
-  let order: ViewOrder = "desc";
-  const rawOrder = raw.order;
-  if (rawOrder !== undefined && rawOrder !== null && rawOrder !== "") {
-    const normalized = asText(rawOrder).toLowerCase();
-    if (normalized === "asc" || normalized === "desc") order = normalized;
-    else problems.push(`order 只能是 asc 或 desc（写的是 "${String(rawOrder)}"）`);
-  }
+  const { orderBy, ok: orderByOk } = parseOrderBy(raw.orderBy, problems);
+  const order = parseOrder(raw.order, orderBy, orderByOk, problems);
 
   let pageSize = DEFAULT_PAGE_SIZE;
   if (raw.pageSize !== undefined && raw.pageSize !== null) {
@@ -279,6 +285,120 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
     // `claim` cannot be null here: its absence is a problem, and problems returned above.
     claim: claim as WatchClaim,
   };
+}
+
+/**
+ * `orderBy:` — one field name, or an ordered list of them.
+ *
+ * A list is kept as written, including its order, and an unusable list is a
+ * problem rather than a silent repair: dropping one element would make the
+ * query sort by something else than the author asked for, which is the same
+ * class of defect as an ignored `orderBy` (`SSR-000066` rev20).
+ */
+function parseOrderBy(
+  raw: unknown,
+  problems: string[],
+): { orderBy: ViewOrderBy | null; ok: boolean } {
+  if (raw === undefined || raw === null || raw === "") return { orderBy: null, ok: true };
+
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) {
+      problems.push("orderBy 是空数组：删掉它（不排序）或写上字段名");
+      return { orderBy: null, ok: false };
+    }
+    const keys: string[] = [];
+    let ok = true;
+    for (const [index, item] of raw.entries()) {
+      if (typeof item !== "string") {
+        problems.push(`orderBy 第 ${index + 1} 项只能是字段名（写的是 ${JSON.stringify(item)}）`);
+        ok = false;
+        continue;
+      }
+      const key = item.trim();
+      // An empty element is what a trailing comma or a half-edited list leaves
+      // behind. Silently skipping it would change which key is first.
+      if (!key) {
+        problems.push(`orderBy 第 ${index + 1} 项是空字符串：删掉它或写上字段名`);
+        ok = false;
+        continue;
+      }
+      keys.push(key);
+    }
+    return ok ? { orderBy: keys, ok } : { orderBy: null, ok: false };
+  }
+
+  if (typeof raw !== "string") {
+    problems.push(`orderBy 只能是字段名或字段名数组（写的是 ${JSON.stringify(raw)}）`);
+    return { orderBy: null, ok: false };
+  }
+  // Single value: unchanged, including "blank means not sorting".
+  return { orderBy: asText(raw) || null, ok: true };
+}
+
+/** `asc` / `desc`, case-insensitive; null for anything else. */
+function asOrder(value: unknown): ViewOrder | null {
+  const normalized = asText(value).toLowerCase();
+  return normalized === "asc" || normalized === "desc" ? normalized : null;
+}
+
+/**
+ * `order:` — one direction for all keys, or one per key.
+ *
+ * A direction list is only meaningful against a key list of the same length;
+ * a single value next to a key list keeps its meaning ("all of them",
+ * `SSR-000066` rev20). A direction list with no `orderBy` is refused: it
+ * describes keys that do not exist, and silently ignoring it is how a user ends
+ * up believing the sort is configured.
+ */
+function parseOrder(
+  raw: unknown,
+  orderBy: ViewOrderBy | null,
+  orderByOk: boolean,
+  problems: string[],
+): ViewOrderValue {
+  if (raw === undefined || raw === null || raw === "") return "desc";
+
+  if (!Array.isArray(raw)) {
+    const direction = asOrder(raw);
+    if (direction) return direction;
+    problems.push(`order 只能是 asc 或 desc（写的是 "${String(raw)}"）`);
+    return "desc";
+  }
+
+  if (raw.length === 0) {
+    problems.push("order 是空数组：删掉它（方向默认 desc）或写上 asc / desc");
+    return "desc";
+  }
+
+  const directions: ViewOrder[] = [];
+  let ok = true;
+  for (const [index, item] of raw.entries()) {
+    const direction = asOrder(item);
+    if (!direction) {
+      problems.push(`order 第 ${index + 1} 项只能是 asc 或 desc（写的是 ${JSON.stringify(item)}）`);
+      ok = false;
+      continue;
+    }
+    directions.push(direction);
+  }
+  if (!ok) return "desc";
+
+  const keyCount = Array.isArray(orderBy) ? orderBy.length : orderBy ? 1 : 0;
+  // When `orderBy` itself failed to parse, its length is not a usable fact yet:
+  // the error above already says what to fix, and a mismatched-length message on
+  // top of it would point at the wrong field.
+  if (!orderByOk) return "desc";
+  if (keyCount === 0) {
+    problems.push("order 写成了数组但没有 orderBy：排序方向必须跟着排序键");
+    return "desc";
+  }
+  if (directions.length !== keyCount) {
+    problems.push(
+      `order 有 ${directions.length} 个方向，orderBy 有 ${keyCount} 个键（长度不齐；只写一个方向即作用于全部键）`,
+    );
+    return "desc";
+  }
+  return directions;
 }
 
 function positiveInt(raw: unknown, fallback: number, field: string, problems: string[]): number {

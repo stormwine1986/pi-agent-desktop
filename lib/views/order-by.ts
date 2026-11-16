@@ -6,6 +6,10 @@
  * "the data is unavailable" (`SSR-000066` AC-2). The panel can answer this
  * before it asks: the type's field list is one `get_metadata` away.
  *
+ * `orderBy` may be one key or a list of them (`SSR-000066` rev20). Every key is
+ * checked, and a refusal names the one that failed — reporting "one of your keys
+ * is wrong" would leave the author to guess which.
+ *
  * Two rules keep the check from doing harm:
  * - **Fail open.** No type in the DQL, an unreachable server, unusable
  *   metadata — the check abstains, and `list` gets the last word. A metadata
@@ -58,24 +62,43 @@ export function declaredSortFields(metadata: unknown): string[] | null {
 
 export type OrderByVerdict = { ok: true } | { ok: false; error: string };
 
+/** The configured keys, in order; empty when the view does not sort. */
+export function orderByKeys(orderBy: string | string[] | null): string[] {
+  if (!orderBy) return [];
+  return Array.isArray(orderBy) ? orderBy : [orderBy];
+}
+
 /**
  * Whether `orderBy` names something this type can be sorted by.
  *
- * @param orderBy the configured key, or null when the view does not sort
+ * @param orderBy the configured key, a list of keys, or null when the view does not sort
  * @param declared the type's own field names, or null when unknown (abstain)
  */
-export function checkOrderBy(orderBy: string | null, declared: string[] | null): OrderByVerdict {
-  if (!orderBy) return { ok: true };
+export function checkOrderBy(
+  orderBy: string | string[] | null,
+  declared: string[] | null,
+): OrderByVerdict {
+  const keys = orderByKeys(orderBy);
+  if (keys.length === 0) return { ok: true };
   if (!declared) return { ok: true };
 
   const known = new Set<string>([...SYSTEM_SORT_FIELDS.map(sortFieldKey), ...declared.map(sortFieldKey)]);
-  if (known.has(sortFieldKey(orderBy))) return { ok: true };
 
   // Name what exists, not just what does not: the fix is usually a typo, and the
   // list is short enough to read in the panel's error line.
   const available = [...new Set([...declared, ...SYSTEM_SORT_FIELDS])].sort();
-  return {
-    ok: false,
-    error: `orderBy 指向的字段不存在：「${orderBy}」不在该类型的字段里（可用：${available.join("、")}）`,
-  };
+  const multiple = Array.isArray(orderBy);
+
+  for (const [index, key] of keys.entries()) {
+    // An empty element is refused while the file is parsed, not here; skipping
+    // it keeps this check from reporting a second, unrelated problem.
+    if (!key) continue;
+    if (known.has(sortFieldKey(key))) continue;
+    const where = multiple ? `orderBy 第 ${index + 1} 个键` : "orderBy ";
+    return {
+      ok: false,
+      error: `${where}指向的字段不存在：「${key}」不在该类型的字段里（可用：${available.join("、")}）`,
+    };
+  }
+  return { ok: true };
 }

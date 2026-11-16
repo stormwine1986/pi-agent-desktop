@@ -5,6 +5,8 @@
  * server, a session or a clock.
  */
 
+import type { ViewOrder } from "../config";
+
 export interface WatchRow {
   id: string;
   key: string;
@@ -76,7 +78,16 @@ export interface WatchDeps {
   list(
     target: WatchTarget,
     query: string,
-    options: { limit: number; orderBy?: string; order?: "asc" | "desc" },
+    options: {
+      limit: number;
+      /**
+       * The view's own sort, passed to `list` verbatim: one key or several
+       * (`SSR-000066` rev20). The pump never sorts locally — the first row the
+       * base returns is the one it tries to claim (`SSR-000089` rev33).
+       */
+      orderBy?: string | string[];
+      order?: ViewOrder | ViewOrder[];
+    },
   ): Promise<WatchResult<WatchRow[]>>;
   get(target: WatchTarget, key: string): Promise<WatchResult<WatchRow>>;
   /** States of every revision, oldest first — the only record of what already happened. */
