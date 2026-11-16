@@ -4,6 +4,7 @@ import { agentDir } from "../../agent-dir";
 import { FIRST_SCREEN_QUIET_MS, whenFirstScreenServed } from "../../first-screen-gate";
 import { acquireLease, isPidAlive } from "../../scheduled-tasks/lease";
 import { readViewsConfig, type ViewDefinition, type ViewWatch } from "../config";
+import { missingFillFields } from "../fill";
 import { describeGate, sliceDql } from "./core";
 import { watchRunLimit } from "./limit";
 import { createLiveDeps } from "./runtime";
@@ -399,6 +400,39 @@ export async function validate(
   if (missing.length > 0) {
     return refuse(`类型 ${type} 缺少路由：${missing.join("、")}`);
   }
+
+  // The park writes whatever the target route requires, and the field names come
+  // from metadata — so a view that does not supply a template for one of them can
+  // never park an item. Refused here, before anything is claimed: a row that
+  // could not be parked would sit in the claimed state, out of the view, with no
+  // trace (`watch.fill`).
+  const parkRoute = routes.find(
+    (route) => route.from === watch.claim.to && route.to === watch.claim.manual,
+  );
+  const uncovered = missingFillFields(watch.fill ?? {}, parkRoute?.requiredFields ?? []);
+  if (uncovered.length > 0) {
+    return refuse(
+      `watch.fill 缺少 ${watch.claim.to} → ${watch.claim.manual} 的必填字段：${uncovered.join("、")}（` +
+        `要么给 watch.fill 加上这几个模板，要么该路由的必填不需要派发泵来填）`,
+    );
+  }
+
+  // The claim is the pump's own move too, but it has nothing to fill it *with*:
+  // no executing session exists yet, so there is no reason to report and no
+  // content to borrow. `watch.fill` is the template for 「转待人工」 only, so a
+  // claim route that requires a field is a model/config mismatch a person has to
+  // resolve — refusing it here is what keeps the first row from being claimed and
+  // then stranded.
+  const claimRoute = routes.find(
+    (route) => route.from === watch.claim.from && route.to === watch.claim.to,
+  );
+  const claimRequired = claimRoute?.requiredFields ?? [];
+  if (claimRequired.length > 0) {
+    return refuse(
+      `类型 ${type} 的认领路由 ${watch.claim.from} → ${watch.claim.to} 要求必填字段 ${claimRequired.join("、")}，` +
+        `派发泵无法为认领填值（watch.fill 只作用于 ${watch.claim.to} → ${watch.claim.manual}）：把该路由的必填去掉，或换一条认领路由`,
+    );
+  }
   return null;
 }
 
@@ -420,7 +454,13 @@ async function readStates(
   deps: WatchDeps,
   target: { panelCwd: string; server: string; workspace: string },
   type: string,
-): Promise<{ ok: true; value: { validStates: string[]; routes: { from: string; to: string }[] } } | { ok: false; error: string }> {
+): Promise<
+  | {
+      ok: true;
+      value: { validStates: string[]; routes: { from: string; to: string; requiredFields: string[] }[] };
+    }
+  | { ok: false; error: string }
+> {
   const metadata = await deps.metadata?.(target, type);
   if (!metadata) return { ok: false, error: "无法读取类型元数据" };
   return metadata;

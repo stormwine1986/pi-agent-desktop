@@ -1,4 +1,5 @@
 import type { ViewDefinition, ViewWatch } from "../config";
+import { missingFillFields, resolveFill } from "../fill";
 import {
   countClaims,
   formatFields,
@@ -199,15 +200,81 @@ export async function pumpView(
   return { status: "idle" };
 }
 
+/**
+ * One move into `claim.manual`, with whatever the target route requires.
+ *
+ * The field names and their content come from two places, neither of them this
+ * file: the route's `requiredFields` (type metadata) and the view's `watch.fill`
+ * templates. Only the intersection travels, so a view that configures nothing —
+ * or a type whose route requires nothing — sends no `fields` at all, exactly as
+ * before. A route requirement the view does not cover is refused here instead
+ * of being sent half-filled: a doomed write would leave the row in the claimed
+ * state with nothing to show for it. `validate()` catches the same problem at
+ * load time; this is the second line, for a file edited under a running pump.
+ */
+async function parkRow(
+  input: PumpInput,
+  row: { key: string; type: string },
+  revision: number,
+  reason: "timeout" | "failed",
+  deps: WatchDeps,
+): Promise<WatchResult<null>> {
+  const { watch, target } = input;
+  const fields = await parkFields(input, row, reason, deps);
+  if (!fields.ok) return fields;
+  return deps.promote(target, row.key, watch.claim.manual, revision, fields.value);
+}
+
+/** The `fields` for one park, or the reason it cannot be attempted. */
+async function parkFields(
+  input: PumpInput,
+  row: { key: string; type: string },
+  reason: "timeout" | "failed",
+  deps: WatchDeps,
+): Promise<WatchResult<Record<string, string> | undefined>> {
+  const { view, watch, target } = input;
+  const metadata = await deps.metadata(target, row.type);
+  // Fail open: a metadata hiccup must not turn a park that needs nothing into a
+  // broken write. If the route does require something, the base refuses it and
+  // the error is logged.
+  if (!metadata.ok) return { ok: true, value: undefined };
+
+  const route = metadata.value.routes.find(
+    (candidate) => candidate.from === watch.claim.to && candidate.to === watch.claim.manual,
+  );
+  const required = route?.requiredFields ?? [];
+  if (required.length === 0) return { ok: true, value: undefined };
+
+  const missing = missingFillFields(watch.fill ?? {}, required);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `${watch.claim.to} → ${watch.claim.manual} 必填字段 ${missing.join("、")} 在 watch.fill 里没有模板，无法自动转待人工（视图 "${view.title}"）：条目仍停在 ${watch.claim.to}`,
+    };
+  }
+
+  return {
+    ok: true,
+    value: resolveFill(watch.fill ?? {}, required, {
+      key: row.key,
+      type: row.type,
+      view: view.title,
+      reason,
+      from: watch.claim.to,
+      to: watch.claim.manual,
+    }),
+  };
+}
+
 /** Claimed rows that outlived `timeoutMin` are moved to the manual state. */
 async function expireClaimed(input: PumpInput, rows: WatchRow[], deps: WatchDeps): Promise<void> {
-  const { view, watch, target } = input;
+  const { view, watch } = input;
   const limitMs = watch.timeoutMin * 60_000;
   const now = deps.now();
   for (const row of rows) {
     const since = row.modifiedAt ? Date.parse(row.modifiedAt) : Number.NaN;
     if (Number.isNaN(since) || now - since < limitMs) continue;
-    const moved = await deps.promote(target, row.key, watch.claim.manual, row.revision);
+    const moved = await parkRow(input, row, row.revision, "timeout", deps);
     if (moved.ok) deps.log({ type: "manual", view: view.title, key: row.key, reason: "timeout" });
     else if (!moved.conflict) deps.log({ type: "error", view: view.title, key: row.key, message: moved.error });
   }
@@ -315,7 +382,7 @@ async function judge(
     return;
   }
 
-  const moved = await deps.promote(target, key, claim.manual, after.value.revision);
+  const moved = await parkRow(input, after.value, after.value.revision, "failed", deps);
   if (moved.ok) deps.log({ type: "manual", view: view.title, key, reason: "failed" });
   else deps.log({ type: "error", view: view.title, key, message: moved.error });
 }
@@ -325,7 +392,7 @@ async function parkAfterTimeout(input: PumpInput, key: string, deps: WatchDeps):
   const { view, watch, target } = input;
   const current = await deps.get(target, key);
   if (!current.ok || current.value.state !== watch.claim.to) return;
-  const moved = await deps.promote(target, key, watch.claim.manual, current.value.revision);
+  const moved = await parkRow(input, current.value, current.value.revision, "timeout", deps);
   if (moved.ok) deps.log({ type: "manual", view: view.title, key, reason: "timeout" });
 }
 

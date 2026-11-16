@@ -92,17 +92,37 @@ export interface WatchDeps {
   get(target: WatchTarget, key: string): Promise<WatchResult<WatchRow>>;
   /** States of every revision, oldest first — the only record of what already happened. */
   states(target: WatchTarget, key: string): Promise<WatchResult<string[]>>;
+  /**
+   * Writes a state change, optionally with fields.
+   *
+   * `fields` is optional because a claim carries none: only the moves the pump
+   * makes *on a person's behalf* (the automatic parks in `claim.manual`) have to
+   * leave a note — the TASK model makes `remarks` required on
+   * IN_PROGRESS → BLOCKED, and an empty one would fail the write and leave the
+   * row silently stuck in the claimed state.
+   */
   promote(
     target: WatchTarget,
     key: string,
     to: string,
     expectedRevision: number,
+    fields?: Record<string, unknown>,
   ): Promise<WatchResult<null>>;
   /** Type metadata, for the state-machine checks a view cannot answer on its own. */
   metadata(
     target: WatchTarget,
     type: string,
-  ): Promise<WatchResult<{ validStates: string[]; routes: { from: string; to: string }[] }>>;
+  ): Promise<
+    WatchResult<{
+      validStates: string[];
+      /**
+       * Routes and the fields each one requires. A move the pump makes on
+       * someone's behalf has to fill whatever the target route demands, and the
+       * field names come from here — never from this code.
+       */
+      routes: { from: string; to: string; requiredFields: string[] }[];
+    }>
+  >;
   startSession(runCwd: string, prompt: string, title: string): Promise<WatchResult<WatchSessionHandle>>;
   /**
    * True when the app itself has a running session in this directory.

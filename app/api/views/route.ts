@@ -6,6 +6,7 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "@/lib/mcp-call";
 import { readViewsConfig, type ViewDefinition } from "@/lib/views/config";
 import { checkOrderBy, declaredSortFields } from "@/lib/views/order-by";
+import { readTypeMetadata } from "@/lib/views/type-metadata";
 import { validate, watchViewStatus } from "@/lib/views/watch";
 import { dispatchGate } from "@/lib/views/watch/pump";
 import { describeGate } from "@/lib/views/watch/core";
@@ -143,21 +144,11 @@ async function watchStatusOf(
  * A sort key that does not exist is caught before the query, so a typo is not
  * discovered by paying for a failed round trip (`SSR-000066` AC-2).
  *
- * The type's field list is cached per endpoint + space + type: the panel asks
- * every 60 seconds per view, and a dozen views over one type must not become a
- * dozen metadata reads. A failure is remembered for a shorter while, so a
- * server that is briefly down does not cost a request per view per refresh —
- * and an unknown list (null) abstains, leaving the verdict to `list`.
+ * The document itself is cached per endpoint + space + type by
+ * `lib/views/type-metadata.ts` — the pump reads the same one for the fields a
+ * park has to fill, and two caches of one document only drift apart. An
+ * unknown field list (null) abstains, leaving the verdict to `list`.
  */
-const SORT_FIELD_TTL_MS = 5 * 60_000;
-const SORT_FIELD_FAILURE_TTL_MS = 30_000;
-
-interface SortFieldCacheEntry {
-  fields: string[] | null;
-  expiresAt: number;
-}
-
-const sortFieldCache = new Map<string, SortFieldCacheEntry>();
 
 /** The type a view reads, from its DQL; `null` when it names none. */
 function typeOf(dql: string): string | null {
@@ -170,18 +161,8 @@ async function sortFieldsFor(
   workspace: string,
   type: string,
 ): Promise<string[] | null> {
-  const key = `${target.url}\u0000${workspace}\u0000${type}`;
-  const now = Date.now();
-  const cached = sortFieldCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.fields;
-
-  const metadata = await callMcpTool(target, "get_metadata", { type });
-  const fields = metadata.ok ? declaredSortFields(metadata.value) : null;
-  sortFieldCache.set(key, {
-    fields,
-    expiresAt: now + (fields ? SORT_FIELD_TTL_MS : SORT_FIELD_FAILURE_TTL_MS),
-  });
-  return fields;
+  const metadata = await readTypeMetadata(target, workspace, type);
+  return metadata.ok ? declaredSortFields(metadata.value) : null;
 }
 
 /** Names the reason `orderBy` cannot be used, or null when it is fine. */

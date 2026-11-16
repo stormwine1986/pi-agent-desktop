@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 // js-yaml 5 ships named exports only (no default), so import the function.
 import { load as loadYaml } from "js-yaml";
+import { FILL_PLACEHOLDERS, unknownPlaceholders } from "./fill";
 
 /**
  * `.pi/views.yaml` in a workspace declares the to-do views shown in the right
@@ -18,6 +19,8 @@ import { load as loadYaml } from "js-yaml";
  *       order: desc                    # optional, asc | desc
  *       pageSize: 50                   # optional, 1–100
  *       notify: true                   # optional, default true: announce new entries
+ *       fill:                          # optional: what an automatic park has to write
+ *         remarks: "【自动】{{view}} 由派发泵写入：{{reason}}"
  *
  * Nothing here is prescriptive about which fields exist: `columns` is whatever
  * the workspace defines, and a column with no value renders empty rather than
@@ -96,7 +99,19 @@ export interface ViewWatch {
   intervalSec: number;
   timeoutMin: number;
   claim: WatchClaim;
+  /**
+   * Field name → template, for the fields an automatic move has to fill.
+   *
+   * The pump never names a field itself: it reads the target route's
+   * `requiredFields` from the type's metadata and sends only the intersection
+   * with what is configured here (`lib/views/fill.ts`). Empty = nothing to fill,
+   * which is what an unconfigured view sends today.
+   */
+  fill: ViewFill;
 }
+
+/** `watch.fill` — one template per field name. */
+export type ViewFill = Record<string, string>;
 
 /** A group as declared under the root `groups:`, for ordering and labels. */
 export interface ViewGroup {
@@ -275,6 +290,8 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
     problems.push("watch.maxFailures 已移除：没有重试，没做完的条目第一次失败就进 manual");
   }
 
+  const fill = parseFill(raw.fill, problems);
+
   if (problems.length > 0) return null;
   return {
     enabled,
@@ -284,7 +301,53 @@ function parseWatch(raw: unknown, projectDir: string, problems: string[]): ViewW
     timeoutMin,
     // `claim` cannot be null here: its absence is a problem, and problems returned above.
     claim: claim as WatchClaim,
+    fill,
   };
+}
+
+/**
+ * `watch.fill:` — field name → template string.
+ *
+ * Only the shape is checked here (a record of non-empty strings over the known
+ * placeholders). Whether the configured fields are the ones the route requires
+ * needs the type's metadata, so that half is decided by `validate()` — but a
+ * typo in a placeholder or an empty template is already knowable now, and
+ * leaving either for later would write a literal `{{kye}}` into an entity.
+ */
+function parseFill(raw: unknown, problems: string[]): ViewFill {
+  const fill: ViewFill = {};
+  if (raw === undefined || raw === null) return fill;
+  if (!isRecord(raw)) {
+    problems.push('watch.fill 必须是对象（字段名 → 模板字符串，如 fill: { <字段名>: "【自动】{{reason}}" }）');
+    return fill;
+  }
+
+  for (const [rawName, rawTemplate] of Object.entries(raw)) {
+    const name = rawName.trim();
+    if (!name) {
+      problems.push("watch.fill 里有空字段名：删掉这一项");
+      continue;
+    }
+    if (typeof rawTemplate !== "string") {
+      problems.push(`watch.fill.${name} 只能是模板字符串（写的是 ${JSON.stringify(rawTemplate)}）`);
+      continue;
+    }
+    const template = rawTemplate.trim();
+    if (!template) {
+      problems.push(`watch.fill.${name} 是空模板：写点内容，或删掉这一项`);
+      continue;
+    }
+    const unknown = unknownPlaceholders(template);
+    if (unknown.length > 0) {
+      const available = FILL_PLACEHOLDERS.map((placeholder) => `{{${placeholder}}}`).join("、");
+      problems.push(
+        `watch.fill.${name} 里的 ${unknown.map((placeholder) => `{{${placeholder}}}`).join("、")} 不是可用占位符（可用：${available}）`,
+      );
+      continue;
+    }
+    fill[name] = template;
+  }
+  return fill;
 }
 
 /**

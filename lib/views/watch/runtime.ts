@@ -5,6 +5,7 @@ import { callMcpTool, resolveMcpTarget, type McpHttpTarget } from "../../mcp-cal
 // runtime (DEFECT-000104). `lib/session-registry` reads the wrappers rpc-manager
 // owns through a structural view, so the gate costs no module load at all.
 import { hasBusyRpcSessionForCwd } from "../../session-registry";
+import { readTypeMetadata } from "../type-metadata";
 import { classifyPromotionFailure } from "./core";
 import { describeWatchRunLimit } from "./limit";
 import type { WatchDeps, WatchResult, WatchRow, WatchSessionHandle, WatchTarget } from "./core";
@@ -37,6 +38,45 @@ function toRow(raw: unknown): WatchRow | null {
 function targetOf(agentDir: string, target: WatchTarget): { ok: true; value: McpHttpTarget } | { ok: false; error: string } {
   const resolved = resolveMcpTarget(agentDir, target.panelCwd, target.server);
   return resolved.ok ? { ok: true, value: resolved.target } : { ok: false, error: resolved.error };
+}
+
+/**
+ * The two facts about a type's state machine the pump needs: the states, and the
+ * routes with the fields each one requires.
+ *
+ * `requiredFields` is read defensively and defaults to empty: a server that does
+ * not report it (or an older one) must not turn every park into an error. If the
+ * route really requires something, the base refuses the write and the failure is
+ * logged — loud, once, instead of a guess.
+ */
+function lifecycleOf(document: unknown): {
+  validStates: string[];
+  routes: { from: string; to: string; requiredFields: string[] }[];
+} {
+  const payload = document as
+    | { lifecycle?: { validStates?: unknown; routes?: unknown } }
+    | null
+    | undefined;
+  const validStates = Array.isArray(payload?.lifecycle?.validStates)
+    ? payload.lifecycle.validStates.filter((item): item is string => typeof item === "string")
+    : [];
+  const routes = Array.isArray(payload?.lifecycle?.routes)
+    ? (payload.lifecycle.routes as unknown[])
+        .map((route) => {
+          if (typeof route !== "object" || route === null) return null;
+          const record = route as Record<string, unknown>;
+          if (typeof record.from !== "string" || typeof record.to !== "string") return null;
+          return {
+            from: record.from,
+            to: record.to,
+            requiredFields: Array.isArray(record.requiredFields)
+              ? record.requiredFields.filter((field): field is string => typeof field === "string")
+              : [],
+          };
+        })
+        .filter((route): route is { from: string; to: string; requiredFields: string[] } => route !== null)
+    : [];
+  return { validStates, routes };
 }
 
 export function createLiveDeps(): WatchDeps {
@@ -89,7 +129,7 @@ export function createLiveDeps(): WatchDeps {
       return { ok: true, value: ordered.map((row) => row.state) };
     },
 
-    async promote(target, key, to, expectedRevision) {
+    async promote(target, key, to, expectedRevision, fields) {
       const resolved = targetOf(agentDir, target);
       if (!resolved.ok) return resolved;
       const result = await callMcpTool(resolved.value, "promotion", {
@@ -97,6 +137,9 @@ export function createLiveDeps(): WatchDeps {
         targetState: to,
         expectedRevision,
         idempotencyKey: `watch-${key}-${to}-${expectedRevision}-${crypto.randomUUID()}`,
+        // Passed through verbatim, and omitted entirely when absent: a claim
+        // sends exactly the arguments it always did.
+        ...(fields ? { fields } : {}),
       });
       if (!result.ok) {
         // One classification for every failed claim, so the pump cannot turn a
@@ -115,26 +158,11 @@ export function createLiveDeps(): WatchDeps {
     async metadata(target, type) {
       const resolved = targetOf(agentDir, target);
       if (!resolved.ok) return resolved;
-      const result = await callMcpTool(resolved.value, "get_metadata", { type });
+      // Same document, same cache as the panel's `orderBy` check: one
+      // `get_metadata` serves both readers (lib/views/type-metadata.ts).
+      const result = await readTypeMetadata(resolved.value, target.workspace, type);
       if (!result.ok) return { ok: false, error: result.error };
-      const payload = result.value as
-        | { lifecycle?: { validStates?: unknown; routes?: unknown } }
-        | undefined;
-      const validStates = Array.isArray(payload?.lifecycle?.validStates)
-        ? payload.lifecycle.validStates.filter((item): item is string => typeof item === "string")
-        : [];
-      const routes = Array.isArray(payload?.lifecycle?.routes)
-        ? (payload.lifecycle.routes as unknown[])
-            .map((route) => {
-              if (typeof route !== "object" || route === null) return null;
-              const record = route as Record<string, unknown>;
-              return typeof record.from === "string" && typeof record.to === "string"
-                ? { from: record.from, to: record.to }
-                : null;
-            })
-            .filter((route): route is { from: string; to: string } => route !== null)
-        : [];
-      return { ok: true, value: { validStates, routes } };
+      return { ok: true, value: lifecycleOf(result.value) };
     },
 
     async startSession(runCwd, prompt, title) {
