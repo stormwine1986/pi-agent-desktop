@@ -334,7 +334,7 @@ fields = { 每个 requiredField: render(fill[该字段], {key,type,view,reason,f
 | --- | --- |
 | 绿 | 配好了、本轮没有待派（到达间隔就接手） |
 | 黄 | 有活却没派出去：被闸门 / 全局上限挡住，或条目被状态机守卫拒绝，悬浮说明给原因 |
-| 没有 | 这条视图不派发（没配 `watch`，或 `enabled: false`） |
+| 没有 | 这条视图不派发：没配 `watch`（只读视图）。这是「不派发」的唯一含义 |
 | 红 | `enabled: false`（配置里关闭了派发）、七关没过、或上一轮真出错；悬浮说明指出缺什么 |
 
 文案里不出现 `watch` / `claim` / `intervalSec` 这类配置字段名（`plainReason` 会翻译成「待人工状态」「执行项目」
