@@ -19,15 +19,58 @@ export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; cus
     ));
 }
 
-export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
-  return block.type === "thinking" && !block.deferred && !options.isStreaming && block.thinking.trim() === "";
+/**
+ * A block the renderer can actually read: anything else (a stale `undefined`
+ * left behind by a streaming merge, `null`, a bare string) is dropped instead
+ * of crashing the whole page on `block.type` — DEFECT-000119.
+ */
+export function isAssistantContentBlock(value: unknown): value is AssistantContentBlock {
+  return typeof value === "object" && value !== null;
+}
+
+/** Content arrays arrive from live state as well as from disk, so narrow them here. */
+function assistantContentBlocks(content: unknown): AssistantContentBlock[] {
+  return Array.isArray(content) ? content.filter(isAssistantContentBlock) : [];
+}
+
+export function isEmptyThinkingBlock(
+  block: AssistantContentBlock | null | undefined,
+  options: DisplayOptions = {},
+): block is ThinkingContent {
+  // Not a block at all: nothing to hide, and nothing may be read off it.
+  if (!isAssistantContentBlock(block)) return false;
+  if (block.type !== "thinking" || block.deferred || options.isStreaming) return false;
+  const thinking = typeof block.thinking === "string" ? block.thinking : "";
+  return thinking.trim() === "";
 }
 
 export function getDisplayableAssistantBlocks(
   message: AssistantMessage,
   options: DisplayOptions = {},
 ): AssistantContentBlock[] {
-  return (message.content ?? []).filter((block) => !isEmptyThinkingBlock(block, options));
+  return assistantContentBlocks(message.content).filter((block) => !isEmptyThinkingBlock(block, options));
+}
+
+export interface AssistantBlockItem {
+  block: AssistantContentBlock;
+  originalIndex: number;
+}
+
+/**
+ * What the assistant view actually renders, in one place: non-blocks dropped,
+ * empty streaming thinking hidden, original indices kept for keys/durations.
+ */
+export function getAssistantBlockItems(
+  message: AssistantMessage,
+  options: DisplayOptions = {},
+): AssistantBlockItem[] {
+  const items: AssistantBlockItem[] = [];
+  const content: unknown[] = Array.isArray(message.content) ? message.content : [];
+  content.forEach((block, originalIndex) => {
+    if (!isAssistantContentBlock(block) || isEmptyThinkingBlock(block, options)) return;
+    items.push({ block, originalIndex });
+  });
+  return items;
 }
 
 export function getAssistantErrorMessage(
@@ -52,8 +95,8 @@ export function isAssistantTruncated(
 
 /** Text, an image, or a tool call is an answer. Thinking alone is not. */
 export function hasAssistantAnswer(message: AssistantMessage): boolean {
-  return (message.content ?? []).some((block) => {
-    if (block.type === "text") return block.text.trim().length > 0;
+  return assistantContentBlocks(message.content).some((block) => {
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
     return block.type === "image" || block.type === "toolCall";
   });
 }
@@ -78,5 +121,5 @@ export function splitFinalAssistantBlocks(
 }
 
 export function countToolCallBlocks(blocks: AssistantContentBlock[]): number {
-  return blocks.filter((block): block is ToolCallContent => block.type === "toolCall").length;
+  return blocks.filter(isAssistantContentBlock).filter((block): block is ToolCallContent => block.type === "toolCall").length;
 }

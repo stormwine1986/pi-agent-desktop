@@ -9,7 +9,7 @@ import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { useDiffViewMode } from "@/hooks/useDiffViewMode";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
+import { getAssistantBlockItems, getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantContentBlock, isAssistantTruncated } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
 import { applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText, parseApplyPatchInput } from "@/lib/apply-patch";
 import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
@@ -58,7 +58,8 @@ interface TokenEstimateCacheEntry {
   tokens: number;
 }
 
-export function getTokenEstimateText(block: AssistantContentBlock): string | null {
+export function getTokenEstimateText(block: AssistantContentBlock | null | undefined): string | null {
+  if (!isAssistantContentBlock(block)) return null;
   if (block.type === "text") return block.text;
   if (block.type === "thinking") return block.thinking;
   if (block.type === "toolCall") return block.rawInput ?? JSON.stringify(block.input ?? {}) ?? "";
@@ -282,6 +283,7 @@ function haveSameRelevantToolResults(
 ): boolean {
   if (previous === next || message.role !== "assistant") return true;
   for (const block of (message as AssistantMessage).content ?? []) {
+    if (!isAssistantContentBlock(block)) continue;
     if (block.type === "toolCall" && previous?.get(block.toolCallId) !== next?.get(block.toolCallId)) {
       return false;
     }
@@ -678,9 +680,10 @@ function AssistantMessageView({
 }) {
   const { t, locale } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
-  const blockItems = useMemo(() => (message.content ?? [])
-    .map((block, originalIndex) => ({ block, originalIndex }))
-    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming })), [message.content, isStreaming]);
+  const blockItems = useMemo(
+    () => getAssistantBlockItems(message, { isStreaming }),
+    [message.content, isStreaming],
+  );
   const blocks = useMemo(() => blockItems.map(({ block }) => block), [blockItems]);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const truncated = isAssistantTruncated(message, { isStreaming });

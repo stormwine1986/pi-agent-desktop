@@ -692,3 +692,31 @@ test("keeps the registered name where no result names the server and tool", (t) 
   });
   assert.match(textOf(html), /mcp__docs_v2__search_pages\{\}/);
 });
+
+// DEFECT-000119: one stale `undefined` in an assistant message's live content
+// array took the whole session page down ("Cannot read properties of undefined
+// (reading 'type')"). Rendering must skip such blocks, not trust the array.
+test("renders an assistant message whose content holds non-object blocks", () => {
+  const message = {
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    timestamp: 1,
+    content: [
+      undefined,
+      null,
+      "a bare string",
+      { type: "thinking", thinking: "" },
+      { type: "text", text: "still readable" },
+    ],
+  };
+
+  const html = renderMessage(message);
+  assert.match(textOf(html), /still readable/);
+  assert.doesNotMatch(html, /a bare string/);
+  // The copy button only appears for real text, which proves the blocks reached the view.
+  assert.match(html, /still readable/);
+
+  // No hard throw at all, even when nothing in the array is a block.
+  assert.doesNotThrow(() => renderMessage({ ...message, content: [undefined, null, 42] }));
+});
